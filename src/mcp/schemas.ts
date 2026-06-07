@@ -79,7 +79,7 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "get_runtime_snapshot",
-    description: "Read stack, scopes, locals, arguments, and object fields from the current stopped frame.",
+    description: "Read a progressive runtime snapshot. Defaults to focused stack + arguments/locals/receiver; request full/custom for globals, closures, statics, modules, and runtime scopes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -87,11 +87,53 @@ export const toolDefinitions: ToolDefinition[] = [
         threadId: { type: "number" },
         frameId: { type: "number" },
         frameIndex: { type: "number", default: 0 },
-        maxDepth: { type: "number", default: 3 },
-        maxItems: { type: "number", default: 50 },
+        profile: { type: "string", enum: ["focused", "locals", "full", "custom"], default: "focused" },
+        includeCategories: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["arguments", "locals", "receiver", "closures", "globals", "statics", "module", "runtime", "other"]
+          },
+          description: "Normalized cross-language scope categories to include when profile is custom."
+        },
+        includeScopes: {
+          type: "array",
+          items: { type: "string" },
+          description: "Raw adapter scope names to include, such as Locals, Globals, Closure, or Static Fields."
+        },
+        objectFields: {
+          type: "string",
+          enum: ["none", "preview", "shallow", "deep"],
+          default: "preview",
+          description: "Controls object field expansion. Focused snapshots should prefer preview."
+        },
+        maxDepth: { type: "number", default: 1 },
+        maxItems: { type: "number", default: 10 },
         maxStringLength: { type: "number", default: 2000 }
       },
       required: ["sessionId"]
+    }
+  },
+  {
+    name: "inspect_variable",
+    description: "Expand a single DAP variablesReference for targeted drill-down instead of requesting a full snapshot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId,
+        variablesReference: { type: "number" },
+        start: { type: "number", default: 0 },
+        count: { type: "number" },
+        objectFields: {
+          type: "string",
+          enum: ["none", "preview", "shallow", "deep"],
+          default: "deep"
+        },
+        maxDepth: { type: "number", default: 1 },
+        maxItems: { type: "number", default: 20 },
+        maxStringLength: { type: "number", default: 2000 }
+      },
+      required: ["sessionId", "variablesReference"]
     }
   },
   {
@@ -192,5 +234,55 @@ export const toolDefinitions: ToolDefinition[] = [
     name: "ide_status",
     description: "Return IDE Bridge status and connected IDE clients.",
     inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "list_ide_sessions",
+    description: "List debug sessions reported by connected IDE plugins.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        clientId: { type: "string" },
+        workspace: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "adopt_ide_session",
+    description: "Adopt an existing IDE debug session as a BreakPilot session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        clientId: { type: "string" },
+        ideSessionId: { type: "string" },
+        workspace: { type: "string" },
+        lang: { type: "string" },
+        mode: { type: "string", enum: ["ide", "hybrid"], default: "ide" },
+        owner: { type: "string", enum: ["ide", "hybrid"], default: "hybrid" }
+      }
+    }
+  },
+  {
+    name: "get_active_breakpoint_context",
+    description: "Adopt or use the active paused IDE session and return the current breakpoint context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId,
+        clientId: { type: "string" },
+        ideSessionId: { type: "string" },
+        workspace: { type: "string" },
+        timeoutMs: { type: "number", default: 1000 },
+        frameIndex: { type: "number", default: 0 },
+        profile: { type: "string", enum: ["focused", "locals", "full", "custom"], default: "focused" },
+        objectFields: {
+          type: "string",
+          enum: ["none", "preview", "shallow", "deep"],
+          default: "preview"
+        },
+        maxDepth: { type: "number", default: 1 },
+        maxItems: { type: "number", default: 10 },
+        maxStringLength: { type: "number", default: 2000 }
+      }
+    }
   }
 ];

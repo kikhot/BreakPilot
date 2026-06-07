@@ -39,7 +39,11 @@ export class SessionStore {
       owner: session.owner,
       state: session.state,
       createdAt: session.createdAt,
-      workspaceRoot: session.workspaceRoot
+      workspaceRoot: session.workspaceRoot,
+      providerKind: session.providerKind,
+      ideClientId: session.ideClientId,
+      ideSessionId: session.ideSessionId,
+      capabilities: session.provider.capabilities
     }));
   }
 }

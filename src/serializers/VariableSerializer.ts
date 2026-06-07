@@ -1,5 +1,6 @@
 import type {
   DapVariable,
+  ObjectFieldsMode,
   SerializedVariable,
   SerializedVariableMap,
   VariableKind,
@@ -30,11 +31,17 @@ export class VariableSerializer {
   session: DapSession;
   limits: Required<VariableLimits>;
   redactor: Redactor;
+  objectFields: ObjectFieldsMode;
 
-  constructor(session: DapSession, limits: Required<VariableLimits>) {
+  constructor(
+    session: DapSession,
+    limits: Required<VariableLimits>,
+    options: { objectFields?: ObjectFieldsMode } = {}
+  ) {
     this.session = session;
     this.limits = limits;
     this.redactor = new Redactor(limits.redactPatterns);
+    this.objectFields = options.objectFields ?? "deep";
   }
 
   async serializeVariables(
@@ -86,7 +93,13 @@ export class VariableSerializer {
       return result;
     }
 
-    if (depth >= this.limits.maxDepth) {
+    if (this.objectFields === "none" || this.objectFields === "preview") {
+      result.truncated = true;
+      return result;
+    }
+
+    const maxDepth = this.objectFields === "shallow" ? 1 : this.limits.maxDepth;
+    if (depth >= maxDepth) {
       result.truncated = true;
       result.value = {};
       return result;

@@ -9,7 +9,9 @@
   "id": "msg_001",
   "type": "agent_set_breakpoint",
   "timestamp": "2026-06-04T08:00:00.000Z",
-  "sessionId": "sess_001"
+  "sessionId": "sess_001",
+  "clientId": "ide_001",
+  "ideSessionId": "idea_ab12"
 }
 ```
 
@@ -31,13 +33,17 @@
 | `ide_heartbeat` | IDE -> MCP | 保活 |
 | `ide_capabilities` | IDE -> MCP | 能力协商 |
 | `ide_session_started` | IDE -> MCP | IDE debug session 启动 |
-| `ide_session_stopped` | IDE -> MCP | IDE session 暂停 |
+| `ide_session_paused` | IDE -> MCP | IDE session 暂停 |
+| `ide_session_resumed` | IDE -> MCP | IDE session 继续运行 |
+| `ide_session_stopped` | IDE -> MCP | 兼容旧协议的暂停事件 |
 | `ide_session_terminated` | IDE -> MCP | IDE session 结束 |
 | `ide_breakpoint_added` | IDE -> MCP | 用户或插件添加断点 |
 | `ide_breakpoint_removed` | IDE -> MCP | 用户删除断点 |
 | `ide_breakpoint_changed` | IDE -> MCP | 条件或位置变化 |
 | `ide_breakpoint_hit` | IDE -> MCP | 命中断点 |
+| `ide_stack_snapshot` | IDE -> MCP | IDE 调用栈快照 |
 | `ide_variables_snapshot` | IDE -> MCP | IDE 变量快照 |
+| `ide_command_result` | IDE -> MCP | continue/step/evaluate/stop 执行结果 |
 | `agent_set_breakpoint` | MCP -> IDE | Agent 设置断点 |
 | `agent_remove_breakpoint` | MCP -> IDE | Agent 删除断点 |
 | `agent_request_variables` | MCP -> IDE | 请求 IDE 变量快照 |
@@ -45,6 +51,7 @@
 | `agent_step_over` | MCP -> IDE | 请求 step over |
 | `agent_step_into` | MCP -> IDE | 请求 step into |
 | `agent_step_out` | MCP -> IDE | 请求 step out |
+| `agent_evaluate` | MCP -> IDE | 请求 IDE evaluator 求值 |
 | `agent_stop_debug` | MCP -> IDE | 请求停止 |
 | `user_confirm_continue` | IDE -> MCP | 用户确认 |
 | `user_reject_continue` | IDE -> MCP | 用户拒绝 |
@@ -58,13 +65,36 @@
 ```json
 {
   "type": "ide_register",
-  "ide": "vscode",
+  "ide": "idea",
   "workspaceRoot": "/path/to/project",
   "capabilities": {
     "visualBreakpoints": true,
     "debugCommands": true,
     "confirmationDialog": true,
-    "variableSnapshot": "poc-required"
+    "variableSnapshot": true,
+    "provider": "xdebugger"
+  }
+}
+```
+
+### `ide_session_paused`
+
+```json
+{
+  "type": "ide_session_paused",
+  "clientId": "ide_001",
+  "ideSessionId": "idea_ab12",
+  "workspaceRoot": "/path/to/project",
+  "name": "Debug Application",
+  "state": "paused",
+  "threadId": 0,
+  "topFrame": {
+    "id": 1234,
+    "name": "XStackFrame",
+    "line": 42,
+    "source": {
+      "path": "/path/to/project/src/App.java"
+    }
   }
 }
 ```
@@ -74,7 +104,9 @@
 ```json
 {
   "type": "agent_set_breakpoint",
+  "requestId": "ide_req_001",
   "sessionId": "sess_001",
+  "ideSessionId": "idea_ab12",
   "workspaceRoot": "/path/to/project",
   "breakpoint": {
     "id": "bp_001",
@@ -105,6 +137,7 @@
   "type": "agent_request_variables",
   "requestId": "ide_snapshot_001",
   "sessionId": "sess_001",
+  "ideSessionId": "idea_ab12",
   "options": {
     "maxDepth": 3,
     "maxItems": 20
@@ -119,6 +152,7 @@
   "type": "ide_variables_snapshot",
   "requestId": "ide_snapshot_001",
   "sessionId": "sess_001",
+  "ideSessionId": "idea_ab12",
   "snapshot": {
     "source": "ide",
     "ide": "vscode",
@@ -136,6 +170,7 @@
   "type": "user_confirm_continue",
   "confirmationId": "confirm_001",
   "sessionId": "sess_001",
+  "ideSessionId": "idea_ab12",
   "action": "continue"
 }
 ```

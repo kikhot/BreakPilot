@@ -25,6 +25,9 @@ In another terminal:
 ```bash
 node --experimental-strip-types src/cli.ts tools
 node --experimental-strip-types src/cli.ts ide status --pretty
+node --experimental-strip-types src/cli.ts ide sessions --pretty
+node --experimental-strip-types src/cli.ts ide adopt --ide-session idea_ab12 --pretty
+node --experimental-strip-types src/cli.ts ide context --ide-session idea_ab12 --pretty
 ```
 
 For MCP stdio integration:
@@ -47,6 +50,10 @@ node dist/src/cli.js tools
 - `set_breakpoint`
 - `wait_for_breakpoint`
 - `get_runtime_snapshot`
+- `inspect_variable`
+- `list_ide_sessions`
+- `adopt_ide_session`
+- `get_active_breakpoint_context`
 - `evaluate`
 - `continue_execution`
 

@@ -22,9 +22,10 @@ debug-mcp serve --http-port 27890 --ide-bridge-port 27891
 
 ```bash
 debug-mcp attach --lang python --host 127.0.0.1 --port 5678 --pretty
-debug-mcp bp set --session sess_001 --file examples/flask/app.py --line 14 --pretty
+debug-mcp bp set --session sess_001 --file examples/flask/app.py --line 12 --pretty
 debug-mcp wait --session sess_001 --timeout 30000 --pretty
-debug-mcp snapshot --session sess_001 --depth 3 --max-items 20 --pretty
+debug-mcp snapshot --session sess_001 --profile focused --max-items 10 --pretty
+debug-mcp inspect-variable --session sess_001 --ref 7 --depth 1 --max-items 20 --pretty
 debug-mcp eval --session sess_001 --mode readonly order["discount"] --pretty
 debug-mcp continue --session sess_001 --pretty
 debug-mcp disconnect --session sess_001 --pretty
@@ -38,7 +39,7 @@ curl -X POST http://127.0.0.1:5000/order \
   -d '{"amount": 100, "discount": "10"}'
 ```
 
-Agent 应该从 snapshot 看到 `discount` 是字符串，修复为显式数值转换，然后重新 curl 或 pytest 验证。
+Agent 应该先从 focused snapshot 的当前帧关键变量里看到 `discount` 是字符串。如果某个对象只显示 preview，就用 `inspect-variable` 按 `variablesReference` 定向展开，而不是直接请求 full snapshot。确认问题后修复为显式数值转换，然后重新 curl 或 pytest 验证。
 
 ## IDE 协同消息流
 

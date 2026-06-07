@@ -7,6 +7,8 @@ export type AnyRecord = Record<string, any>;
 
 export type DebugLanguage = "python" | "node" | "typescript" | "java" | string;
 export type DebugMode = "headless" | "ide" | "hybrid" | string;
+export type RuntimeProviderKind = "dap" | "ide" | string;
+export type RuntimeStepKind = "over" | "into" | "out";
 export type SessionOwnerValue = "mcp" | "ide" | "hybrid" | string;
 export type SessionStateValue =
   | "created"
@@ -70,6 +72,20 @@ export interface VariableLimits {
   redactPatterns?: string[];
 }
 
+export type SnapshotProfile = "focused" | "locals" | "full" | "custom" | string;
+export type ObjectFieldsMode = "none" | "preview" | "shallow" | "deep" | string;
+export type ScopeCategory =
+  | "arguments"
+  | "locals"
+  | "receiver"
+  | "closures"
+  | "globals"
+  | "statics"
+  | "module"
+  | "runtime"
+  | "other"
+  | string;
+
 export type VariableKind =
   | "primitive"
   | "object"
@@ -101,15 +117,39 @@ export interface RuntimeSnapshot {
   sessionId: string;
   source: "headless" | "ide";
   language: DebugLanguage;
+  profile?: SnapshotProfile;
   threadId: number | null;
   frameId: number | null;
   stackFrames: DapStackFrame[];
   variables: Record<string, {
     name: string;
+    category?: ScopeCategory;
+    rawScopes?: string[];
     expensive: boolean;
     variables: SerializedVariableMap;
   }>;
+  availableCategories?: ScopeCategory[];
+  omittedCategories?: ScopeCategory[];
+  availableScopes?: string[];
+  omittedScopes?: string[];
+  scopeMetadata?: ScopeMetadata[];
   limits: Pick<Required<VariableLimits>, "maxDepth" | "maxItems" | "maxStringLength">;
+}
+
+export interface InspectVariableResult extends AnyRecord {
+  variablesReference?: number;
+  start?: number;
+  count?: number;
+  variables?: SerializedVariableMap;
+  snapshot?: RuntimeSnapshot | AnyRecord;
+}
+
+export interface ScopeMetadata {
+  rawName: string;
+  category: ScopeCategory;
+  included: boolean;
+  expensive: boolean;
+  variablesReference: number;
 }
 
 export interface DapTransport {
@@ -190,6 +230,24 @@ export interface StoppedEvent {
   [key: string]: any;
 }
 
+export interface RuntimeDebugProvider {
+  kind: RuntimeProviderKind;
+  sessionId: string;
+  language: DebugLanguage;
+  workspaceRoot: string;
+  capabilities: AnyRecord;
+  threadId: number | null;
+  setBreakpoints(filePath: string, breakpoints: BreakpointRecord[]): Promise<DapBreakpoint[]>;
+  removeBreakpoint?(breakpoint: BreakpointRecord): Promise<AnyRecord>;
+  waitForBreakpoint(timeoutMs?: number): Promise<StoppedEvent>;
+  getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot>;
+  inspectVariable?(args: AnyRecord, limits: Required<VariableLimits>): Promise<InspectVariableResult | AnyRecord>;
+  evaluate(expression: string, options?: AnyRecord): Promise<AnyRecord>;
+  continue(threadId?: number | null): Promise<AnyRecord>;
+  step(kind: RuntimeStepKind, threadId?: number | null): Promise<AnyRecord>;
+  disconnect(options?: { terminateDebuggee?: boolean; restart?: boolean }): Promise<AnyRecord>;
+}
+
 export interface BreakpointInput {
   id?: string;
   file: string;
@@ -218,6 +276,9 @@ export interface SessionSummary {
   state: SessionStateValue;
   createdAt?: string;
   workspaceRoot: string;
+  providerKind?: RuntimeProviderKind;
+  ideClientId?: string;
+  ideSessionId?: string;
   capabilities?: AnyRecord;
 }
 
@@ -229,24 +290,48 @@ export interface DebugSessionRecord {
   owner: SessionOwnerValue;
   state: SessionStateValue;
   createdAt: string;
-  dap: DapSession;
+  providerKind: RuntimeProviderKind;
+  provider: RuntimeDebugProvider;
+  dap?: DapSession;
+  ideClientId?: string;
+  ideSessionId?: string;
 }
 
 export interface BridgeMessage {
   id?: string;
   type: string;
+  clientId?: string;
   sessionId?: string;
+  ideSessionId?: string;
   workspaceRoot?: string;
   breakpoint?: BreakpointRecord | BreakpointInput | AnyRecord;
   breakpointId?: string;
   confirmationId?: string;
   action?: string;
+  command?: string;
   requestId?: string;
   options?: AnyRecord;
   snapshot?: AnyRecord;
   ide?: string;
   capabilities?: AnyRecord;
+  error?: AnyRecord;
   [key: string]: any;
+}
+
+export interface IdeDebugSessionInfo {
+  ideSessionId: string;
+  clientId: string;
+  workspaceRoot?: string;
+  name?: string;
+  language?: DebugLanguage;
+  state: SessionStateValue;
+  active?: boolean;
+  threadId?: number | null;
+  stopped?: StoppedEvent | AnyRecord;
+  topFrame?: DapStackFrame | AnyRecord;
+  capabilities?: AnyRecord;
+  startedAt: string;
+  updatedAt: string;
 }
 
 export interface IdeClientInfo {
@@ -256,6 +341,7 @@ export interface IdeClientInfo {
   capabilities: AnyRecord;
   connectedAt: string;
   lastHeartbeatAt: string;
+  sessions?: IdeDebugSessionInfo[];
 }
 
 export interface ToolDefinition {

@@ -6,12 +6,19 @@ import { loadPolicy } from "./security/PolicyLoader.ts";
 import { stableJson } from "./utils/json.ts";
 
 type CliFlagValue = string | boolean;
-type CliFlags = Record<string, CliFlagValue | undefined>;
+type CliFlags = Record<string, CliFlagValue | string[] | undefined>;
 type ToolCommand = [string | null, AnyRecord | null];
 
 function stringFlag(flags: CliFlags, key: string): string | undefined {
   const value = flags[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function stringArrayFlag(flags: CliFlags, key: string): string[] | undefined {
+  const value = flags[key];
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") return [value];
+  return undefined;
 }
 
 function parseFlags(tokens: string[]): { flags: CliFlags; positional: string[] } {
@@ -29,15 +36,22 @@ function parseFlags(tokens: string[]): { flags: CliFlags; positional: string[] }
     if (!next || next.startsWith("--")) {
       flags[key] = true;
     } else {
-      flags[key] = next;
+      const existing = flags[key];
+      if (Array.isArray(existing)) {
+        existing.push(next);
+      } else if (typeof existing === "string") {
+        flags[key] = [existing, next];
+      } else {
+        flags[key] = next;
+      }
       i += 1;
     }
   }
   return { flags, positional };
 }
 
-function numberOrUndefined(value: CliFlagValue | undefined): number | undefined {
-  if (value === undefined) return undefined;
+function numberOrUndefined(value: CliFlagValue | string[] | undefined): number | undefined {
+  if (value === undefined || Array.isArray(value)) return undefined;
   const parsed = Number(value);
   return Number.isNaN(parsed) ? undefined : parsed;
 }
@@ -48,7 +62,7 @@ function splitArgs(value: CliFlagValue | string[] | undefined): string[] {
   return String(value).split(" ").filter(Boolean);
 }
 
-function optionalSplitArgs(value: CliFlagValue | undefined): string[] | undefined {
+function optionalSplitArgs(value: CliFlagValue | string[] | undefined): string[] | undefined {
   const args = splitArgs(value);
   return args.length > 0 ? args : undefined;
 }
@@ -150,8 +164,28 @@ function toolFromCommand(
         sessionId: stringFlag(flags, "session"),
         threadId: numberOrUndefined(flags.thread),
         frameId: numberOrUndefined(flags.frame),
+        profile: stringFlag(flags, "profile"),
+        includeCategories: stringArrayFlag(flags, "category"),
+        includeScopes: stringArrayFlag(flags, "scope"),
+        objectFields: stringFlag(flags, "objects"),
         maxDepth: numberOrUndefined(flags.depth),
-        maxItems: numberOrUndefined(flags["max-items"])
+        maxItems: numberOrUndefined(flags["max-items"]),
+        maxStringLength: numberOrUndefined(flags["max-string-length"])
+      }
+    ];
+  }
+  if (command === "inspect-variable") {
+    return [
+      "inspect_variable",
+      {
+        sessionId: stringFlag(flags, "session"),
+        variablesReference: numberOrUndefined(flags.ref),
+        start: numberOrUndefined(flags.start),
+        count: numberOrUndefined(flags.count),
+        objectFields: stringFlag(flags, "objects") ?? "deep",
+        maxDepth: numberOrUndefined(flags.depth),
+        maxItems: numberOrUndefined(flags["max-items"]),
+        maxStringLength: numberOrUndefined(flags["max-string-length"])
       }
     ];
   }
@@ -193,6 +227,46 @@ function toolFromCommand(
   if (command === "ide" && subcommand === "status") {
     return ["ide_status", {}];
   }
+  if (command === "ide" && subcommand === "sessions") {
+    return [
+      "list_ide_sessions",
+      {
+        clientId: stringFlag(flags, "client"),
+        workspace: stringFlag(flags, "workspace")
+      }
+    ];
+  }
+  if (command === "ide" && subcommand === "adopt") {
+    return [
+      "adopt_ide_session",
+      {
+        clientId: stringFlag(flags, "client"),
+        ideSessionId: stringFlag(flags, "ide-session"),
+        workspace: stringFlag(flags, "workspace"),
+        lang: stringFlag(flags, "lang"),
+        mode: stringFlag(flags, "mode"),
+        owner: stringFlag(flags, "owner")
+      }
+    ];
+  }
+  if (command === "ide" && subcommand === "context") {
+    return [
+      "get_active_breakpoint_context",
+      {
+        sessionId: stringFlag(flags, "session"),
+        clientId: stringFlag(flags, "client"),
+        ideSessionId: stringFlag(flags, "ide-session"),
+        workspace: stringFlag(flags, "workspace"),
+        timeoutMs: numberOrUndefined(flags.timeout),
+        frameIndex: numberOrUndefined(flags.frame),
+        profile: stringFlag(flags, "profile"),
+        objectFields: stringFlag(flags, "objects"),
+        maxDepth: numberOrUndefined(flags.depth),
+        maxItems: numberOrUndefined(flags["max-items"]),
+        maxStringLength: numberOrUndefined(flags["max-string-length"])
+      }
+    ];
+  }
   return [null, null];
 }
 
@@ -209,14 +283,19 @@ function help(): AnyRecord {
       "bp remove --session sess_001 --id bp_001",
       "bp list --session sess_001",
       "wait --session sess_001 --timeout 30000",
-      "snapshot --session sess_001 --depth 3 --max-items 20",
+      "snapshot --session sess_001 --profile focused --category locals --depth 1 --max-items 10",
+      "snapshot --session sess_001 --profile full --depth 3 --max-items 20",
+      "inspect-variable --session sess_001 --ref 7 --depth 1 --max-items 20",
       "eval --session sess_001 --mode readonly order.customer.name",
       "continue --session sess_001",
       "step-over --session sess_001",
       "step-into --session sess_001",
       "step-out --session sess_001",
       "disconnect --session sess_001",
-      "ide status"
+      "ide status",
+      "ide sessions",
+      "ide adopt --ide-session idea_001",
+      "ide context --ide-session idea_001 --profile focused"
     ]
   };
 }

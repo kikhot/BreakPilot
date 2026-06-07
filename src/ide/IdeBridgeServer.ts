@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
-import type { AnyRecord, BridgeMessage, IdeClientInfo } from "../types.ts";
+import type { BridgeMessage, IdeClientInfo, IdeDebugSessionInfo } from "../types.ts";
 import { AuditLogger } from "../audit/AuditLogger.ts";
 import { IdeClientRegistry } from "./IdeClientRegistry.ts";
 import { IdeMessageTypes, makeBridgeMessage } from "./IdeProtocol.ts";
@@ -32,6 +32,7 @@ export interface IdeBridgeStatus {
   host: string;
   port: number;
   clients: IdeClientInfo[];
+  sessions: IdeDebugSessionInfo[];
 }
 
 function encodeFrame(text: string): Buffer {
@@ -164,12 +165,30 @@ export class IdeBridgeServer extends EventEmitter {
     for (const socket of this.registry.sockets()) this.#send(socket, payload);
   }
 
+  sendToClient(clientId: string | undefined, message: Partial<BridgeMessage>): boolean {
+    const socket = this.registry.socketForClient(clientId);
+    if (!socket) return false;
+    this.#send(socket, makeBridgeMessage(String(message.type), { ...message, clientId }));
+    return true;
+  }
+
+  sendToSession(ideSessionId: string | undefined, message: Partial<BridgeMessage>): boolean {
+    const session = this.registry.findSession(ideSessionId);
+    if (!session) return false;
+    return this.sendToClient(session.clientId, {
+      ...message,
+      ideSessionId: session.ideSessionId,
+      workspaceRoot: session.workspaceRoot
+    });
+  }
+
   status(): IdeBridgeStatus {
     return {
       enabled: true,
       host: this.host,
       port: this.port,
-      clients: this.registry.list()
+      clients: this.registry.list(),
+      sessions: this.registry.listSessions()
     };
   }
 
@@ -190,6 +209,7 @@ export class IdeBridgeServer extends EventEmitter {
 
   #handleMessage(socket: Socket, message: BridgeMessage): void {
     const clientId = this.socketClientIds.get(socket);
+    if (clientId) message.clientId = clientId;
     if (message.type === IdeMessageTypes.IDE_REGISTER) {
       this.registry.update(clientId, {
         ide: message.ide,
@@ -200,6 +220,18 @@ export class IdeBridgeServer extends EventEmitter {
     } else if (message.type === IdeMessageTypes.IDE_HEARTBEAT) {
       this.registry.update(clientId, { lastHeartbeatAt: new Date().toISOString() });
       this.#send(socket, makeBridgeMessage("ide_heartbeat_ack", { clientId }));
+    } else if (message.type === IdeMessageTypes.IDE_SESSION_STARTED) {
+      this.registry.upsertSession(clientId, message, "running");
+    } else if (
+      message.type === IdeMessageTypes.IDE_SESSION_PAUSED ||
+      message.type === IdeMessageTypes.IDE_SESSION_STOPPED ||
+      message.type === IdeMessageTypes.IDE_BREAKPOINT_HIT
+    ) {
+      this.registry.upsertSession(clientId, message, "paused");
+    } else if (message.type === IdeMessageTypes.IDE_SESSION_RESUMED) {
+      this.registry.upsertSession(clientId, message, "running");
+    } else if (message.type === IdeMessageTypes.IDE_SESSION_TERMINATED) {
+      this.registry.upsertSession(clientId, message, "terminated");
     }
     this.audit?.record("ide_bridge_message", { clientId, type: message.type });
     this.emit("message", { clientId, message });
