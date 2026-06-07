@@ -1,0 +1,53 @@
+workspace:
+  root: .
+  allowOutsideWorkspace: false
+
+network:
+  allowedHosts:
+    - 127.0.0.1
+    - localhost
+  allowedPorts:
+    - 5678
+    - 9229
+    - 5005
+
+ide:
+  enabled: true
+  preferredMode: hybrid
+  bridge:
+    host: 127.0.0.1
+    port: 27891
+  requireUserConfirmation:
+    continueAfterBreakpoint: true
+    unsafeEvaluate: true
+    attachRemote: true
+  confirmationTimeoutMs: 30000
+  defaultOnTimeout: continue
+
+evaluate:
+  defaultMode: readonly
+  allowFunctionCalls: false
+  requireConfirmationForUnsafe: true
+  timeoutMs: 1000
+
+variables:
+  maxDepth: 3
+  maxItems: 50
+  maxStringLength: 2000
+  redactPatterns:
+    - password
+    - token
+    - secret
+    - key
+    - authorization
+    - cookie
+    - credential
+
+runtime:
+  maxPauseMs: 30000
+  autoContinue: true
+  forbidProduction: true
+
+audit:
+  enabled: true
+  file: .debug-mcp/audit.log
