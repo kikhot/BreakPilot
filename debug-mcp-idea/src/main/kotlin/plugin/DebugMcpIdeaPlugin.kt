@@ -3,23 +3,45 @@ package plugin
 import bridge.BridgeClient
 import debugger.BreakpointSync
 import debugger.CommandExecutor
+import debugger.IdeSessionTracker
+import debugger.VariableReader
 import ui.showBreakpointConfirmation
-import com.intellij.openapi.components.ProjectComponent
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.components.Service
+import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.startup.StartupActivity
 
-class DebugMcpIdeaPlugin(private val project: Project) : ProjectComponent {
+class DebugMcpIdeaPlugin : StartupActivity.DumbAware {
+    override fun runActivity(project: Project) {
+        project.service<DebugMcpIdeaProjectService>()
+    }
+}
+
+@Service(Service.Level.PROJECT)
+class DebugMcpIdeaProjectService(private val project: Project) : Disposable {
     private val bridge = BridgeClient(project)
+    private val tracker = IdeSessionTracker(project, bridge)
+    private val variableReader = VariableReader(project, tracker)
     private val breakpoints = BreakpointSync(project, bridge)
-    private val commands = CommandExecutor(project)
+    private val commands = CommandExecutor(project, bridge, tracker, variableReader)
 
-    override fun projectOpened() {
+    init {
         bridge.onMessage { message ->
             breakpoints.handle(message)
             commands.handle(message)
+            if (message.type == "agent_request_variables") {
+                variableReader.handle(message, bridge)
+            }
             if (message.type == "agent_request_confirmation") {
                 showBreakpointConfirmation(bridge, message)
             }
         }
+        tracker.start()
         bridge.connect()
+    }
+
+    override fun dispose() {
+        bridge.dispose()
     }
 }

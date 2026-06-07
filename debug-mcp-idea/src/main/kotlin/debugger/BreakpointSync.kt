@@ -8,6 +8,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.xdebugger.XDebuggerManager
 import com.intellij.xdebugger.breakpoints.XBreakpoint
+import com.intellij.xdebugger.breakpoints.XBreakpointProperties
 import com.intellij.xdebugger.breakpoints.XLineBreakpointType
 
 class BreakpointSync(
@@ -18,28 +19,84 @@ class BreakpointSync(
 
     fun handle(message: BridgeMessage) {
         when (message.type) {
-            MessageTypes.AgentSetBreakpoint -> message.breakpoint?.let { addAgentBreakpoint(it) }
-            MessageTypes.AgentRemoveBreakpoint -> message.breakpointId?.let { removeAgentBreakpoint(it) }
+            MessageTypes.AgentSetBreakpoint -> message.breakpoint?.let { addAgentBreakpoint(it, message.requestId) }
+            MessageTypes.AgentRemoveBreakpoint -> message.breakpointId?.let { removeAgentBreakpoint(it, message.requestId) }
         }
     }
 
-    private fun addAgentBreakpoint(breakpoint: AgentBreakpoint) {
-        val file = LocalFileSystem.getInstance().findFileByPath(breakpoint.file) ?: return
+    private fun addAgentBreakpoint(breakpoint: AgentBreakpoint, requestId: String?) {
+        val file = LocalFileSystem.getInstance().findFileByPath(breakpoint.file) ?: run {
+            bridge.send(
+                BridgeMessage(
+                    type = MessageTypes.IdeBreakpointAdded,
+                    requestId = requestId,
+                    breakpointId = breakpoint.id,
+                    breakpoint = breakpoint,
+                    error = mapOf(
+                        "code" to "WORKSPACE_VIOLATION",
+                        "message" to "File was not found in IDEA local filesystem."
+                    )
+                )
+            )
+            return
+        }
         val manager = XDebuggerManager.getInstance(project).breakpointManager
-        val type = XLineBreakpointType.EXTENSION_POINT_NAME.extensionList.firstOrNull() ?: return
-        val lineBreakpoint = manager.addLineBreakpoint(type, file.url, breakpoint.line - 1, null)
+        byAgentId.remove(breakpoint.id)?.let { manager.removeBreakpoint(it) }
+        val type = XLineBreakpointType.EXTENSION_POINT_NAME.extensionList
+            .filterIsInstance<XLineBreakpointType<*>>()
+            .firstOrNull { it.canPutAt(file, breakpoint.line - 1, project) }
+            ?: run {
+                bridge.send(
+                    BridgeMessage(
+                        type = MessageTypes.IdeBreakpointAdded,
+                        requestId = requestId,
+                        breakpointId = breakpoint.id,
+                        breakpoint = breakpoint,
+                        error = mapOf(
+                            "code" to "BREAKPOINT_NOT_VERIFIED",
+                            "message" to "No IDEA line breakpoint type can be placed at this location."
+                        )
+                    )
+                )
+                return
+            }
+        @Suppress("UNCHECKED_CAST")
+        val typed = type as XLineBreakpointType<XBreakpointProperties<*>>
+        val lineBreakpoint = manager.addLineBreakpoint(
+            typed,
+            file.url,
+            breakpoint.line - 1,
+            typed.createBreakpointProperties(file, breakpoint.line - 1)
+        )
         byAgentId[breakpoint.id] = lineBreakpoint
         bridge.send(
             BridgeMessage(
                 type = MessageTypes.IdeBreakpointAdded,
+                requestId = requestId,
                 breakpointId = breakpoint.id,
-                breakpoint = breakpoint
+                breakpoint = breakpoint.copy(verified = true)
             )
         )
     }
 
-    private fun removeAgentBreakpoint(agentId: String) {
-        val breakpoint = byAgentId.remove(agentId) ?: return
+    private fun removeAgentBreakpoint(agentId: String, requestId: String?) {
+        val breakpoint = byAgentId.remove(agentId) ?: run {
+            bridge.send(
+                BridgeMessage(
+                    type = MessageTypes.IdeBreakpointRemoved,
+                    requestId = requestId,
+                    breakpointId = agentId
+                )
+            )
+            return
+        }
         XDebuggerManager.getInstance(project).breakpointManager.removeBreakpoint(breakpoint)
+        bridge.send(
+            BridgeMessage(
+                type = MessageTypes.IdeBreakpointRemoved,
+                requestId = requestId,
+                breakpointId = agentId
+            )
+        )
     }
 }

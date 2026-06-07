@@ -6,30 +6,31 @@ import bridge.MessageTypes
 import com.intellij.openapi.ui.Messages
 
 fun showBreakpointConfirmation(bridge: BridgeClient, message: BridgeMessage) {
+    val action = message.action ?: "debug command"
     val result = Messages.showDialog(
-        "AI Debugger hit a breakpoint and wants to inspect variables.",
+        "AI Debugger requests permission to run: $action",
         "AI Debugger",
-        arrayOf("View Variables", "Let AI Analyze", "Continue", "Step Over", "Stop Debug"),
-        2,
+        arrayOf("Allow", "Deny"),
+        0,
         Messages.getQuestionIcon()
     )
-    if (result == 2 || result == 3) {
+    if (result == 0) {
         bridge.send(
             BridgeMessage(
                 type = MessageTypes.UserConfirmContinue,
+                confirmationId = message.confirmationId,
                 sessionId = message.sessionId,
-                payload = mapOf(
-                    "confirmationId" to message.payload["confirmationId"],
-                    "action" to if (result == 2) "continue" else "step_over"
-                )
+                ideSessionId = message.ideSessionId,
+                action = message.action ?: "allow"
             )
         )
-    } else if (result == -1) {
+    } else {
         bridge.send(
             BridgeMessage(
                 type = MessageTypes.UserRejectContinue,
+                confirmationId = message.confirmationId,
                 sessionId = message.sessionId,
-                payload = mapOf("confirmationId" to message.payload["confirmationId"])
+                ideSessionId = message.ideSessionId
             )
         )
     }
