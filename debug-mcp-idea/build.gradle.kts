@@ -16,7 +16,7 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        intellijIdea("2024.1")
+        local("/Applications/IntelliJ IDEA.app")
     }
 }
 
