@@ -6,3 +6,9 @@ dist/
 
 .idea/
 *.iml
+
+# Gradle / IntelliJ plugin build artifacts
+debug-mcp-idea/.gradle/
+debug-mcp-idea/.intellijPlatform/
+debug-mcp-idea/build/
+*.class
