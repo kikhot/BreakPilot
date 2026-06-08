@@ -238,8 +238,13 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       payload.timeoutMs ?? 5000,
       (message) => !message.command || message.command === command
     );
-    if (response.error) {
-      throw new DebugMcpError(response.error.code ?? ErrorCodes.TOOL_FAILED, response.error.message, response.error);
+    const bridgeError = bridgeErrorPayload(response.error);
+    if (bridgeError) {
+      throw new DebugMcpError(
+        bridgeError.code ?? ErrorCodes.TOOL_FAILED,
+        bridgeError.message ?? "IDE command failed.",
+        bridgeError
+      );
     }
     return response.result ?? response;
   }
@@ -297,9 +302,14 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       if (!responseTypes.includes(message.type)) return;
       if (!predicate(message)) return;
       this.bridge.off("message", listener);
-      if (message.error) {
+      const bridgeError = bridgeErrorPayload(message.error);
+      if (bridgeError) {
         deferred.reject(
-          new DebugMcpError(message.error.code ?? ErrorCodes.TOOL_FAILED, message.error.message, message.error)
+          new DebugMcpError(
+            bridgeError.code ?? ErrorCodes.TOOL_FAILED,
+            bridgeError.message ?? "IDE bridge request failed.",
+            bridgeError
+          )
         );
         return;
       }
@@ -350,4 +360,13 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       stopped: session.stopped
     };
   }
+}
+
+function bridgeErrorPayload(error: unknown): AnyRecord | null {
+  if (!error) return null;
+  if (typeof error !== "object") {
+    return { code: ErrorCodes.TOOL_FAILED, message: String(error) };
+  }
+  const payload = error as AnyRecord;
+  return Object.keys(payload).length > 0 ? payload : null;
 }
