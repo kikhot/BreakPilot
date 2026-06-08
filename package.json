@@ -1,12 +1,19 @@
 {
-  "name": "breakpilot-debug-mcp",
+  "name": "@breakpilot/cli",
   "version": "0.1.0",
   "description": "AI-callable multi-language runtime debugging MVP with MCP, DAP, CLI, and IDE bridge scaffolding.",
   "type": "module",
   "bin": {
-    "debug-mcp": "./src/cli.ts",
-    "debug-mcp-server": "./src/server.ts"
+    "breakpilot": "./src/cli.ts"
   },
+  "files": [
+    "src",
+    "README.md",
+    "docs/architecture.md",
+    "docs/mcp-tools.md",
+    "breakpilot.yaml",
+    "tsconfig.json"
+  ],
   "scripts": {
     "start": "node --experimental-strip-types src/server.ts",
     "serve:http": "node --experimental-strip-types src/server.ts --http-port 27890 --ide-bridge-port 27891",

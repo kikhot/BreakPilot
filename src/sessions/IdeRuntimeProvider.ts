@@ -14,7 +14,7 @@ import type {
 } from "../types.ts";
 import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
 import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { makeId } from "../utils/ids.ts";
 import { createDeferred, withTimeout } from "../utils/timeout.ts";
 
@@ -132,7 +132,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     this.bridge.on("message", listener);
     return withTimeout(deferred.promise, timeoutMs, () => {
       this.bridge.off("message", listener);
-      return new DebugMcpError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for IDE breakpoint hit.", {
+      return new BreakPilotError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for IDE breakpoint hit.", {
         sessionId: this.sessionId,
         ideSessionId: this.ideSessionId,
         timeoutMs
@@ -240,7 +240,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     );
     const bridgeError = bridgeErrorPayload(response.error);
     if (bridgeError) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         bridgeError.code ?? ErrorCodes.TOOL_FAILED,
         bridgeError.message ?? "IDE command failed.",
         bridgeError
@@ -257,7 +257,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       if (message.type === IdeMessageTypes.USER_REJECT_CONTINUE) {
         this.bridge.off("message", listener);
         deferred.reject(
-          new DebugMcpError(ErrorCodes.USER_REJECTED_CONTINUE, "User rejected IDE debug command.", {
+          new BreakPilotError(ErrorCodes.USER_REJECTED_CONTINUE, "User rejected IDE debug command.", {
             action,
             sessionId: this.sessionId,
             ideSessionId: this.ideSessionId
@@ -279,7 +279,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     });
     return withTimeout(deferred.promise, this.confirmationTimeoutMs, () => {
       this.bridge.off("message", listener);
-      return new DebugMcpError(ErrorCodes.IDE_CONFIRMATION_TIMEOUT, "Timed out waiting for IDE confirmation.", {
+      return new BreakPilotError(ErrorCodes.IDE_CONFIRMATION_TIMEOUT, "Timed out waiting for IDE confirmation.", {
         confirmationId,
         action,
         sessionId: this.sessionId,
@@ -305,7 +305,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       const bridgeError = bridgeErrorPayload(message.error);
       if (bridgeError) {
         deferred.reject(
-          new DebugMcpError(
+          new BreakPilotError(
             bridgeError.code ?? ErrorCodes.TOOL_FAILED,
             bridgeError.message ?? "IDE bridge request failed.",
             bridgeError
@@ -319,7 +319,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     this.#send({ ...payload, type, requestId });
     return withTimeout(deferred.promise, timeoutMs, () => {
       this.bridge.off("message", listener);
-      return new DebugMcpError(ErrorCodes.IDE_BRIDGE_DISCONNECTED, "Timed out waiting for IDE bridge response.", {
+      return new BreakPilotError(ErrorCodes.IDE_BRIDGE_DISCONNECTED, "Timed out waiting for IDE bridge response.", {
         sessionId: this.sessionId,
         ideSessionId: this.ideSessionId,
         requestId,
@@ -337,7 +337,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       workspaceRoot: this.workspaceRoot
     });
     if (!sent) {
-      throw new DebugMcpError(ErrorCodes.IDE_NOT_CONNECTED, "IDE client is not connected.", {
+      throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE client is not connected.", {
         clientId: this.ideClientId,
         ideSessionId: this.ideSessionId
       });

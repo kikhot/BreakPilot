@@ -28,13 +28,13 @@ export const ErrorCodes = Object.freeze({
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
 
-export class DebugMcpError extends Error {
+export class BreakPilotError extends Error {
   code: ErrorCode | string;
   details: AnyRecord;
 
   constructor(code: ErrorCode | string, message: string, details: AnyRecord = {}) {
     super(message);
-    this.name = "DebugMcpError";
+    this.name = "BreakPilotError";
     this.code = code;
     this.details = details;
   }
@@ -45,7 +45,7 @@ export function toErrorPayload(error: unknown): {
   message: string;
   details: AnyRecord;
 } {
-  if (error instanceof DebugMcpError) {
+  if (error instanceof BreakPilotError) {
     return {
       code: error.code,
       message: error.message,

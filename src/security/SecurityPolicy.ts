@@ -1,12 +1,12 @@
 import path from "node:path";
-import type { AnyRecord, DebugMcpPolicy, EvaluateMode, VariableLimits } from "../types.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import type { AnyRecord, BreakPilotPolicy, EvaluateMode, VariableLimits } from "../types.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { assertInsideWorkspace } from "../utils/path.ts";
 
 export class SecurityPolicy {
-  policy: DebugMcpPolicy;
+  policy: BreakPilotPolicy;
 
-  constructor(policy: DebugMcpPolicy) {
+  constructor(policy: BreakPilotPolicy) {
     this.policy = policy;
   }
 
@@ -28,14 +28,14 @@ export class SecurityPolicy {
     const allowedHosts = this.policy.network.allowedHosts ?? [];
     const allowedPorts = this.policy.network.allowedPorts ?? [];
     if (!allowedHosts.includes(normalizedHost)) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.DEBUG_PORT_NOT_ALLOWED,
         `Host is not allowed for ${operation}: ${normalizedHost}`,
         { host: normalizedHost, allowedHosts }
       );
     }
     if (!allowedPorts.includes(normalizedPort)) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.DEBUG_PORT_NOT_ALLOWED,
         `Port is not allowed for ${operation}: ${normalizedPort}`,
         { port: normalizedPort, allowedPorts }
@@ -59,7 +59,7 @@ export class SecurityPolicy {
       .filter(Boolean)
       .map((value) => String(value).toLowerCase());
     if (markers.some((value) => value.includes("prod"))) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.POLICY_VIOLATION,
         "Production-like environment is blocked by policy.",
         { markers }
@@ -70,10 +70,10 @@ export class SecurityPolicy {
   assertEvaluate(expression: string, mode: EvaluateMode = this.policy.evaluate.defaultMode): void {
     const text = String(expression || "");
     if (!text.trim()) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "Expression is required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Expression is required.");
     }
     if (text.length > 500) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.EVALUATE_BLOCKED_BY_POLICY,
         "Expression is too long for policy.",
         { maxLength: 500 }
@@ -81,7 +81,7 @@ export class SecurityPolicy {
     }
     if (mode === "unsafe") {
       if (this.policy.evaluate.requireConfirmationForUnsafe) {
-        throw new DebugMcpError(
+        throw new BreakPilotError(
           ErrorCodes.EVALUATE_BLOCKED_BY_POLICY,
           "Unsafe evaluate requires explicit user confirmation through the IDE bridge.",
           { mode }
@@ -105,7 +105,7 @@ export class SecurityPolicy {
       const hasCall = /\b[a-zA-Z_$][\w$]*\s*\(/.test(text);
       const hasUnsafeToken = unsafeTokens.some((token) => text.includes(token));
       if (hasCall || hasUnsafeToken) {
-        throw new DebugMcpError(
+        throw new BreakPilotError(
           ErrorCodes.EVALUATE_BLOCKED_BY_POLICY,
           "Readonly evaluate only allows field, property, and index inspection.",
           { expression: text, mode }

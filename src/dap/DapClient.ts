@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { AnyRecord, DapMessage, DapResponseMessage, DapTransport } from "../types.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { withTimeout } from "../utils/timeout.ts";
 
 interface PendingRequest {
@@ -40,7 +40,7 @@ export class DapClient extends EventEmitter {
       this.emit("adapterError", error);
     });
     this.transport.on("exit", (info: AnyRecord) => {
-      const error = new DebugMcpError(
+      const error = new BreakPilotError(
         ErrorCodes.TARGET_PROCESS_EXITED,
         "Debug adapter exited.",
         { ...info, stderr: this.stderr.slice(-10).join("") }
@@ -70,7 +70,7 @@ export class DapClient extends EventEmitter {
         responsePromise,
         timeoutMs,
         () =>
-          new DebugMcpError(ErrorCodes.TOOL_FAILED, `DAP request timed out: ${command}`, {
+          new BreakPilotError(ErrorCodes.TOOL_FAILED, `DAP request timed out: ${command}`, {
             command,
             timeoutMs
           })
@@ -135,7 +135,7 @@ export class DapClient extends EventEmitter {
         pending.resolve(response.body ?? {});
       } else {
         pending.reject(
-          new DebugMcpError(
+          new BreakPilotError(
             ErrorCodes.TOOL_FAILED,
             response.message || `DAP request failed: ${pending.command}`,
             {

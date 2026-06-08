@@ -18,5 +18,5 @@
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "exclude": ["dist", "node_modules", "debug-mcp-vscode", "debug-mcp-idea"]
+  "exclude": ["dist", "node_modules", "breakpilot-vscode", "breakpilot-idea"]
 }

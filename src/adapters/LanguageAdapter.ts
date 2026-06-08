@@ -6,7 +6,7 @@ import {
   DapSocketTransport
 } from "../dap/DapTransport.ts";
 import type { AnyRecord, DebugLanguage } from "../types.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 
 interface LanguageAdapterOptions {
   language: DebugLanguage;
@@ -44,7 +44,7 @@ export class LanguageAdapter {
         ? args.adapterArgs
         : this.defaultArgs;
     if (!command) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.ADAPTER_START_FAILED,
         `No debug adapter command configured for ${this.language}.`,
         { language: this.language, envCommandName: this.envCommandName }
@@ -76,7 +76,7 @@ export class PythonAdapter extends LanguageAdapter {
       adapterId: "python",
       defaultCommand: fs.existsSync(".venv/bin/python") ? ".venv/bin/python" : "python3",
       defaultArgs: ["-m", "debugpy.adapter"],
-      envCommandName: "DEBUG_MCP_PYTHON_ADAPTER"
+      envCommandName: "BREAKPILOT_PYTHON_ADAPTER"
     });
   }
 
@@ -100,7 +100,7 @@ export class PythonAdapter extends LanguageAdapter {
       process.env[this.envCommandName] ||
       this.defaultCommand;
     if (!command) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.ADAPTER_START_FAILED,
         "No Python debug adapter command configured.",
         { envCommandName: this.envCommandName }
@@ -159,11 +159,11 @@ export class NodeAdapter extends LanguageAdapter {
     super({
       language,
       adapterId: "pwa-node",
-      defaultCommand: process.env.DEBUG_MCP_JS_DEBUG_COMMAND,
-      defaultArgs: process.env.DEBUG_MCP_JS_DEBUG_ARGS
-        ? process.env.DEBUG_MCP_JS_DEBUG_ARGS.split(" ")
+      defaultCommand: process.env.BREAKPILOT_JS_DEBUG_COMMAND,
+      defaultArgs: process.env.BREAKPILOT_JS_DEBUG_ARGS
+        ? process.env.BREAKPILOT_JS_DEBUG_ARGS.split(" ")
         : [],
-      envCommandName: "DEBUG_MCP_JS_DEBUG_COMMAND"
+      envCommandName: "BREAKPILOT_JS_DEBUG_COMMAND"
     });
   }
 
@@ -172,7 +172,7 @@ export class NodeAdapter extends LanguageAdapter {
     return {
       type: "pwa-node",
       request: "launch",
-      name: args.name ?? "Debug MCP Node Launch",
+      name: args.name ?? "BreakPilot Node Launch",
       program: args.program,
       args: args.args ?? [],
       cwd: args.cwd ?? args.workspaceRoot,
@@ -187,7 +187,7 @@ export class NodeAdapter extends LanguageAdapter {
     return {
       type: "pwa-node",
       request: "attach",
-      name: args.name ?? "Debug MCP Node Attach",
+      name: args.name ?? "BreakPilot Node Attach",
       address: args.host ?? "127.0.0.1",
       port: Number(args.port ?? 9229),
       cwd: args.cwd ?? args.workspaceRoot,
@@ -201,11 +201,11 @@ export class JavaAdapter extends LanguageAdapter {
     super({
       language: "java",
       adapterId: "java",
-      defaultCommand: process.env.DEBUG_MCP_JAVA_ADAPTER_COMMAND,
-      defaultArgs: process.env.DEBUG_MCP_JAVA_ADAPTER_ARGS
-        ? process.env.DEBUG_MCP_JAVA_ADAPTER_ARGS.split(" ")
+      defaultCommand: process.env.BREAKPILOT_JAVA_ADAPTER_COMMAND,
+      defaultArgs: process.env.BREAKPILOT_JAVA_ADAPTER_ARGS
+        ? process.env.BREAKPILOT_JAVA_ADAPTER_ARGS.split(" ")
         : [],
-      envCommandName: "DEBUG_MCP_JAVA_ADAPTER_COMMAND"
+      envCommandName: "BREAKPILOT_JAVA_ADAPTER_COMMAND"
     });
   }
 }

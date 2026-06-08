@@ -48,4 +48,4 @@ runtime:
 
 audit:
   enabled: true
-  file: .debug-mcp/test-audit.log
+  file: .breakpilot/test-audit.log

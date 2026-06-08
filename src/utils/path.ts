@@ -1,6 +1,6 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { DebugMcpError, ErrorCodes } from "./errors.ts";
+import { BreakPilotError, ErrorCodes } from "./errors.ts";
 
 export interface DapSource {
   name: string;
@@ -27,7 +27,7 @@ export function assertInsideWorkspace(
   if (allowOutsideWorkspace) return resolved;
   const relative = path.relative(root, resolved);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new DebugMcpError(
+    throw new BreakPilotError(
       ErrorCodes.WORKSPACE_VIOLATION,
       `Path is outside the allowed workspace: ${resolved}`,
       { workspaceRoot: root, path: resolved }

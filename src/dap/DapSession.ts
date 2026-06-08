@@ -10,7 +10,7 @@ import type {
   StoppedEvent
 } from "../types.ts";
 import { DapClient } from "./DapClient.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { createDeferred, withTimeout } from "../utils/timeout.ts";
 import { toDapSource } from "../utils/path.ts";
 
@@ -82,8 +82,8 @@ export class DapSession extends EventEmitter {
   async initialize(adapterId = this.language): Promise<AnyRecord> {
     this.capabilities = await this.client.request("initialize", {
       adapterID: adapterId,
-      clientID: "breakpilot-debug-mcp",
-      clientName: "BreakPilot Debug MCP",
+      clientID: "breakpilot-debugger",
+      clientName: "BreakPilot Debugger",
       pathFormat: "path",
       linesStartAt1: true,
       columnsStartAt1: true,
@@ -133,7 +133,7 @@ export class DapSession extends EventEmitter {
           this.startRequestPromise,
           5000,
           () =>
-            new DebugMcpError(ErrorCodes.TOOL_FAILED, "Timed out waiting for start request response.", {
+            new BreakPilotError(ErrorCodes.TOOL_FAILED, "Timed out waiting for start request response.", {
               sessionId: this.sessionId
             })
         );
@@ -164,7 +164,7 @@ export class DapSession extends EventEmitter {
       deferred.promise,
       timeoutMs,
       () =>
-        new DebugMcpError(ErrorCodes.TOOL_FAILED, "Timed out waiting for initialized event.", {
+        new BreakPilotError(ErrorCodes.TOOL_FAILED, "Timed out waiting for initialized event.", {
           sessionId: this.sessionId,
           timeoutMs
         })
@@ -182,7 +182,7 @@ export class DapSession extends EventEmitter {
         deferred.promise,
         timeoutMs,
         () =>
-          new DebugMcpError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for breakpoint hit.", {
+          new BreakPilotError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for breakpoint hit.", {
             sessionId: this.sessionId,
             timeoutMs
           })
@@ -254,7 +254,7 @@ export class DapSession extends EventEmitter {
 
   async continue(threadId: number | null = this.threadId): Promise<AnyRecord> {
     if (!threadId) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "threadId is required for continue.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "threadId is required for continue.");
     }
     return this.client.request("continue", { threadId });
   }
@@ -280,7 +280,7 @@ export class DapSession extends EventEmitter {
       return { acknowledged: true, ...response };
     } catch (error) {
       if (
-        error instanceof DebugMcpError &&
+        error instanceof BreakPilotError &&
         (error.details?.command === "disconnect" || error.code === ErrorCodes.TARGET_PROCESS_EXITED)
       ) {
         return {

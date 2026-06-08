@@ -1,6 +1,6 @@
 node_modules/
 dist/
-.debug-mcp/
+.breakpilot/
 *.log
 .DS_Store
 
@@ -8,7 +8,7 @@ dist/
 *.iml
 
 # Gradle / IntelliJ plugin build artifacts
-debug-mcp-idea/.gradle/
-debug-mcp-idea/.intellijPlatform/
-debug-mcp-idea/build/
+breakpilot-idea/.gradle/
+breakpilot-idea/.intellijPlatform/
+breakpilot-idea/build/
 *.class

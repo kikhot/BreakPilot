@@ -1,5 +1,5 @@
 import type { DebugSessionRecord, SessionSummary } from "../types.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 
 export class SessionStore {
   sessions: Map<string, DebugSessionRecord>;
@@ -16,7 +16,7 @@ export class SessionStore {
   get(sessionId: string): DebugSessionRecord {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new DebugMcpError(ErrorCodes.SESSION_NOT_FOUND, `Session not found: ${sessionId}`, {
+      throw new BreakPilotError(ErrorCodes.SESSION_NOT_FOUND, `Session not found: ${sessionId}`, {
         sessionId
       });
     }

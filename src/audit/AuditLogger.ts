@@ -1,13 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AnyRecord, DebugMcpPolicy } from "../types.ts";
+import type { AnyRecord, BreakPilotPolicy } from "../types.ts";
 import { makeAuditId } from "../utils/ids.ts";
 
 export class AuditLogger {
   enabled: boolean;
   file?: string;
 
-  constructor(policy: DebugMcpPolicy) {
+  constructor(policy: BreakPilotPolicy) {
     this.enabled = Boolean(policy.audit?.enabled);
     this.file = policy.audit?.file;
   }

@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import net from "node:net";
 import type { DapTransport } from "../types.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 
 interface ProcessTransportOptions {
   cwd?: string;
@@ -44,7 +44,7 @@ export class DapProcessTransport extends EventEmitter implements DapTransport {
 
   write(buffer: Buffer): void {
     if (!this.process?.stdin?.writable) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.ADAPTER_START_FAILED,
         "Debug adapter process stdin is not writable."
       );
@@ -79,7 +79,7 @@ export class DapSocketTransport extends EventEmitter implements DapTransport {
 
   write(buffer: Buffer): void {
     if (!this.socket?.writable) {
-      throw new DebugMcpError(ErrorCodes.ATTACH_FAILED, "DAP socket is not writable.");
+      throw new BreakPilotError(ErrorCodes.ATTACH_FAILED, "DAP socket is not writable.");
     }
     this.socket.write(buffer);
   }

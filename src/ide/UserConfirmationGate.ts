@@ -1,5 +1,5 @@
 import type { AnyRecord, BridgeMessage } from "../types.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { createDeferred, type Deferred, withTimeout } from "../utils/timeout.ts";
 import { makeId } from "../utils/ids.ts";
 import { IdeMessageTypes } from "./IdeProtocol.ts";
@@ -29,7 +29,7 @@ export class UserConfirmationGate {
 
   async request(payload: BridgeMessage, timeoutMs = this.timeoutMs): Promise<ConfirmationResult> {
     if (!this.bridge) {
-      throw new DebugMcpError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.");
+      throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.");
     }
     const confirmationId = makeId("confirm");
     const deferred = createDeferred<ConfirmationResult>();
@@ -43,7 +43,7 @@ export class UserConfirmationGate {
       deferred.promise,
       timeoutMs,
       () =>
-        new DebugMcpError(
+        new BreakPilotError(
           ErrorCodes.IDE_CONFIRMATION_TIMEOUT,
           "Timed out waiting for user confirmation.",
           { confirmationId, timeoutMs }

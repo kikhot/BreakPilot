@@ -24,11 +24,11 @@ assert.equal(parsed.workspace.root, ".");
 assert.equal(parsed.network.allowedHosts[0], "127.0.0.1");
 assert.equal(parsed.network.allowedPorts[0], 5678);
 
-const policy = loadPolicy("debug-mcp.yaml");
+const policy = loadPolicy("breakpilot.yaml");
 assert.ok(policy.workspace.root.endsWith("BreakPilot"));
 assert.equal(policy.evaluate.defaultMode, "readonly");
 
-const runtime = createRuntime({ policyPath: "debug-mcp.yaml", enableIdeBridge: false });
+const runtime = createRuntime({ policyPath: "breakpilot.yaml", enableIdeBridge: false });
 assert.ok(toolDefinitions.some((tool) => tool.name === "debug_launch"));
 assert.ok(runtime.router.listTools().some((tool) => tool.name === "get_runtime_snapshot"));
 assert.ok(runtime.router.listTools().some((tool) => tool.name === "inspect_variable"));

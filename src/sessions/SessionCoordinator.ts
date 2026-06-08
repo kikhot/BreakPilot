@@ -1,5 +1,5 @@
 import type { DebugSessionRecord, SessionOwnerValue } from "../types.ts";
-import { DebugMcpError, ErrorCodes } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { SessionOwner } from "./SessionOwner.ts";
 
 export class SessionCoordinator {
@@ -16,7 +16,7 @@ export class SessionCoordinator {
   ): void {
     if (session.owner === SessionOwner.HYBRID) return;
     if (session.owner !== requester) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.SESSION_OWNER_CONFLICT,
         `Session owner ${session.owner} does not allow ${requester} to ${operation}.`,
         { sessionId: session.sessionId, owner: session.owner, requester, operation }
@@ -26,7 +26,7 @@ export class SessionCoordinator {
 
   beginExecution(session: DebugSessionRecord, operation: string): void {
     if (this.executionLocks.has(session.sessionId)) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.SESSION_OWNER_CONFLICT,
         "Another execution-control operation is already in progress.",
         {

@@ -7,7 +7,7 @@ import { AuditLogger } from "../audit/AuditLogger.ts";
 import type {
   AnyRecord,
   DebugLanguage,
-  DebugMcpPolicy,
+  BreakPilotPolicy,
   DebugMode,
   DebugSessionRecord,
   EvaluateMode,
@@ -20,7 +20,7 @@ import type {
 } from "../types.ts";
 import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
 import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
-import { DebugMcpError, ErrorCodes, ok } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes, ok } from "../utils/errors.ts";
 import { makeSessionId } from "../utils/ids.ts";
 import { resolveWorkspacePath } from "../utils/path.ts";
 import { BreakpointManager } from "./BreakpointManager.ts";
@@ -73,7 +73,7 @@ interface CreateSessionInput {
 }
 
 export class DebugSessionManager {
-  policy: DebugMcpPolicy;
+  policy: BreakPilotPolicy;
   security: SecurityPolicy;
   audit: AuditLogger;
   adapters: AdapterRegistry;
@@ -82,7 +82,7 @@ export class DebugSessionManager {
   coordinator: SessionCoordinator;
   ideBridge?: IdeBridgeServer | null;
 
-  constructor({ policy, ideBridge }: { policy: DebugMcpPolicy; ideBridge?: IdeBridgeServer | null }) {
+  constructor({ policy, ideBridge }: { policy: BreakPilotPolicy; ideBridge?: IdeBridgeServer | null }) {
     this.policy = policy;
     this.security = new SecurityPolicy(policy);
     this.audit = new AuditLogger(policy);
@@ -115,7 +115,7 @@ export class DebugSessionManager {
 
     try {
       const dap = session.dap;
-      if (!dap) throw new DebugMcpError(ErrorCodes.TOOL_FAILED, "DAP session was not initialized.");
+      if (!dap) throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP session was not initialized.");
       await dap.initialize(adapter.adapterId);
       await dap.launch(
         adapter.normalizeLaunchArgs({
@@ -129,7 +129,7 @@ export class DebugSessionManager {
     } catch (error) {
       const typedError = error as Error & { details?: AnyRecord };
       session.state = SessionState.FAILED;
-      throw new DebugMcpError(ErrorCodes.LAUNCH_FAILED, typedError.message, {
+      throw new BreakPilotError(ErrorCodes.LAUNCH_FAILED, typedError.message, {
         sessionId: session.sessionId,
         cause: typedError.details ?? {}
       });
@@ -159,7 +159,7 @@ export class DebugSessionManager {
 
     try {
       const dap = session.dap;
-      if (!dap) throw new DebugMcpError(ErrorCodes.TOOL_FAILED, "DAP session was not initialized.");
+      if (!dap) throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP session was not initialized.");
       await dap.initialize(adapter.adapterId);
       await dap.attach(
         adapter.normalizeAttachArgs({
@@ -175,7 +175,7 @@ export class DebugSessionManager {
     } catch (error) {
       const typedError = error as Error & { details?: AnyRecord };
       session.state = SessionState.FAILED;
-      throw new DebugMcpError(ErrorCodes.ATTACH_FAILED, typedError.message, {
+      throw new BreakPilotError(ErrorCodes.ATTACH_FAILED, typedError.message, {
         sessionId: session.sessionId,
         cause: typedError.details ?? {}
       });
@@ -184,7 +184,7 @@ export class DebugSessionManager {
 
   async setBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
     if (!args.sessionId || !args.file || !args.line) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId, file, and line are required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId, file, and line are required.");
     }
     const session = this.sessions.get(args.sessionId);
     if (session.providerKind !== "ide") {
@@ -221,7 +221,7 @@ export class DebugSessionManager {
     }
 
     if (!selected.verified && args.requireVerified) {
-      throw new DebugMcpError(
+      throw new BreakPilotError(
         ErrorCodes.BREAKPOINT_NOT_VERIFIED,
         "Breakpoint was not verified by debug adapter.",
         { breakpoint: selected }
@@ -237,7 +237,7 @@ export class DebugSessionManager {
 
   async removeBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
     if (!args.sessionId || !args.breakpointId) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId and breakpointId are required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId and breakpointId are required.");
     }
     const session = this.sessions.get(args.sessionId);
     const auditId = this.audit.record("remove_breakpoint_requested", args);
@@ -265,7 +265,7 @@ export class DebugSessionManager {
 
   async waitForBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
     if (!args.sessionId) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
     }
     const session = this.sessions.get(args.sessionId);
     const auditId = this.audit.record("wait_for_breakpoint_requested", {
@@ -273,7 +273,7 @@ export class DebugSessionManager {
       timeoutMs: args.timeoutMs
     });
     const stopped = await session.provider.waitForBreakpoint(args.timeoutMs ?? 30000).catch(async (error) => {
-      if (error instanceof DebugMcpError && error.code === ErrorCodes.BREAKPOINT_TIMEOUT) {
+      if (error instanceof BreakPilotError && error.code === ErrorCodes.BREAKPOINT_TIMEOUT) {
         const recovered = await this.#recoverBreakpointHit(session);
         if (recovered) return recovered;
       }
@@ -292,7 +292,7 @@ export class DebugSessionManager {
 
   async getRuntimeSnapshot(args: DebugToolArgs = {}): Promise<ToolResponse<RuntimeSnapshot>> {
     if (!args.sessionId) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
     }
     const session = this.sessions.get(args.sessionId);
     const auditId = this.audit.record("get_runtime_snapshot_requested", {
@@ -310,7 +310,7 @@ export class DebugSessionManager {
 
   async inspectVariable(args: DebugToolArgs = {}): Promise<ToolResponse> {
     if (!args.sessionId || !args.variablesReference) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId and variablesReference are required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId and variablesReference are required.");
     }
     const session = this.sessions.get(args.sessionId);
     const auditId = this.audit.record("inspect_variable_requested", {
@@ -324,7 +324,7 @@ export class DebugSessionManager {
       maxItems: args.count ?? args.maxItems
     });
     if (!session.provider.inspectVariable) {
-      throw new DebugMcpError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support variable inspection.", {
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support variable inspection.", {
         sessionId: session.sessionId,
         providerKind: session.providerKind
       });
@@ -335,7 +335,7 @@ export class DebugSessionManager {
 
   async evaluate(args: DebugToolArgs = {}): Promise<ToolResponse> {
     if (!args.sessionId || !args.expression) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId and expression are required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId and expression are required.");
     }
     const session = this.sessions.get(args.sessionId);
     const mode = args.mode ?? this.policy.evaluate.defaultMode ?? "readonly";
@@ -356,7 +356,7 @@ export class DebugSessionManager {
 
   async continueExecution(args: DebugToolArgs = {}): Promise<ToolResponse> {
     if (!args.sessionId) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
     }
     const session = this.sessions.get(args.sessionId);
     const auditId = this.audit.record("continue_requested", { sessionId: session.sessionId });
@@ -375,7 +375,7 @@ export class DebugSessionManager {
 
   async step(args: DebugToolArgs = {}, kind: "over" | "into" | "out" = "over"): Promise<ToolResponse> {
     if (!args.sessionId) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
     }
     const session = this.sessions.get(args.sessionId);
     const auditId = this.audit.record(`step_${kind}_requested`, { sessionId: session.sessionId });
@@ -395,7 +395,7 @@ export class DebugSessionManager {
 
   async disconnect(args: DebugToolArgs = {}): Promise<ToolResponse> {
     if (!args.sessionId) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
     }
     const session = this.sessions.get(args.sessionId);
     const auditId = this.audit.record("disconnect_requested", { sessionId: session.sessionId });
@@ -426,7 +426,7 @@ export class DebugSessionManager {
 
   async adoptIdeSession(args: DebugToolArgs = {}): Promise<ToolResponse> {
     if (!this.ideBridge) {
-      throw new DebugMcpError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.");
+      throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.");
     }
     const auditId = this.audit.record("adopt_ide_session_requested", {
       clientId: args.clientId,
@@ -434,7 +434,7 @@ export class DebugSessionManager {
     });
     const ideSession = this.#selectIdeSession(args);
     if (!ideSession) {
-      throw new DebugMcpError(ErrorCodes.IDE_SESSION_NOT_FOUND, "IDE debug session was not found.", {
+      throw new BreakPilotError(ErrorCodes.IDE_SESSION_NOT_FOUND, "IDE debug session was not found.", {
         clientId: args.clientId,
         ideSessionId: args.ideSessionId
       });
@@ -523,7 +523,7 @@ export class DebugSessionManager {
 
   listBreakpoints(args: DebugToolArgs = {}): ToolResponse {
     if (!args.sessionId) {
-      throw new DebugMcpError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
     }
     const auditId = this.audit.record("list_breakpoints_requested", args);
     return ok(args.sessionId, { breakpoints: this.breakpoints.list(args.sessionId) }, auditId);
@@ -679,7 +679,7 @@ export class DebugSessionManager {
   async #adoptActiveIdeSession(args: DebugToolArgs): Promise<DebugSessionRecord> {
     const ideSession = this.#selectIdeSession(args);
     if (!ideSession) {
-      throw new DebugMcpError(ErrorCodes.IDE_SESSION_NOT_FOUND, "No active IDE debug session is available.", {
+      throw new BreakPilotError(ErrorCodes.IDE_SESSION_NOT_FOUND, "No active IDE debug session is available.", {
         clientId: args.clientId,
         ideSessionId: args.ideSessionId
       });
@@ -694,7 +694,7 @@ export class DebugSessionManager {
       ideSessionId: ideSession.ideSessionId
     });
     if (!response.sessionId) {
-      throw new DebugMcpError(ErrorCodes.TOOL_FAILED, "Failed to adopt IDE session.", { response });
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Failed to adopt IDE session.", { response });
     }
     return this.sessions.get(response.sessionId);
   }

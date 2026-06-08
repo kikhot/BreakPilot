@@ -19,7 +19,7 @@ export type SessionStateValue =
   | "failed"
   | string;
 
-export interface DebugMcpPolicy {
+export interface BreakPilotPolicy {
   workspace: {
     root: string;
     allowOutsideWorkspace: boolean;

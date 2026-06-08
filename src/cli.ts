@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import type { AnyRecord, ToolResponse } from "./types.ts";
-import { createRuntime, startHttp } from "./server.ts";
+import { createRuntime, startHttp, startStdio } from "./server.ts";
 import { toolDefinitions } from "./mcp/schemas.ts";
 import { loadPolicy } from "./security/PolicyLoader.ts";
 import { stableJson } from "./utils/json.ts";
@@ -272,9 +272,10 @@ function toolFromCommand(
 
 function help(): AnyRecord {
   return {
-    usage: "debug-mcp <command> [options]",
+    usage: "breakpilot <command> [options]",
     commands: [
       "serve --http-port 27890 --ide-bridge-port 27891",
+      "mcp serve",
       "tools",
       "policy print",
       "launch --lang python --program examples/app.py",
@@ -306,7 +307,7 @@ async function main(): Promise<void> {
   const flagTokens = subcommand ? rest : [maybeSubcommand, ...rest].filter(Boolean) as string[];
   const { flags, positional } = parseFlags(flagTokens);
   const pretty = Boolean(flags.pretty);
-  const controlUrl = stringFlag(flags, "control-url") || process.env.DEBUG_MCP_CONTROL_URL || "http://127.0.0.1:27890";
+  const controlUrl = stringFlag(flags, "control-url") || process.env.BREAKPILOT_CONTROL_URL || "http://127.0.0.1:27890";
 
   if (!command || command === "help" || flags.help) {
     output(help(), true);
@@ -315,6 +316,20 @@ async function main(): Promise<void> {
 
   if (command === "tools") {
     output({ tools: toolDefinitions }, pretty);
+    return;
+  }
+
+  if (command === "mcp" && subcommand === "serve") {
+    const runtime = createRuntime({
+      policyPath: stringFlag(flags, "policy"),
+      enableIdeBridge: Boolean(flags["ide-bridge-port"] || flags["ide-bridge"]),
+      ideBridgePort: stringFlag(flags, "ide-bridge-port")
+    });
+    if (runtime.ideBridge) {
+      const status = runtime.ideBridge.status();
+      process.stderr.write(`breakpilot IDE bridge listening on ${status.host}:${status.port}\n`);
+    }
+    startStdio(runtime.router);
     return;
   }
 
@@ -332,10 +347,10 @@ async function main(): Promise<void> {
     const port = stringFlag(flags, "http-port") ?? 27890;
     const host = stringFlag(flags, "host") || "127.0.0.1";
     startHttp(runtime.router, port, host);
-    process.stderr.write(`debug-mcp HTTP listening on ${host}:${port}\n`);
+    process.stderr.write(`breakpilot HTTP listening on ${host}:${port}\n`);
     if (runtime.ideBridge) {
       const status = runtime.ideBridge.status();
-      process.stderr.write(`debug-mcp IDE bridge listening on ${status.host}:${status.port}\n`);
+      process.stderr.write(`breakpilot IDE bridge listening on ${status.host}:${status.port}\n`);
     }
     return;
   }
@@ -375,7 +390,7 @@ async function main(): Promise<void> {
       {
         ok: false,
         error: {
-          message: `Cannot reach debug-mcp daemon at ${controlUrl}. Start it with: debug-mcp serve --http-port 27890 --ide-bridge-port 27891`,
+          message: `Cannot reach breakpilot daemon at ${controlUrl}. Start it with: breakpilot serve --http-port 27890 --ide-bridge-port 27891`,
           cause: typedError.message
         }
       },

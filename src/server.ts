@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import http from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import type { AnyRecord, DebugMcpPolicy, ToolResponse } from "./types.ts";
+import type { AnyRecord, BreakPilotPolicy, ToolResponse } from "./types.ts";
 import { loadPolicy } from "./security/PolicyLoader.ts";
 import { DebugSessionManager } from "./sessions/DebugSessionManager.ts";
 import { ToolRouter } from "./mcp/tools.ts";
@@ -16,7 +16,7 @@ interface RuntimeOptions {
 }
 
 interface RuntimeContext {
-  policy: DebugMcpPolicy;
+  policy: BreakPilotPolicy;
   manager: DebugSessionManager;
   router: ToolRouter;
   ideBridge: IdeBridgeServer | null;
@@ -70,7 +70,7 @@ async function handleJsonRpc(router: ToolRouter, message: JsonRpcMessage): Promi
         tools: {}
       },
       serverInfo: {
-        name: "breakpilot-debug-mcp",
+        name: "breakpilot-debugger",
         version: "0.1.0"
       }
     };
@@ -201,13 +201,13 @@ async function main() {
     const port = stringArg(args, "http-port") || "27890";
     startHttp(runtime.router, port, host);
     process.stderr.write(
-      `debug-mcp HTTP listening on ${host}:${port}\n`
+      `breakpilot HTTP listening on ${host}:${port}\n`
     );
   }
 
   if (enableIdeBridge && runtime.ideBridge) {
     const bridge = runtime.ideBridge.status();
-    process.stderr.write(`debug-mcp IDE bridge listening on ${bridge.host}:${bridge.port}\n`);
+    process.stderr.write(`breakpilot IDE bridge listening on ${bridge.host}:${bridge.port}\n`);
   }
 
   if (!args["http-port"] || args.stdio) {

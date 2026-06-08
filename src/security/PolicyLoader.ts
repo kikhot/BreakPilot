@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AnyRecord, DebugMcpPolicy, JsonValue } from "../types.ts";
+import type { AnyRecord, BreakPilotPolicy, JsonValue } from "../types.ts";
 import { normalizeWorkspaceRoot } from "../utils/path.ts";
 
-const DEFAULT_POLICY: DebugMcpPolicy = {
+const DEFAULT_POLICY: BreakPilotPolicy = {
   workspace: {
     root: ".",
     allowOutsideWorkspace: false
@@ -54,7 +54,7 @@ const DEFAULT_POLICY: DebugMcpPolicy = {
   },
   audit: {
     enabled: true,
-    file: ".debug-mcp/audit.log"
+    file: ".breakpilot/audit.log"
   }
 };
 
@@ -161,10 +161,10 @@ function parseYamlSubset(text: string): JsonValue {
 }
 
 export function loadPolicy(
-  policyPath = "debug-mcp.yaml",
+  policyPath = "breakpilot.yaml",
   env: NodeJS.ProcessEnv = process.env
-): DebugMcpPolicy {
-  const configuredPath = env.DEBUG_MCP_POLICY || policyPath;
+): BreakPilotPolicy {
+  const configuredPath = env.BREAKPILOT_POLICY || policyPath;
   let loaded: unknown = {};
   const absolute = path.resolve(configuredPath);
   if (fs.existsSync(absolute)) {
@@ -172,7 +172,7 @@ export function loadPolicy(
     loaded = absolute.endsWith(".json") ? JSON.parse(text) : parseYamlSubset(text);
   }
   const policy = deepMerge(DEFAULT_POLICY, loaded);
-  const envWorkspace = env.DEBUG_MCP_WORKSPACE;
+  const envWorkspace = env.BREAKPILOT_WORKSPACE;
   const root = normalizeWorkspaceRoot(envWorkspace || policy.workspace.root || ".");
   policy.workspace.root = root;
   if (policy.audit?.file) {
