@@ -4,14 +4,20 @@ import bridge.BridgeClient
 import bridge.BridgeMessage
 import bridge.MessageTypes
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.project.Project
+import com.intellij.util.Alarm
 import com.intellij.xdebugger.XDebugSession
 import com.intellij.xdebugger.evaluation.XDebuggerEvaluator
 import com.intellij.xdebugger.frame.XCompositeNode
+import com.intellij.xdebugger.frame.XFullValueEvaluator
 import com.intellij.xdebugger.frame.XStackFrame
 import com.intellij.xdebugger.frame.XValue
 import com.intellij.xdebugger.frame.XValueChildrenList
+import com.intellij.xdebugger.frame.XValueNode
+import com.intellij.xdebugger.frame.XValuePlace
 import com.intellij.xdebugger.frame.XDebuggerTreeNodeHyperlink
+import com.intellij.xdebugger.frame.presentation.XValuePresentation
 import com.intellij.xdebugger.impl.breakpoints.XExpressionImpl
 import javax.swing.Icon
 
@@ -19,6 +25,8 @@ class VariableReader(
     private val project: Project,
     private val tracker: IdeSessionTracker
 ) {
+    private val presentationAlarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, project)
+
     fun handle(message: BridgeMessage, bridge: BridgeClient) {
         val session = tracker.find(message.ideSessionId)
         if (session == null) {
@@ -163,44 +171,85 @@ class VariableReader(
         maxStringLength: Int,
         callback: (Map<String, Any?>) -> Unit
     ) {
-        val preview = valuePreview(value, maxStringLength)
-        val result = linkedMapOf<String, Any?>(
-            "name" to name,
-            "kind" to "object",
-            "valuePreview" to preview,
-            "variablesReference" to 0,
-            "truncated" to (maxDepth <= 0)
-        )
-        if (maxDepth <= 0) {
-            callback(result)
-            return
-        }
-        value.computeChildren(
-            CollectingCompositeNode(maxItems) { children ->
-                if (children.isEmpty()) {
-                    result["kind"] = "primitive"
-                    result["value"] = preview
-                    callback(result)
-                    return@CollectingCompositeNode
-                }
-                val nested = linkedMapOf<String, Any?>()
-                var remaining = children.size
-                children.forEach { (childName, childValue) ->
-                    readValue(childName, childValue, maxItems, maxDepth - 1, maxStringLength) { child ->
-                        nested[childName] = child
-                        remaining -= 1
-                        if (remaining == 0) {
-                            result["value"] = nested
+        readPresentation(value, maxStringLength) { presentation ->
+            val preview = presentation.valuePreview
+            val result = linkedMapOf<String, Any?>(
+                "name" to name,
+                "kind" to "object",
+                "valuePreview" to preview,
+                "variablesReference" to 0,
+                "truncated" to false
+            )
+            if (!presentation.type.isNullOrBlank()) {
+                result["type"] = presentation.type
+            }
+            if (!presentation.presentationError.isNullOrBlank()) {
+                result["presentationError"] = presentation.presentationError
+            }
+            if (presentation.hasChildren == false) {
+                result["kind"] = "primitive"
+                result["value"] = preview
+                callback(result)
+                return@readPresentation
+            }
+            if (maxDepth <= 0) {
+                result["truncated"] = true
+                callback(result)
+                return@readPresentation
+            }
+            try {
+                value.computeChildren(
+                    CollectingCompositeNode(maxItems) { children ->
+                        if (children.isEmpty()) {
+                            if (presentation.hasChildren == true) {
+                                result["value"] = linkedMapOf<String, Any?>()
+                            } else {
+                                result["kind"] = "primitive"
+                                result["value"] = preview
+                            }
                             callback(result)
+                            return@CollectingCompositeNode
+                        }
+                        val nested = linkedMapOf<String, Any?>()
+                        var remaining = children.size
+                        children.forEach { (childName, childValue) ->
+                            readValue(childName, childValue, maxItems, maxDepth - 1, maxStringLength) { child ->
+                                nested[childName] = child
+                                remaining -= 1
+                                if (remaining == 0) {
+                                    result["value"] = nested
+                                    callback(result)
+                                }
+                            }
                         }
                     }
-                }
+                )
+            } catch (error: Throwable) {
+                result["kind"] = "primitive"
+                result["value"] = preview
+                result["truncated"] = true
+                callback(result)
             }
-        )
+        }
     }
 
-    private fun valuePreview(value: XValue, maxStringLength: Int): String {
-        return value.javaClass.simpleName.take(maxStringLength)
+    private fun readPresentation(
+        value: XValue,
+        maxStringLength: Int,
+        callback: (PresentationData) -> Unit
+    ) {
+        val node = CollectingValueNode(maxStringLength, callback)
+        presentationAlarm.addRequest(
+            {
+                node.finishUnavailable("Presentation callback was not invoked within 1000 ms.")
+            },
+            1000
+        )
+        try {
+            value.computePresentation(node, XValuePlace.TREE)
+        } catch (error: Throwable) {
+            node.finishUnavailable(error.message ?: error.javaClass.name)
+        }
     }
 
     private fun frameMap(frame: XStackFrame): Map<String, Any?> {
@@ -224,6 +273,116 @@ class VariableReader(
             is String -> value.toIntOrNull() ?: fallback
             else -> fallback
         }
+    }
+}
+
+private data class PresentationData(
+    val valuePreview: String,
+    val type: String?,
+    val hasChildren: Boolean?,
+    val presentationError: String? = null
+)
+
+private class CollectingValueNode(
+    private val maxStringLength: Int,
+    private val done: (PresentationData) -> Unit
+) : XValueNode {
+    private var finished = false
+
+    override fun setPresentation(icon: Icon?, type: String?, value: String, hasChildren: Boolean) {
+        finish(
+            PresentationData(
+                valuePreview = truncateDisplay(value),
+                type = type?.takeIf { it.isNotBlank() }?.let { truncateDisplay(it) },
+                hasChildren = hasChildren
+            )
+        )
+    }
+
+    override fun setPresentation(icon: Icon?, presentation: XValuePresentation, hasChildren: Boolean) {
+        val rendered = PresentationTextCollector()
+        try {
+            presentation.renderValue(rendered)
+            finish(
+                PresentationData(
+                    valuePreview = truncateDisplay(rendered.text()),
+                    type = presentation.type?.takeIf { it.isNotBlank() }?.let { truncateDisplay(it) },
+                    hasChildren = hasChildren
+                )
+            )
+        } catch (error: Throwable) {
+            finishUnavailable(error.message ?: error.javaClass.name, hasChildren)
+        }
+    }
+
+    override fun setFullValueEvaluator(fullValueEvaluator: XFullValueEvaluator) {}
+
+    override fun isObsolete(): Boolean = finished
+
+    fun finishUnavailable(error: String, hasChildren: Boolean? = null) {
+        finish(
+            PresentationData(
+                valuePreview = "<unavailable>",
+                type = null,
+                hasChildren = hasChildren,
+                presentationError = error
+            )
+        )
+    }
+
+    private fun finish(data: PresentationData) {
+        if (finished) return
+        finished = true
+        ApplicationManager.getApplication().invokeLater {
+            done(data)
+        }
+    }
+
+    private fun truncateDisplay(value: String): String {
+        if (value.length <= maxStringLength) return value
+        return value.take(maxStringLength)
+    }
+}
+
+private class PresentationTextCollector : XValuePresentation.XValueTextRenderer {
+    private val builder = StringBuilder()
+
+    fun text(): String = builder.toString()
+
+    override fun renderValue(value: String) {
+        builder.append(value)
+    }
+
+    override fun renderStringValue(value: String) {
+        builder.append(value)
+    }
+
+    override fun renderNumericValue(value: String) {
+        builder.append(value)
+    }
+
+    override fun renderKeywordValue(value: String) {
+        builder.append(value)
+    }
+
+    override fun renderValue(value: String, key: TextAttributesKey) {
+        builder.append(value)
+    }
+
+    override fun renderStringValue(value: String, additionalSpecialCharsToHighlight: String?, maxLength: Int) {
+        builder.append(if (maxLength >= 0) value.take(maxLength) else value)
+    }
+
+    override fun renderComment(comment: String) {
+        builder.append(comment)
+    }
+
+    override fun renderSpecialSymbol(symbol: String) {
+        builder.append(symbol)
+    }
+
+    override fun renderError(error: String) {
+        builder.append(error)
     }
 }
 

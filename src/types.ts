@@ -105,6 +105,7 @@ export interface SerializedVariable {
   truncated: boolean;
   redacted?: boolean;
   cycle?: boolean;
+  presentationError?: string;
 }
 
 export type SerializedVariableMap = Record<string, SerializedVariable | {
