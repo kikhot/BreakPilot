@@ -1,0 +1,29 @@
+agents:
+  - id: breakpilot-debugger
+    name: BreakPilot Debugger
+    purpose: Runtime debugging for AI coding agents
+    package: "@breakpilot/cli"
+    mcp:
+      server_identity: breakpilot-debugger
+      command: breakpilot
+      args: ["mcp", "serve"]
+    cli:
+      daemon: "breakpilot serve --http-port 27890 --ide-bridge-port 27891"
+      control_url_env: BREAKPILOT_CONTROL_URL
+      default_control_url: "http://127.0.0.1:27890"
+    instructions: |
+      Use BreakPilot when runtime facts are needed to resolve a coding task.
+      Prefer MCP tools over CLI. Do not start MCP stdio and the CLI daemon together unless the task explicitly requires it.
+      First use attach/launch or adopt an IDE session, set minimal breakpoints, wait with a timeout, then read a focused snapshot.
+      Prefer inspect_variable over full snapshots. Use evaluate with mode readonly by default.
+      Record observed file, line, frame, variables, and eval results before continue_execution or disconnect.
+      Do not attach to production or unknown remote targets. Do not use unsafe eval without explicit user permission.
+    environment:
+      - BREAKPILOT_CONTROL_URL
+      - BREAKPILOT_POLICY
+      - BREAKPILOT_WORKSPACE
+      - BREAKPILOT_PYTHON_ADAPTER
+      - BREAKPILOT_JS_DEBUG_COMMAND
+      - BREAKPILOT_JS_DEBUG_ARGS
+      - BREAKPILOT_JAVA_ADAPTER_COMMAND
+      - BREAKPILOT_JAVA_ADAPTER_ARGS
