@@ -1,6 +1,6 @@
 {
-  "name": "debug-mcp-vscode",
-  "displayName": "Debug MCP",
+  "name": "breakpilot-vscode",
+  "displayName": "BreakPilot",
   "version": "0.1.0",
   "publisher": "breakpilot",
   "engines": {
@@ -8,28 +8,28 @@
   },
   "activationEvents": [
     "onStartupFinished",
-    "onCommand:debugMcp.connect",
-    "onCommand:debugMcp.showPanel"
+    "onCommand:breakpilot.connect",
+    "onCommand:breakpilot.showPanel"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "debugMcp.connect",
-        "title": "Debug MCP: Connect Bridge"
+        "command": "breakpilot.connect",
+        "title": "BreakPilot: Connect Bridge"
       },
       {
-        "command": "debugMcp.showPanel",
-        "title": "Debug MCP: Show AI Debug Panel"
+        "command": "breakpilot.showPanel",
+        "title": "BreakPilot: Show AI Debug Panel"
       }
     ],
     "configuration": {
-      "title": "Debug MCP",
+      "title": "BreakPilot",
       "properties": {
-        "debugMcp.bridgeUrl": {
+        "breakpilot.bridgeUrl": {
           "type": "string",
           "default": "ws://127.0.0.1:27891",
-          "description": "Local Debug MCP IDE Bridge WebSocket URL."
+          "description": "Local BreakPilot IDE Bridge WebSocket URL."
         }
       }
     }

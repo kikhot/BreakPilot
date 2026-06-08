@@ -1,12 +1,12 @@
 <idea-plugin>
-    <id>com.breakpilot.debugmcp</id>
-    <name>BreakPilot Debug MCP</name>
+    <id>com.breakpilot.debugger</id>
+    <name>BreakPilot</name>
     <vendor>BreakPilot</vendor>
     <description>Expose IDEA XDebugger sessions to BreakPilot over the local IDE bridge.</description>
 
     <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <postStartupActivity implementation="plugin.DebugMcpIdeaPlugin"/>
+        <postStartupActivity implementation="plugin.BreakPilotIdeaPlugin"/>
     </extensions>
 </idea-plugin>

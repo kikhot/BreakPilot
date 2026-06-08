@@ -6,7 +6,7 @@ export class DebugPanelProvider {
   show() {
     this.panel =
       this.panel ??
-      vscode.window.createWebviewPanel("debugMcp", "AI Debugger", vscode.ViewColumn.Beside, {
+      vscode.window.createWebviewPanel("breakpilot", "AI Debugger", vscode.ViewColumn.Beside, {
         enableScripts: true
       });
     this.panel.webview.html = `

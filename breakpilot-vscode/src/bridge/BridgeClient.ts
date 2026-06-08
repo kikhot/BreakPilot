@@ -10,7 +10,7 @@ export class BridgeClient {
 
   connect() {
     const url = vscode.workspace
-      .getConfiguration("debugMcp")
+      .getConfiguration("breakpilot")
       .get<string>("bridgeUrl", "ws://127.0.0.1:27891");
     this.socket?.close();
     this.socket = new WebSocket(url);

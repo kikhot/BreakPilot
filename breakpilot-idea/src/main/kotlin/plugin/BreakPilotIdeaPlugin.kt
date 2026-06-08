@@ -12,14 +12,14 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.StartupActivity
 
-class DebugMcpIdeaPlugin : StartupActivity.DumbAware {
+class BreakPilotIdeaPlugin : StartupActivity.DumbAware {
     override fun runActivity(project: Project) {
-        project.service<DebugMcpIdeaProjectService>()
+        project.service<BreakPilotIdeaProjectService>()
     }
 }
 
 @Service(Service.Level.PROJECT)
-class DebugMcpIdeaProjectService(private val project: Project) : Disposable {
+class BreakPilotIdeaProjectService(private val project: Project) : Disposable {
     private val bridge = BridgeClient(project)
     private val tracker = IdeSessionTracker(project, bridge)
     private val variableReader = VariableReader(project, tracker)

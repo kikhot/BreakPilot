@@ -13,8 +13,8 @@ export function activate(context: vscode.ExtensionContext) {
   const panel = new DebugPanelProvider();
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("debugMcp.connect", () => bridge.connect()),
-    vscode.commands.registerCommand("debugMcp.showPanel", () => panel.show()),
+    vscode.commands.registerCommand("breakpilot.connect", () => bridge.connect()),
+    vscode.commands.registerCommand("breakpilot.showPanel", () => panel.show()),
     bridge.onMessage(async (message) => {
       await breakpoints.handle(message);
       await commands.handle(message);
