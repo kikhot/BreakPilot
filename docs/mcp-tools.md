@@ -312,17 +312,17 @@ Bridge 来源：`ide_session_started`、`ide_session_paused`、`ide_session_resu
 ## CLI 示例
 
 ```bash
-debug-mcp serve --http-port 27890 --ide-bridge-port 27891
-debug-mcp attach --lang python --host 127.0.0.1 --port 5678 --pretty
-debug-mcp bp set --session sess_001 --file src/app.py --line 42 --pretty
-debug-mcp wait --session sess_001 --timeout 30000 --pretty
-debug-mcp snapshot --session sess_001 --profile focused --max-items 10 --pretty
-debug-mcp inspect-variable --session sess_001 --ref 7 --depth 1 --max-items 20 --pretty
-debug-mcp snapshot --session sess_001 --profile full --depth 2 --max-items 20 --pretty
-debug-mcp eval --session sess_001 --mode readonly order.customer.name --pretty
-debug-mcp continue --session sess_001 --pretty
-debug-mcp disconnect --session sess_001 --pretty
-debug-mcp ide sessions --pretty
-debug-mcp ide adopt --ide-session idea_ab12 --pretty
-debug-mcp ide context --ide-session idea_ab12 --profile focused --pretty
+breakpilot serve --http-port 27890 --ide-bridge-port 27891
+breakpilot attach --lang python --host 127.0.0.1 --port 5678 --pretty
+breakpilot bp set --session sess_001 --file src/app.py --line 42 --pretty
+breakpilot wait --session sess_001 --timeout 30000 --pretty
+breakpilot snapshot --session sess_001 --profile focused --max-items 10 --pretty
+breakpilot inspect-variable --session sess_001 --ref 7 --depth 1 --max-items 20 --pretty
+breakpilot snapshot --session sess_001 --profile full --depth 2 --max-items 20 --pretty
+breakpilot eval --session sess_001 --mode readonly order.customer.name --pretty
+breakpilot continue --session sess_001 --pretty
+breakpilot disconnect --session sess_001 --pretty
+breakpilot ide sessions --pretty
+breakpilot ide adopt --ide-session idea_ab12 --pretty
+breakpilot ide context --ide-session idea_ab12 --profile focused --pretty
 ```

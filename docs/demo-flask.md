@@ -12,23 +12,23 @@
 python -m debugpy --listen 127.0.0.1:5678 --wait-for-client examples/flask/app.py
 ```
 
-## 启动 Debug MCP daemon
+## 启动 BreakPilot daemon
 
 ```bash
-debug-mcp serve --http-port 27890 --ide-bridge-port 27891
+breakpilot serve --http-port 27890 --ide-bridge-port 27891
 ```
 
 ## 调试顺序
 
 ```bash
-debug-mcp attach --lang python --host 127.0.0.1 --port 5678 --pretty
-debug-mcp bp set --session sess_001 --file examples/flask/app.py --line 12 --pretty
-debug-mcp wait --session sess_001 --timeout 30000 --pretty
-debug-mcp snapshot --session sess_001 --profile focused --max-items 10 --pretty
-debug-mcp inspect-variable --session sess_001 --ref 7 --depth 1 --max-items 20 --pretty
-debug-mcp eval --session sess_001 --mode readonly order["discount"] --pretty
-debug-mcp continue --session sess_001 --pretty
-debug-mcp disconnect --session sess_001 --pretty
+breakpilot attach --lang python --host 127.0.0.1 --port 5678 --pretty
+breakpilot bp set --session sess_001 --file examples/flask/app.py --line 12 --pretty
+breakpilot wait --session sess_001 --timeout 30000 --pretty
+breakpilot snapshot --session sess_001 --profile focused --max-items 10 --pretty
+breakpilot inspect-variable --session sess_001 --ref 7 --depth 1 --max-items 20 --pretty
+breakpilot eval --session sess_001 --mode readonly order["discount"] --pretty
+breakpilot continue --session sess_001 --pretty
+breakpilot disconnect --session sess_001 --pretty
 ```
 
 触发请求：
