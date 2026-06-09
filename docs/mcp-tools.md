@@ -1,5 +1,7 @@
 # MCP 工具接口
 
+这些工具名和 schema 属于 BreakPilot 的共享 control plane。MCP stdio 是主要 Agent-facing 协议，CLI/HTTP daemon 也复用同一套 `src/control/toolDefinitions.ts` 和 `src/control/ToolRouter.ts`。目录职责见 [control-tools.md](control-tools.md) 和 [project-structure.md](project-structure.md)。
+
 统一成功格式：
 
 ```json

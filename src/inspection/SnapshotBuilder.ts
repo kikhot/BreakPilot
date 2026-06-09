@@ -1,12 +1,12 @@
 import type {
-  AnyRecord,
-  DapVariable,
   ObjectFieldsMode,
   RuntimeSnapshot,
   ScopeCategory,
   SnapshotProfile,
   VariableLimits
-} from "../types.ts";
+} from "../types/inspection.ts";
+import type { DapVariable } from "../types/dap.ts";
+import type { AnyRecord } from "../types/json.ts";
 import { DapSession } from "../dap/DapSession.ts";
 import { VariableSerializer } from "./VariableSerializer.ts";
 import { classifyScope, isFocusedCategory, variableCategory } from "./ScopeClassifier.ts";

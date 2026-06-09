@@ -1,4 +1,4 @@
-import type { BreakpointRecord } from "../types.ts";
+import type { BreakpointRecord } from "../types/sessions.ts";
 import { IdeBridgeServer } from "./IdeBridgeServer.ts";
 
 export class VisualBreakpointSync {

@@ -5,7 +5,8 @@ import {
   DapServerProcessTransport,
   DapSocketTransport
 } from "../dap/DapTransport.ts";
-import type { AnyRecord, DebugLanguage } from "../types.ts";
+import type { DebugLanguage } from "../types/debug.ts";
+import type { AnyRecord } from "../types/json.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 
 interface LanguageAdapterOptions {

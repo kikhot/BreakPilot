@@ -1,4 +1,4 @@
-import type { DebugSessionRecord, SessionSummary } from "../types.ts";
+import type { DebugSessionRecord, SessionSummary } from "../types/sessions.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 
 export class SessionStore {

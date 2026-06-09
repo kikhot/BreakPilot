@@ -376,9 +376,9 @@ Agent 默认应按以下顺序使用：
 
 改动文件：
 
-- `src/adapters/LanguageAdapter.ts`
-- 新增 `src/serializers/ScopeClassifier.ts`
-- `src/types.ts`
+- `src/debug-adapters/LanguageAdapter.ts`
+- 新增 `src/inspection/ScopeClassifier.ts`
+- `src/types/`
 
 任务：
 
@@ -403,11 +403,11 @@ Agent 默认应按以下顺序使用：
 
 改动文件：
 
-- `src/mcp/schemas.ts`
+- `src/control/toolDefinitions.ts`
 - `src/cli.ts`
-- `src/serializers/SnapshotBuilder.ts`
-- `src/serializers/VariableSerializer.ts`
-- `src/types.ts`
+- `src/inspection/SnapshotBuilder.ts`
+- `src/inspection/VariableSerializer.ts`
+- `src/types/`
 - `docs/mcp-tools.md`
 - `docs/demo-flask.md`
 - `test/smoke.ts`

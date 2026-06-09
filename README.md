@@ -2,8 +2,9 @@
 
 BreakPilot is an Agent Runtime Debugger for AI-callable collaborative runtime debugging. It combines:
 
-- a minimal MCP stdio server;
-- an optional local HTTP control API for CLI usage;
+- a shared control plane used by MCP stdio, HTTP, and CLI flows;
+- a minimal MCP stdio adapter;
+- an optional local HTTP control API for daemon-backed CLI usage;
 - a Debug Adapter Protocol client;
 - session, breakpoint, snapshot, evaluate, audit, and policy modules;
 - an IDE Bridge protocol with a lightweight WebSocket server;
@@ -57,4 +58,4 @@ node dist/src/cli.js tools
 - `evaluate`
 - `continue_execution`
 
-See [docs/architecture.md](docs/architecture.md) and [docs/mcp-tools.md](docs/mcp-tools.md) for the full design.
+See [docs/architecture.md](docs/architecture.md), [docs/project-structure.md](docs/project-structure.md), [docs/control-tools.md](docs/control-tools.md), and [docs/mcp-tools.md](docs/mcp-tools.md) for the full design.

@@ -1,31 +1,28 @@
 import path from "node:path";
-import { AdapterRegistry } from "../adapters/AdapterRegistry.ts";
-import type { LanguageAdapter } from "../adapters/LanguageAdapter.ts";
+import { AdapterRegistry } from "../debug-adapters/AdapterRegistry.ts";
+import type { LanguageAdapter } from "../debug-adapters/LanguageAdapter.ts";
 import { DapSession } from "../dap/DapSession.ts";
 import { SecurityPolicy } from "../security/SecurityPolicy.ts";
 import { AuditLogger } from "../audit/AuditLogger.ts";
+import type { ToolResponse } from "../types/control.ts";
+import type { DebugLanguage, DebugMode, SessionOwnerValue } from "../types/debug.ts";
+import type { StoppedEvent } from "../types/dap.ts";
+import type { IdeDebugSessionInfo } from "../types/ide.ts";
+import type { RuntimeSnapshot } from "../types/inspection.ts";
+import type { AnyRecord } from "../types/json.ts";
+import type { BreakPilotPolicy, EvaluateMode } from "../types/policy.ts";
 import type {
-  AnyRecord,
-  DebugLanguage,
-  BreakPilotPolicy,
-  DebugMode,
   DebugSessionRecord,
-  EvaluateMode,
-  IdeDebugSessionInfo,
-  RuntimeSnapshot,
-  SessionOwnerValue,
-  SessionSummary,
-  StoppedEvent,
-  ToolResponse
-} from "../types.ts";
+  SessionSummary
+} from "../types/sessions.ts";
 import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
 import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
 import { BreakPilotError, ErrorCodes, ok } from "../utils/errors.ts";
 import { makeSessionId } from "../utils/ids.ts";
 import { resolveWorkspacePath } from "../utils/path.ts";
 import { BreakpointManager } from "./BreakpointManager.ts";
-import { DapRuntimeProvider } from "./DapRuntimeProvider.ts";
-import { IdeRuntimeProvider } from "./IdeRuntimeProvider.ts";
+import { DapRuntimeProvider } from "../runtime/providers/DapRuntimeProvider.ts";
+import { IdeRuntimeProvider } from "../runtime/providers/IdeRuntimeProvider.ts";
 import { SessionCoordinator } from "./SessionCoordinator.ts";
 import { SessionOwner, SessionState } from "./SessionOwner.ts";
 import { SessionStore } from "./SessionStore.ts";

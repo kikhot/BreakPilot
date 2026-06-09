@@ -1,5 +1,6 @@
 import path from "node:path";
-import type { BreakpointInput, BreakpointRecord, DapBreakpoint } from "../types.ts";
+import type { DapBreakpoint } from "../types/dap.ts";
+import type { BreakpointInput, BreakpointRecord } from "../types/sessions.ts";
 import { makeBreakpointId } from "../utils/ids.ts";
 
 export class BreakpointManager {

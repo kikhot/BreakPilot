@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AnyRecord, BreakPilotPolicy } from "../types.ts";
+import type { AnyRecord } from "../types/json.ts";
+import type { BreakPilotPolicy } from "../types/policy.ts";
 import { makeAuditId } from "../utils/ids.ts";
 
 export class AuditLogger {

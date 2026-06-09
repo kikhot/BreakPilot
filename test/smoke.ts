@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { loadPolicy, parseYamlSubset } from "../src/security/PolicyLoader.ts";
-import { createRuntime } from "../src/server.ts";
-import { toolDefinitions } from "../src/mcp/schemas.ts";
-import { RuntimeSnapshotBuilder } from "../src/serializers/SnapshotBuilder.ts";
+import { toolDefinitions } from "../src/control/toolDefinitions.ts";
+import { RuntimeSnapshotBuilder } from "../src/inspection/SnapshotBuilder.ts";
+import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { IdeClientRegistry } from "../src/ide/IdeClientRegistry.ts";
 import type { DapSession } from "../src/dap/DapSession.ts";
-import type { AnyRecord } from "../src/types.ts";
+import type { AnyRecord } from "../src/types/json.ts";
 import type { Socket } from "node:net";
 
 const parsed = parseYamlSubset(`

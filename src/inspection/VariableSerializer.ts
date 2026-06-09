@@ -1,11 +1,11 @@
 import type {
-  DapVariable,
   ObjectFieldsMode,
   SerializedVariable,
   SerializedVariableMap,
   VariableKind,
   VariableLimits
-} from "../types.ts";
+} from "../types/inspection.ts";
+import type { DapVariable } from "../types/dap.ts";
 import { DapSession } from "../dap/DapSession.ts";
 import { Redactor } from "./Redactor.ts";
 

@@ -1,4 +1,5 @@
-import type { AnyRecord, BridgeMessage } from "../types.ts";
+import type { BridgeMessage } from "../types/ide.ts";
+import type { AnyRecord } from "../types/json.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { createDeferred, type Deferred, withTimeout } from "../utils/timeout.ts";
 import { makeId } from "../utils/ids.ts";

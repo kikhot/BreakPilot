@@ -1,7 +1,8 @@
-import type { AnyRecord, ToolDefinition, ToolResponse } from "../types.ts";
+import type { ToolDefinition, ToolResponse } from "../types/control.ts";
+import type { AnyRecord } from "../types/json.ts";
 import { DebugSessionManager } from "../sessions/DebugSessionManager.ts";
 import { fail } from "../utils/errors.ts";
-import { toolDefinitions } from "./schemas.ts";
+import { toolDefinitions } from "./toolDefinitions.ts";
 
 type ToolHandler = (args: AnyRecord) => Promise<ToolResponse<unknown>> | ToolResponse<unknown>;
 

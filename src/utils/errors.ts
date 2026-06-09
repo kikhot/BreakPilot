@@ -1,4 +1,5 @@
-import type { AnyRecord, ToolResponse } from "../types.ts";
+import type { ToolResponse } from "../types/control.ts";
+import type { AnyRecord } from "../types/json.ts";
 
 export const ErrorCodes = Object.freeze({
   SESSION_NOT_FOUND: "SESSION_NOT_FOUND",

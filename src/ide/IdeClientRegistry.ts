@@ -1,5 +1,6 @@
 import type { Socket } from "node:net";
-import type { AnyRecord, BridgeMessage, IdeClientInfo, IdeDebugSessionInfo } from "../types.ts";
+import type { BridgeMessage, IdeClientInfo, IdeDebugSessionInfo } from "../types/ide.ts";
+import type { AnyRecord } from "../types/json.ts";
 import { makeId } from "../utils/ids.ts";
 
 export interface IdeClientRecord extends IdeClientInfo {

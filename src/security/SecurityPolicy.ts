@@ -1,5 +1,7 @@
 import path from "node:path";
-import type { AnyRecord, BreakPilotPolicy, EvaluateMode, VariableLimits } from "../types.ts";
+import type { VariableLimits } from "../types/inspection.ts";
+import type { AnyRecord } from "../types/json.ts";
+import type { BreakPilotPolicy, EvaluateMode } from "../types/policy.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { assertInsideWorkspace } from "../utils/path.ts";
 

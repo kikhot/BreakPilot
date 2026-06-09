@@ -1,4 +1,6 @@
-import type { DapScope, DapVariable, DebugLanguage, ScopeCategory } from "../types.ts";
+import type { DapScope, DapVariable } from "../types/dap.ts";
+import type { DebugLanguage } from "../types/debug.ts";
+import type { ScopeCategory } from "../types/inspection.ts";
 
 const focusedCategories = new Set<ScopeCategory>(["arguments", "locals", "receiver"]);
 

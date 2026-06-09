@@ -1,22 +1,17 @@
 import type {
-  AnyRecord,
-  BreakpointRecord,
   BridgeMessage,
-  DapBreakpoint,
-  DebugLanguage,
   IdeDebugSessionInfo,
-  InspectVariableResult,
-  RuntimeDebugProvider,
-  RuntimeSnapshot,
-  RuntimeStepKind,
-  StoppedEvent,
-  VariableLimits
-} from "../types.ts";
-import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
-import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
-import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
-import { makeId } from "../utils/ids.ts";
-import { createDeferred, withTimeout } from "../utils/timeout.ts";
+} from "../../types/ide.ts";
+import type { DapBreakpoint, StoppedEvent } from "../../types/dap.ts";
+import type { DebugLanguage, RuntimeStepKind } from "../../types/debug.ts";
+import type { InspectVariableResult, RuntimeSnapshot, VariableLimits } from "../../types/inspection.ts";
+import type { AnyRecord } from "../../types/json.ts";
+import type { BreakpointRecord, RuntimeDebugProvider } from "../../types/sessions.ts";
+import { IdeBridgeServer } from "../../ide/IdeBridgeServer.ts";
+import { IdeMessageTypes } from "../../ide/IdeProtocol.ts";
+import { BreakPilotError, ErrorCodes } from "../../utils/errors.ts";
+import { makeId } from "../../utils/ids.ts";
+import { createDeferred, withTimeout } from "../../utils/timeout.ts";
 
 type BridgeEvent = { clientId?: string; message: BridgeMessage };
 

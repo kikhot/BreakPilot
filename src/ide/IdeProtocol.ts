@@ -1,4 +1,4 @@
-import type { BridgeMessage } from "../types.ts";
+import type { BridgeMessage } from "../types/ide.ts";
 
 export const IdeMessageTypes = Object.freeze({
   IDE_REGISTER: "ide_register",

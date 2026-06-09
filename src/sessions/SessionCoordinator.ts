@@ -1,4 +1,5 @@
-import type { DebugSessionRecord, SessionOwnerValue } from "../types.ts";
+import type { SessionOwnerValue } from "../types/debug.ts";
+import type { DebugSessionRecord } from "../types/sessions.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { SessionOwner } from "./SessionOwner.ts";
 

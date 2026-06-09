@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AnyRecord, BreakPilotPolicy, JsonValue } from "../types.ts";
+import type { AnyRecord, JsonValue } from "../types/json.ts";
+import type { BreakPilotPolicy } from "../types/policy.ts";
 import { normalizeWorkspaceRoot } from "../utils/path.ts";
 
 const DEFAULT_POLICY: BreakPilotPolicy = {

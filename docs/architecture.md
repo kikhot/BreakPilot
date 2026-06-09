@@ -152,15 +152,25 @@ running -> terminated
 
 ```text
 Claude/Codex/Cursor/Cline
-        | MCP stdio / CLI JSON
+        | MCP stdio / CLI / HTTP JSON
         v
 +------------------------------+
-| MCP Server / CLI Daemon      |
-| - ToolRouter                 |
+| Protocol Adapters            |
+| - src/mcp/stdioServer.ts     |
+| - src/http/controlServer.ts  |
+| - src/cli.ts + src/cli/      |
++--------------+---------------+
+               |
+               | shared control tools
+               v
++------------------------------+
+| Control Plane                |
+| - src/control/ToolRouter     |
+| - toolDefinitions            |
 | - DebugSessionManager        |
 | - SessionCoordinator         |
 | - BreakpointManager          |
-| - SnapshotBuilder            |
+| - RuntimeSnapshotBuilder     |
 | - SecurityPolicy             |
 | - AuditLogger                |
 +--------------+---------------+

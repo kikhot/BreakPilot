@@ -1,14 +1,8 @@
 import { EventEmitter } from "node:events";
-import type {
-  AnyRecord,
-  BreakpointRecord,
-  DapBreakpoint,
-  DapScope,
-  DapStackFrame,
-  DapVariable,
-  DebugLanguage,
-  StoppedEvent
-} from "../types.ts";
+import type { DapBreakpoint, DapScope, DapStackFrame, DapVariable, StoppedEvent } from "../types/dap.ts";
+import type { DebugLanguage } from "../types/debug.ts";
+import type { AnyRecord } from "../types/json.ts";
+import type { BreakpointRecord } from "../types/sessions.ts";
 import { DapClient } from "./DapClient.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { createDeferred, withTimeout } from "../utils/timeout.ts";

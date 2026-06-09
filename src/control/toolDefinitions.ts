@@ -1,4 +1,4 @@
-import type { ToolDefinition } from "../types.ts";
+import type { ToolDefinition } from "../types/control.ts";
 
 const sessionId = {
   type: "string",

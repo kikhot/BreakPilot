@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import net from "node:net";
-import type { DapTransport } from "../types.ts";
+import type { DapTransport } from "../types/dap.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 
 interface ProcessTransportOptions {

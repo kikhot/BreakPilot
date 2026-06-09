@@ -1,18 +1,14 @@
 import type {
-  AnyRecord,
-  BreakpointRecord,
   DapBreakpoint,
-  DebugLanguage,
-  InspectVariableResult,
-  RuntimeDebugProvider,
-  RuntimeSnapshot,
-  RuntimeStepKind,
-  StoppedEvent,
-  VariableLimits
-} from "../types.ts";
-import { DapSession } from "../dap/DapSession.ts";
-import { RuntimeSnapshotBuilder } from "../serializers/SnapshotBuilder.ts";
-import { VariableSerializer } from "../serializers/VariableSerializer.ts";
+  StoppedEvent
+} from "../../types/dap.ts";
+import type { DebugLanguage, RuntimeStepKind } from "../../types/debug.ts";
+import type { InspectVariableResult, RuntimeSnapshot, VariableLimits } from "../../types/inspection.ts";
+import type { AnyRecord } from "../../types/json.ts";
+import type { BreakpointRecord, RuntimeDebugProvider } from "../../types/sessions.ts";
+import { DapSession } from "../../dap/DapSession.ts";
+import { RuntimeSnapshotBuilder } from "../../inspection/SnapshotBuilder.ts";
+import { VariableSerializer } from "../../inspection/VariableSerializer.ts";
 
 export class DapRuntimeProvider implements RuntimeDebugProvider {
   kind = "dap";

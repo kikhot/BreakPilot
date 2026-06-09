@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
-import type { BridgeMessage, IdeClientInfo, IdeDebugSessionInfo } from "../types.ts";
+import type { BridgeMessage, IdeClientInfo, IdeDebugSessionInfo } from "../types/ide.ts";
 import { AuditLogger } from "../audit/AuditLogger.ts";
 import { IdeClientRegistry } from "./IdeClientRegistry.ts";
 import { IdeMessageTypes, makeBridgeMessage } from "./IdeProtocol.ts";

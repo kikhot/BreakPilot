@@ -1,5 +1,5 @@
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
-import type { DebugLanguage } from "../types.ts";
+import type { DebugLanguage } from "../types/debug.ts";
 import { JavaAdapter, NodeAdapter, PythonAdapter } from "./LanguageAdapter.ts";
 import type { LanguageAdapter } from "./LanguageAdapter.ts";
 

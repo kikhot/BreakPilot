@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import type { AnyRecord, DapMessage, DapResponseMessage, DapTransport } from "../types.ts";
+import type { DapMessage, DapResponseMessage, DapTransport } from "../types/dap.ts";
+import type { AnyRecord } from "../types/json.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { withTimeout } from "../utils/timeout.ts";
 
