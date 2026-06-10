@@ -7,7 +7,7 @@ BreakPilot keeps protocol adapters thin and puts shared debugging behavior behin
 | `src/control/` | Shared tool definitions and `ToolRouter` used by MCP stdio, HTTP, and CLI flows. |
 | `src/mcp/` | MCP stdio / JSON-RPC adapter only. It should not own shared tool schemas or routing. |
 | `src/http/` | Local HTTP control server for daemon-backed CLI usage. |
-| `src/cli.ts`, `src/cli/` | `breakpilot` bin entrypoint plus CLI flag parsing, help, command mapping, and HTTP client. |
+| `src/cli.ts`, `src/cli/` | `breakpilot` bin entrypoint plus the yargs program (`program.ts`), per-domain command modules (`commands/`), help/version i18n (`i18n.ts`), command context (`context.ts`), version reader (`version.ts`), and HTTP client. |
 | `src/runtime/` | Runtime factory and runtime provider adapters. |
 | `src/sessions/` | Session store, breakpoint manager, ownership/coordinator logic, and session orchestration. |
 | `src/dap/` | Debug Adapter Protocol client, transport, and session wrapper. |

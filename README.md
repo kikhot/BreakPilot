@@ -44,6 +44,31 @@ After `npm run build`, the compiled entrypoints are also available:
 node dist/src/cli.js tools
 ```
 
+## CLI Help, Version, and Language
+
+The CLI provides human-readable help and version output (machine-readable
+commands still emit JSON):
+
+```bash
+breakpilot --help        # or -h, or: breakpilot help
+breakpilot --version     # or -v; prints the package.json version
+breakpilot <command> --help   # per-command help, e.g. breakpilot bp set --help
+```
+
+Help and version text can be rendered in English (`en_US`, default) or
+Simplified Chinese (`zh_CN`); unsupported values fall back to English:
+
+```bash
+breakpilot --help --locale zh_CN
+```
+
+Breakpoint commands accept both `breakpoint` and the `bp` alias:
+
+```bash
+breakpilot breakpoint set --session <sessionId> --file <file> --line <line>
+breakpilot bp set --session <sessionId> --file <file> --line <line>
+```
+
 ## Example MCP Tools
 
 - `debug_launch`
