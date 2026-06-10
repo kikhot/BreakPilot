@@ -1,3 +1,8 @@
+// NOTE: The hand-written-parsing-coupled helpers below (CliFlagValue, CliFlags,
+// stringFlag, stringArrayFlag, parseFlags) are deprecated and pending removal.
+// They remain only because main.ts and commands.ts still consume them; they will
+// be deleted after those commands are migrated to the new parser (see tasks 3.2 / 8.1).
+// 待命令迁移后删除引用。
 export type CliFlagValue = string | boolean;
 export type CliFlags = Record<string, CliFlagValue | string[] | undefined>;
 
@@ -42,7 +47,7 @@ export function parseFlags(tokens: string[]): { flags: CliFlags; positional: str
   return { flags, positional };
 }
 
-export function numberOrUndefined(value: CliFlagValue | string[] | undefined): number | undefined {
+export function parseNumber(value: CliFlagValue | number | string[] | undefined): number | undefined {
   if (value === undefined || Array.isArray(value)) return undefined;
   const parsed = Number(value);
   return Number.isNaN(parsed) ? undefined : parsed;

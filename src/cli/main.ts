@@ -1,114 +1,90 @@
-import { toolDefinitions } from "../control/toolDefinitions.ts";
-import { startHttp } from "../http/controlServer.ts";
-import { startStdio } from "../mcp/stdioServer.ts";
-import { createRuntime } from "../runtime/createRuntime.ts";
-import { loadPolicy } from "../security/PolicyLoader.ts";
-import type { AnyRecord } from "../types/json.ts";
-import { stableJson } from "../utils/json.ts";
-import { toolFromCommand } from "./commands.ts";
-import { getJson, postTool } from "./controlClient.ts";
-import { parseFlags, stringFlag } from "./flags.ts";
-import { help } from "./help.ts";
+/**
+ * BreakPilot CLI entry orchestration.
+ *
+ * `runCli` wires the yargs-based command framework together (R8/R9.3):
+ *   resolveLocale -> createTranslator -> resolveControlUrl -> createContext ->
+ *   buildProgram -> parseAsync.
+ *
+ * Parse/validation errors are handled by the program's `.fail()` handler
+ * (stderr + exit code 1, no JSON help blob); `runCli` does not perform any
+ * hand-written command dispatch. The `output()` JSON helper is kept and
+ * exported here because it is reused by `context.ts` and the command modules.
+ */
 
+import { stableJson } from "../utils/json.ts";
+import { createContext, resolveControlUrl } from "./context.ts";
+import { createTranslator, resolveLocale } from "./i18n.ts";
+import { buildProgram } from "./program.ts";
+import { getVersion } from "./version.ts";
+
+/**
+ * Write a value to stdout as (optionally pretty) JSON followed by a newline.
+ * Reused by the command context and command modules for machine-readable
+ * output; behavior is unchanged from the pre-yargs implementation.
+ */
 export function output(value: unknown, pretty = false): void {
   process.stdout.write(`${stableJson(value, pretty)}\n`);
 }
 
+/**
+ * Scan argv for the `--control-url` flag, mirroring how `resolveLocale` scans
+ * for `--locale`. Supports both `--control-url <value>` and
+ * `--control-url=<value>`. Returns `undefined` when the flag is absent so that
+ * `resolveControlUrl` can apply the env var / default precedence (R6).
+ *
+ * This lightweight scan runs before the yargs program is built so the resolved
+ * control URL can be baked into the command context.
+ */
+function scanControlUrl(argv: string[]): string | undefined {
+  if (!Array.isArray(argv)) return undefined;
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (typeof token !== "string") continue;
+    if (token === "--control-url") {
+      const next = argv[i + 1];
+      if (typeof next === "string" && !next.startsWith("--")) return next;
+      continue;
+    }
+    if (token.startsWith("--control-url=")) {
+      return token.slice("--control-url=".length);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Build and run the yargs CLI program.
+ *
+ * The effective locale must be resolved before building the program because
+ * command/option descriptions are static strings written at construction time.
+ *
+ * Behavior:
+ * - Bare invocation (no args) prints the global help to stdout and exits 0
+ *   (R1.2); this is delegated to yargs by parsing `--help`.
+ * - Parse/validation failures are reported by the program's `.fail()` handler
+ *   (stderr + exit code 1) which then throws to abort the parse before any
+ *   command handler runs. `runCli` catches and swallows that already-reported
+ *   failure so nothing is written to stdout (R4.2/R9.3); the exit code is
+ *   already set to 1.
+ */
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
-  const [command, maybeSubcommand, ...rest] = argv;
-  const subcommand = maybeSubcommand && !maybeSubcommand.startsWith("--") ? maybeSubcommand : undefined;
-  const flagTokens = subcommand ? rest : [maybeSubcommand, ...rest].filter(Boolean) as string[];
-  const { flags, positional } = parseFlags(flagTokens);
-  const pretty = Boolean(flags.pretty);
-  const controlUrl = stringFlag(flags, "control-url") || process.env.BREAKPILOT_CONTROL_URL || "http://127.0.0.1:27890";
+  const locale = resolveLocale(argv);
+  const t = createTranslator(locale);
+  const controlUrl = resolveControlUrl(scanControlUrl(argv), process.env);
+  const ctx = createContext({ controlUrl, t, locale });
+  const program = buildProgram(ctx, getVersion());
 
-  if (!command || command === "help" || flags.help) {
-    output(help(), true);
-    return;
-  }
-
-  if (command === "tools") {
-    output({ tools: toolDefinitions }, pretty);
-    return;
-  }
-
-  if (command === "mcp" && subcommand === "serve") {
-    const runtime = createRuntime({
-      policyPath: stringFlag(flags, "policy"),
-      enableIdeBridge: Boolean(flags["ide-bridge-port"] || flags["ide-bridge"]),
-      ideBridgePort: stringFlag(flags, "ide-bridge-port")
-    });
-    if (runtime.ideBridge) {
-      const status = runtime.ideBridge.status();
-      process.stderr.write(`breakpilot IDE bridge listening on ${status.host}:${status.port}\n`);
-    }
-    startStdio(runtime.router);
-    return;
-  }
-
-  if (command === "policy" && subcommand === "print") {
-    output(loadPolicy(stringFlag(flags, "policy")), pretty || true);
-    return;
-  }
-
-  if (command === "serve") {
-    const runtime = createRuntime({
-      policyPath: stringFlag(flags, "policy"),
-      enableIdeBridge: Boolean(flags["ide-bridge-port"] || flags["ide-bridge"]),
-      ideBridgePort: stringFlag(flags, "ide-bridge-port")
-    });
-    const port = stringFlag(flags, "http-port") ?? 27890;
-    const host = stringFlag(flags, "host") || "127.0.0.1";
-    startHttp(runtime.router, port, host);
-    process.stderr.write(`breakpilot HTTP listening on ${host}:${port}\n`);
-    if (runtime.ideBridge) {
-      const status = runtime.ideBridge.status();
-      process.stderr.write(`breakpilot IDE bridge listening on ${status.host}:${status.port}\n`);
-    }
-    return;
-  }
-
-  if (command === "call") {
-    const name = subcommand;
-    const json = positional.join(" ");
-    const args = json ? JSON.parse(json) as AnyRecord : {};
-    if (!name) {
-      output({ ok: false, error: { message: "Tool name is required for call." } }, true);
-      process.exitCode = 1;
-      return;
-    }
-    output(await postTool(String(controlUrl), name, args), pretty);
-    return;
-  }
-
-  if (command === "daemon" && subcommand === "status") {
-    output(await getJson(`${controlUrl}/status`), pretty);
-    return;
-  }
-
-  const [toolName, args] = toolFromCommand(command, subcommand, flags, positional);
-  if (!toolName) {
-    output({ ok: false, error: { message: `Unknown command: ${command}` }, help: help() }, true);
-    process.exitCode = 1;
-    return;
-  }
+  // Bare invocation: show global help on stdout and exit 0 (R1.2). yargs renders
+  // the help itself when `--help` is parsed, keeping stdout free of any JSON.
+  const effectiveArgv = argv.length === 0 ? ["--help"] : argv;
 
   try {
-    const result = await postTool(String(controlUrl), toolName, args ?? {});
-    output(result, pretty);
-    if (result.ok === false) process.exitCode = 1;
-  } catch (error) {
-    const typedError = error as Error;
-    output(
-      {
-        ok: false,
-        error: {
-          message: `Cannot reach breakpilot daemon at ${controlUrl}. Start it with: breakpilot serve --http-port 27890 --ide-bridge-port 27891`,
-          cause: typedError.message
-        }
-      },
-      true
-    );
-    process.exitCode = 1;
+    await program.parseAsync(effectiveArgv);
+  } catch {
+    // The `.fail()` handler already wrote a human-readable error to stderr and
+    // set process.exitCode = 1, then threw to prevent the matched command
+    // handler from running (and polluting stdout with JSON). Swallow here: do
+    // NOT write anything to stdout. Ensure the failure exit code is set.
+    if (!process.exitCode) process.exitCode = 1;
   }
 }

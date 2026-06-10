@@ -40,6 +40,11 @@
   "license": "UNLICENSED",
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/yargs": "^17.0.35",
+    "fast-check": "^4.8.0",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "yargs": "^18.0.0"
   }
 }
