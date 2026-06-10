@@ -13,11 +13,7 @@
 
 import assert from "node:assert/strict";
 import fc from "fast-check";
-import {
-  optionalSplitArgs,
-  splitArgs,
-  type CliFlagValue
-} from "../src/cli/flags.ts";
+import { optionalSplitArgs, splitArgs } from "../src/cli/flags.ts";
 
 const RUNS = 1000;
 
@@ -34,7 +30,7 @@ const RUNS = 1000;
 //     - undefined when the split result is empty, otherwise the array
 // ---------------------------------------------------------------------------
 
-type FlagInput = CliFlagValue | string[] | undefined;
+type FlagInput = string | boolean | string[] | undefined;
 
 function referenceSplitArgs(value: FlagInput): string[] {
   if (!value) return [];
