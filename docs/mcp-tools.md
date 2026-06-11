@@ -37,7 +37,7 @@
 ```json
 {
   "lang": "python",
-  "program": "examples/flask/app.py",
+  "program": "examples/python/app.py",
   "args": [],
   "cwd": ".",
   "mode": "headless",

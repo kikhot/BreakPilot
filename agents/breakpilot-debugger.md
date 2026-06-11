@@ -12,7 +12,7 @@ MCP sequence:
 
 ```json
 {"tool":"debug_attach","arguments":{"lang":"python","host":"127.0.0.1","port":5678,"mode":"headless","owner":"mcp"}}
-{"tool":"set_breakpoint","arguments":{"sessionId":"<sessionId>","file":"examples/flask/app.py","line":12}}
+{"tool":"set_breakpoint","arguments":{"sessionId":"<sessionId>","file":"examples/python/app.py","line":12}}
 {"tool":"wait_for_breakpoint","arguments":{"sessionId":"<sessionId>","timeoutMs":30000}}
 {"tool":"get_runtime_snapshot","arguments":{"sessionId":"<sessionId>","profile":"focused","objectFields":"preview","maxDepth":1,"maxItems":10}}
 {"tool":"inspect_variable","arguments":{"sessionId":"<sessionId>","variablesReference":7,"maxDepth":1,"maxItems":20}}
@@ -39,7 +39,7 @@ Use the actual `sessionId` and `variablesReference` returned by prior tool calls
 breakpilot serve --http-port 27890 --ide-bridge-port 27891
 breakpilot tools --pretty
 breakpilot attach --lang python --host 127.0.0.1 --port 5678 --pretty
-breakpilot bp set --session <sessionId> --file examples/flask/app.py --line 12 --pretty
+breakpilot bp set --session <sessionId> --file examples/python/app.py --line 12 --pretty
 breakpilot wait --session <sessionId> --timeout 30000 --pretty
 breakpilot snapshot --session <sessionId> --profile focused --max-items 10 --pretty
 breakpilot inspect-variable --session <sessionId> --ref <variablesReference> --depth 1 --max-items 20 --pretty

@@ -259,7 +259,7 @@ step_out
 Use this style of prompt in Codex, Claude Code, Kiro, or another MCP-capable coding agent:
 
 ```text
-Use breakpilot-debugger MCP. Attach to the Python debugpy process on 127.0.0.1:5678, set a breakpoint in examples/flask/app.py at line 12, wait for the breakpoint, then read a focused runtime snapshot. Do not use unsafe evaluate.
+Use breakpilot-debugger MCP. Attach to the Python debugpy process on 127.0.0.1:5678, set a breakpoint in examples/python/app.py at line 12, wait for the breakpoint, then read a focused runtime snapshot. Do not use unsafe evaluate.
 ```
 
 Expected tool flow:

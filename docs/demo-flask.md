@@ -2,14 +2,14 @@
 
 ## 示例代码
 
-见 [examples/flask/app.py](../examples/flask/app.py)。
+见 [examples/python/app.py](../examples/python/app.py)。
 
 问题现象：订单折扣字段从请求 JSON 进入时可能是字符串，导致金额计算出现类型错误或错误结果。
 
 ## 启动 debugpy
 
 ```bash
-python -m debugpy --listen 127.0.0.1:5678 --wait-for-client examples/flask/app.py
+python -m debugpy --listen 127.0.0.1:5678 --wait-for-client examples/python/app.py
 ```
 
 ## 启动 BreakPilot daemon
@@ -22,7 +22,7 @@ breakpilot serve --http-port 27890 --ide-bridge-port 27891
 
 ```bash
 breakpilot attach --lang python --host 127.0.0.1 --port 5678 --pretty
-breakpilot bp set --session sess_001 --file examples/flask/app.py --line 12 --pretty
+breakpilot bp set --session sess_001 --file examples/python/app.py --line 12 --pretty
 breakpilot wait --session sess_001 --timeout 30000 --pretty
 breakpilot snapshot --session sess_001 --profile focused --max-items 10 --pretty
 breakpilot inspect-variable --session sess_001 --ref 7 --depth 1 --max-items 20 --pretty

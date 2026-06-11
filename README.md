@@ -83,4 +83,4 @@ breakpilot bp set --session <sessionId> --file <file> --line <line>
 - `evaluate`
 - `continue_execution`
 
-See [docs/architecture.md](docs/architecture.md), [docs/project-structure.md](docs/project-structure.md), [docs/control-tools.md](docs/control-tools.md), and [docs/mcp-tools.md](docs/mcp-tools.md) for the full design.
+See [docs/architecture.md](docs/architecture.md), [docs/project-structure.md](docs/project-structure.md), [docs/control-tools.md](docs/control-tools.md), [docs/mcp-tools.md](docs/mcp-tools.md), and [docs/vibecoding-mcp.md](docs/vibecoding-mcp.md) for the full design and agent setup.
