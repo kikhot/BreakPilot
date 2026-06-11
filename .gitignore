@@ -12,3 +12,6 @@ breakpilot-idea/.gradle/
 breakpilot-idea/.intellijPlatform/
 breakpilot-idea/build/
 *.class
+
+.kiro/
+.codex/
