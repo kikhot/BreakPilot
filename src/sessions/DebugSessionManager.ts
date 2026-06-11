@@ -1,6 +1,9 @@
 import path from "node:path";
 import { AdapterRegistry } from "../debug-adapters/AdapterRegistry.ts";
+import { CapabilityReporter } from "../control/CapabilityReporter.ts";
 import type { LanguageAdapter } from "../debug-adapters/LanguageAdapter.ts";
+import type { AdapterContext } from "../debug-adapters/types.ts";
+import { DapClient } from "../dap/DapClient.ts";
 import { DapSession } from "../dap/DapSession.ts";
 import { SecurityPolicy } from "../security/SecurityPolicy.ts";
 import { AuditLogger } from "../audit/AuditLogger.ts";
@@ -21,6 +24,7 @@ import { BreakPilotError, ErrorCodes, ok } from "../utils/errors.ts";
 import { makeSessionId } from "../utils/ids.ts";
 import { resolveWorkspacePath } from "../utils/path.ts";
 import { BreakpointManager } from "./BreakpointManager.ts";
+import { LanguageResolver } from "./LanguageResolver.ts";
 import { DapRuntimeProvider } from "../runtime/providers/DapRuntimeProvider.ts";
 import { IdeRuntimeProvider } from "../runtime/providers/IdeRuntimeProvider.ts";
 import { SessionCoordinator } from "./SessionCoordinator.ts";
@@ -74,6 +78,7 @@ export class DebugSessionManager {
   security: SecurityPolicy;
   audit: AuditLogger;
   adapters: AdapterRegistry;
+  languageResolver: LanguageResolver;
   sessions: SessionStore;
   breakpoints: BreakpointManager;
   coordinator: SessionCoordinator;
@@ -84,6 +89,7 @@ export class DebugSessionManager {
     this.security = new SecurityPolicy(policy);
     this.audit = new AuditLogger(policy);
     this.adapters = new AdapterRegistry();
+    this.languageResolver = new LanguageResolver(this.adapters);
     this.sessions = new SessionStore();
     this.breakpoints = new BreakpointManager();
     this.coordinator = new SessionCoordinator();
@@ -94,8 +100,14 @@ export class DebugSessionManager {
   async debugLaunch(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const auditId = this.audit.record("debug_launch_requested", { args: this.#safeArgs(args) });
     this.security.assertNotProduction(args);
-    const language = String(args.lang || args.language || "python").toLowerCase();
-    const adapter = this.adapters.get(language);
+    const { language, adapter } = this.languageResolver.resolve({
+      lang: args.lang,
+      language: args.language,
+      program: args.program,
+      file: args.file,
+      request: "launch"
+    });
+    const adapterImpl = adapter as LanguageAdapter;
     const workspaceRoot = args.workspace
       ? resolveWorkspacePath(this.security.workspaceRoot(), args.workspace)
       : this.security.workspaceRoot();
@@ -103,7 +115,7 @@ export class DebugSessionManager {
 
     const session = await this.#createSession({
       language,
-      adapter,
+      adapter: adapterImpl,
       workspaceRoot,
       mode: args.mode ?? "headless",
       owner: args.owner ?? SessionOwner.MCP,
@@ -113,9 +125,9 @@ export class DebugSessionManager {
     try {
       const dap = session.dap;
       if (!dap) throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP session was not initialized.");
-      await dap.initialize(adapter.adapterId);
+      await dap.initialize(adapterImpl.adapterId);
       await dap.launch(
-        adapter.normalizeLaunchArgs({
+        adapterImpl.normalizeLaunchArgs({
           ...args,
           workspaceRoot
         })
@@ -139,27 +151,61 @@ export class DebugSessionManager {
     const port = Number(args.port ?? (args.lang === "node" ? 9229 : 5678));
     this.security.assertHostPort(host, port, "attach");
     this.security.assertNotProduction(args);
-    const language = String(args.lang || args.language || "python").toLowerCase();
-    const adapter = this.adapters.get(language);
+    const { language, adapter } = this.languageResolver.resolve({
+      lang: args.lang,
+      language: args.language,
+      program: args.program,
+      file: args.file,
+      request: "attach"
+    });
+    const adapterImpl = adapter as LanguageAdapter;
     const workspaceRoot = args.workspace
       ? resolveWorkspacePath(this.security.workspaceRoot(), args.workspace)
       : this.security.workspaceRoot();
 
+    // Delegate attach-target classification to the resolved adapter rather than
+    // interpreting host/port in core session logic (Requirement 4.3). This runs
+    // BEFORE #createSession and OUTSIDE the ATTACH_FAILED try/catch below, so:
+    //   - a `classifyAttachTarget` validation throw (e.g. Java's INVALID_ARGUMENT
+    //     for a missing host or out-of-range port) propagates as-is with no
+    //     session created and no connection opened, and
+    //   - an `unknown` classification rejects the attach before any transport is
+    //     built (Requirement 4.8).
+    const classification = adapterImpl.classifyAttachTarget(host, port);
+    if (classification.kind === "unknown") {
+      throw new BreakPilotError(
+        ErrorCodes.INVALID_ARGUMENT,
+        `Could not determine the attach-target endpoint type for ${language} at ${host}:${port}.`,
+        { language, host, port }
+      );
+    }
+
+    // Always feed host/port into normalizeAttachArgs via the adapter args. For a
+    // `delegated` target the host/port is NOT a DAP endpoint (e.g. a Java JDWP
+    // endpoint): the adapter spawns its own server (e.g. the JDI bridge) and the
+    // core must never dial it directly, so we strip any dapHost/dapPort that
+    // would otherwise select a direct DAP socket (Requirements 4.2, 4.4).
+    const adapterArgs: AnyRecord = { ...args, attachMode: true, host, port };
+    if (classification.kind === "delegated") {
+      delete adapterArgs.dapHost;
+      delete adapterArgs.dapPort;
+    }
+
     const session = await this.#createSession({
       language,
-      adapter,
+      adapter: adapterImpl,
       workspaceRoot,
       mode: args.mode ?? "headless",
       owner: args.owner ?? SessionOwner.MCP,
-      adapterArgs: { ...args, attachMode: true, host, port }
+      adapterArgs
     });
 
     try {
       const dap = session.dap;
       if (!dap) throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP session was not initialized.");
-      await dap.initialize(adapter.adapterId);
+      await dap.initialize(adapterImpl.adapterId);
       await dap.attach(
-        adapter.normalizeAttachArgs({
+        adapterImpl.normalizeAttachArgs({
           ...args,
           host,
           port,
@@ -518,6 +564,13 @@ export class DebugSessionManager {
     return ok(null, { sessions: this.sessions.list() }, auditId);
   }
 
+  async listSupportedLanguages(): Promise<ToolResponse> {
+    const auditId = this.audit.record("list_supported_languages_requested");
+    const reporter = new CapabilityReporter(this.adapters, this.audit);
+    const languages = await reporter.report();
+    return ok(null, { languages }, auditId);
+  }
+
   listBreakpoints(args: DebugToolArgs = {}): ToolResponse {
     if (!args.sessionId) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
@@ -540,7 +593,22 @@ export class DebugSessionManager {
     adapterArgs = {}
   }: CreateSessionInput): Promise<DebugSessionRecord> {
     const sessionId = makeSessionId();
-    const client = adapter.createClient({ ...adapterArgs, workspaceRoot });
+    // Build the adapter context from the create-session input. The core never
+    // selects a transport itself — it drives the adapter contract lifecycle
+    // and lets the adapter own transport selection (Requirements 1.6, 4.1).
+    const ctx: AdapterContext = {
+      workspaceRoot,
+      env: adapterArgs.env as Record<string, string | undefined> | undefined,
+      args: { ...adapterArgs, workspaceRoot }
+    };
+    // Initialize the adapter FIRST, before any session record is created or
+    // added to the store. On validation/initialization failure this throws and
+    // no partial session state is left behind (Requirements 1.7, 1.9). The
+    // security gates (assertNotProduction / assertWorkspacePath / assertHostPort)
+    // have already run in debugLaunch/debugAttach before #createSession.
+    await adapter.initialize(ctx);
+    const transport = await adapter.createTransport(ctx);
+    const client = new DapClient(transport);
     const dap = new DapSession({ sessionId, language, client, workspaceRoot });
     const provider = new DapRuntimeProvider(dap);
     const record: DebugSessionRecord = {

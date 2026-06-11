@@ -23,6 +23,7 @@ export class ToolRouter {
       ["continue_execution", (args: AnyRecord) => this.manager.continueExecution(args)],
       ["remove_breakpoint", (args: AnyRecord) => this.manager.removeBreakpoint(args)],
       ["list_sessions", () => this.manager.listSessions()],
+      ["list_supported_languages", () => this.manager.listSupportedLanguages()],
       ["list_breakpoints", (args: AnyRecord) => this.manager.listBreakpoints(args)],
       ["step_over", (args: AnyRecord) => this.manager.step(args, "over")],
       ["step_into", (args: AnyRecord) => this.manager.step(args, "into")],
@@ -36,7 +37,17 @@ export class ToolRouter {
   }
 
   listTools(): ToolDefinition[] {
-    return toolDefinitions;
+    const identifiers = this.manager.adapters.listIdentifiers();
+    const clone = structuredClone(toolDefinitions) as ToolDefinition[];
+    for (const tool of clone) {
+      if (tool.name === "debug_launch" || tool.name === "debug_attach") {
+        const lang = tool.inputSchema?.properties?.lang;
+        if (lang) {
+          lang.enum = identifiers;
+        }
+      }
+    }
+    return clone;
   }
 
   async callTool(name: string, args: AnyRecord = {}): Promise<ToolResponse> {

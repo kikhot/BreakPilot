@@ -1,0 +1,159 @@
+{
+  "language": "node",
+  "adapter": "NodeAdapter",
+  "note": "Frozen pre-refactor baseline of normalizeLaunchArgs/normalizeAttachArgs. Oracle for Property 15.",
+  "cases": {
+    "normalizeLaunchArgs": [
+      {
+        "name": "program-only",
+        "input": {
+          "program": "index.js"
+        },
+        "output": {
+          "type": "pwa-node",
+          "request": "launch",
+          "name": "BreakPilot Node Launch",
+          "program": "index.js",
+          "args": [],
+          "stopOnEntry": false,
+          "sourceMaps": true
+        }
+      },
+      {
+        "name": "program-with-name-args-cwd-env-stopOnEntry-sourceMaps",
+        "input": {
+          "name": "Custom Node Launch",
+          "program": "server.js",
+          "args": [
+            "--port",
+            "3000"
+          ],
+          "cwd": "/srv/app",
+          "env": {
+            "NODE_ENV": "development"
+          },
+          "stopOnEntry": true,
+          "sourceMaps": false
+        },
+        "output": {
+          "type": "pwa-node",
+          "request": "launch",
+          "name": "Custom Node Launch",
+          "program": "server.js",
+          "args": [
+            "--port",
+            "3000"
+          ],
+          "cwd": "/srv/app",
+          "env": {
+            "NODE_ENV": "development"
+          },
+          "stopOnEntry": true,
+          "sourceMaps": false
+        }
+      },
+      {
+        "name": "program-with-workspaceRoot-fallback",
+        "input": {
+          "program": "app.js",
+          "workspaceRoot": "/ws"
+        },
+        "output": {
+          "type": "pwa-node",
+          "request": "launch",
+          "name": "BreakPilot Node Launch",
+          "program": "app.js",
+          "args": [],
+          "cwd": "/ws",
+          "stopOnEntry": false,
+          "sourceMaps": true
+        }
+      },
+      {
+        "name": "dap-passthrough",
+        "input": {
+          "dap": {
+            "type": "pwa-node",
+            "request": "launch",
+            "program": "raw.js",
+            "custom": 7
+          },
+          "program": "ignored.js"
+        },
+        "output": {
+          "type": "pwa-node",
+          "request": "launch",
+          "program": "raw.js",
+          "custom": 7
+        }
+      }
+    ],
+    "normalizeAttachArgs": [
+      {
+        "name": "defaults",
+        "input": {},
+        "output": {
+          "type": "pwa-node",
+          "request": "attach",
+          "name": "BreakPilot Node Attach",
+          "address": "127.0.0.1",
+          "port": 9229,
+          "sourceMaps": true
+        }
+      },
+      {
+        "name": "host-port-name-cwd-sourceMaps",
+        "input": {
+          "host": "127.0.0.1",
+          "port": 9230,
+          "name": "Custom Node Attach",
+          "cwd": "/srv/app",
+          "sourceMaps": false
+        },
+        "output": {
+          "type": "pwa-node",
+          "request": "attach",
+          "name": "Custom Node Attach",
+          "address": "127.0.0.1",
+          "port": 9230,
+          "cwd": "/srv/app",
+          "sourceMaps": false
+        }
+      },
+      {
+        "name": "workspaceRoot-fallback",
+        "input": {
+          "workspaceRoot": "/ws"
+        },
+        "output": {
+          "type": "pwa-node",
+          "request": "attach",
+          "name": "BreakPilot Node Attach",
+          "address": "127.0.0.1",
+          "port": 9229,
+          "cwd": "/ws",
+          "sourceMaps": true
+        }
+      },
+      {
+        "name": "dap-passthrough",
+        "input": {
+          "dap": {
+            "type": "pwa-node",
+            "request": "attach",
+            "address": "remote",
+            "port": 5858
+          },
+          "host": "ignored",
+          "port": 1
+        },
+        "output": {
+          "type": "pwa-node",
+          "request": "attach",
+          "address": "remote",
+          "port": 5858
+        }
+      }
+    ]
+  }
+}

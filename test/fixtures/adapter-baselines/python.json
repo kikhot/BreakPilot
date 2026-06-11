@@ -1,0 +1,133 @@
+{
+  "language": "python",
+  "adapter": "PythonAdapter",
+  "note": "Frozen pre-refactor baseline of normalizeLaunchArgs/normalizeAttachArgs. Oracle for Property 15.",
+  "cases": {
+    "normalizeLaunchArgs": [
+      {
+        "name": "program-only",
+        "input": {
+          "program": "app.py"
+        },
+        "output": {
+          "program": "app.py",
+          "args": [],
+          "justMyCode": true,
+          "stopOnEntry": false
+        }
+      },
+      {
+        "name": "program-with-args-cwd-env-stopOnEntry-justMyCode",
+        "input": {
+          "program": "main.py",
+          "args": [
+            "--verbose",
+            "1"
+          ],
+          "cwd": "/work/project",
+          "env": {
+            "PYTHONPATH": "/work/project/src",
+            "DEBUG": "1"
+          },
+          "stopOnEntry": true,
+          "justMyCode": false
+        },
+        "output": {
+          "program": "main.py",
+          "args": [
+            "--verbose",
+            "1"
+          ],
+          "cwd": "/work/project",
+          "env": {
+            "PYTHONPATH": "/work/project/src",
+            "DEBUG": "1"
+          },
+          "justMyCode": false,
+          "stopOnEntry": true
+        }
+      },
+      {
+        "name": "module-with-workspaceRoot-fallback",
+        "input": {
+          "module": "pytest",
+          "workspaceRoot": "/repo"
+        },
+        "output": {
+          "module": "pytest",
+          "args": [],
+          "cwd": "/repo",
+          "justMyCode": true,
+          "stopOnEntry": false
+        }
+      },
+      {
+        "name": "dap-passthrough",
+        "input": {
+          "dap": {
+            "request": "launch",
+            "program": "raw.py",
+            "type": "python",
+            "extra": true
+          },
+          "program": "ignored.py"
+        },
+        "output": {
+          "request": "launch",
+          "program": "raw.py",
+          "type": "python",
+          "extra": true
+        }
+      }
+    ],
+    "normalizeAttachArgs": [
+      {
+        "name": "defaults",
+        "input": {},
+        "output": {
+          "connect": {
+            "host": "127.0.0.1",
+            "port": 5678
+          },
+          "justMyCode": true
+        }
+      },
+      {
+        "name": "host-port-justMyCode",
+        "input": {
+          "host": "10.0.0.5",
+          "port": 5999,
+          "justMyCode": false
+        },
+        "output": {
+          "connect": {
+            "host": "10.0.0.5",
+            "port": 5999
+          },
+          "justMyCode": false
+        }
+      },
+      {
+        "name": "dap-passthrough",
+        "input": {
+          "dap": {
+            "request": "attach",
+            "connect": {
+              "host": "remote",
+              "port": 1234
+            }
+          },
+          "host": "ignored",
+          "port": 1
+        },
+        "output": {
+          "request": "attach",
+          "connect": {
+            "host": "remote",
+            "port": 1234
+          }
+        }
+      }
+    ]
+  }
+}

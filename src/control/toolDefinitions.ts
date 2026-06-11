@@ -12,7 +12,7 @@ export const toolDefinitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        lang: { type: "string", enum: ["python", "node", "typescript", "java"] },
+        lang: { type: "string", description: "Language identifier of a registered debug adapter." },
         program: { type: "string" },
         module: { type: "string" },
         args: { type: "array", items: { type: "string" } },
@@ -23,8 +23,7 @@ export const toolDefinitions: ToolDefinition[] = [
         adapterCommand: { type: "string" },
         adapterArgs: { type: "array", items: { type: "string" } },
         dap: { type: "object", description: "Raw adapter-specific launch arguments." }
-      },
-      required: ["lang"]
+      }
     }
   },
   {
@@ -33,7 +32,7 @@ export const toolDefinitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        lang: { type: "string", enum: ["python", "node", "typescript", "java"] },
+        lang: { type: "string", description: "Language identifier of a registered debug adapter." },
         host: { type: "string", default: "127.0.0.1" },
         port: { type: "number" },
         mode: { type: "string", enum: ["headless", "ide", "hybrid"], default: "headless" },
@@ -43,8 +42,7 @@ export const toolDefinitions: ToolDefinition[] = [
         dapHost: { type: "string", description: "Connect directly to an existing DAP server." },
         dapPort: { type: "number", description: "Existing DAP server port." },
         dap: { type: "object", description: "Raw adapter-specific attach arguments." }
-      },
-      required: ["lang"]
+      }
     }
   },
   {
@@ -179,6 +177,12 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: "list_sessions",
     description: "List active debug sessions.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "list_supported_languages",
+    description:
+      "List languages supported by registered debug adapters, with display name, attach support, and live availability from environment validation.",
     inputSchema: { type: "object", properties: {} }
   },
   {
