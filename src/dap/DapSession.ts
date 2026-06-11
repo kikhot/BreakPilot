@@ -18,6 +18,7 @@ export class DapSession extends EventEmitter {
   configurationDone: boolean;
   initializedWaiters: ReturnType<typeof createDeferred<void>>[];
   startRequestPromise: Promise<AnyRecord> | null;
+  startError: Error | null;
   stoppedQueue: StoppedEvent[];
   stoppedWaiters: ReturnType<typeof createDeferred<StoppedEvent>>[];
   threadId: number | null;
@@ -44,6 +45,7 @@ export class DapSession extends EventEmitter {
     this.configurationDone = false;
     this.initializedWaiters = [];
     this.startRequestPromise = null;
+    this.startError = null;
     this.stoppedQueue = [];
     this.stoppedWaiters = [];
     this.threadId = null;
@@ -140,14 +142,45 @@ export class DapSession extends EventEmitter {
   }
 
   async #start(command: "launch" | "attach", args: AnyRecord): Promise<AnyRecord> {
-    this.startRequestPromise = this.client.request(command, args, args.timeoutMs ?? 60000);
-    this.startRequestPromise.catch(() => {
-      // The request is observed by callers through the race below or configurationDone.
+    const startRequest = this.client.request(command, args, args.timeoutMs ?? 60000);
+    this.startRequestPromise = startRequest;
+
+    // Wrap the start request so its outcome can be inspected without an
+    // unhandled rejection, and so a *late* failure is recorded on the session
+    // for downstream operations (waitForBreakpoint, continue, ...) to fail fast
+    // instead of hanging.
+    const tracked = startRequest.then(
+      (value) => ({ outcome: "resolved" as const, value }),
+      (error) => ({ outcome: "rejected" as const, error: error as Error })
+    );
+    void tracked.then((result) => {
+      if (result.outcome === "rejected") this.startError = result.error;
     });
-    return Promise.race([
-      this.startRequestPromise,
-      this.#waitForInitialized(args.initializedTimeoutMs ?? 15000).then(() => ({ initialized: true }))
+
+    const initialized = this.#waitForInitialized(args.initializedTimeoutMs ?? 15000).then(
+      () => ({ outcome: "initialized" as const })
+    );
+
+    const winner = await Promise.race([tracked, initialized]);
+    if (winner.outcome === "resolved") return winner.value;
+    if (winner.outcome === "rejected") throw winner.error;
+
+    // The `initialized` event won the race. Some adapters (e.g. debugpy in
+    // launch mode) legitimately delay or omit the start RESPONSE even though the
+    // debuggee is live, so we proceed rather than block on it. However, an
+    // *error* response (e.g. the Java bridge rejecting a launch with no
+    // mainClass) must not be masked as success: give the start request a short
+    // grace window to surface such an error before reporting the session ready.
+    const graceMs = (args.startGraceMs as number | undefined) ?? 750;
+    const settled = await Promise.race([
+      tracked,
+      new Promise<{ outcome: "pending" }>((resolve) =>
+        setTimeout(() => resolve({ outcome: "pending" }), graceMs)
+      )
     ]);
+    if (settled.outcome === "rejected") throw settled.error;
+    if (settled.outcome === "resolved") return settled.value;
+    return { initialized: true };
   }
 
   async #waitForInitialized(timeoutMs: number): Promise<void> {
@@ -169,6 +202,11 @@ export class DapSession extends EventEmitter {
     const queued = this.#takeQueuedStopped();
     if (queued) return queued;
 
+    // If launch/attach failed (e.g. the adapter rejected the start request after
+    // the `initialized` race resolved), surface that error instead of blocking
+    // until the timeout — there will never be a stopped event.
+    if (this.startError) throw this.startError;
+
     const deferred = createDeferred<StoppedEvent>();
     this.stoppedWaiters.push(deferred);
     try {
@@ -185,6 +223,7 @@ export class DapSession extends EventEmitter {
       this.#removeStoppedWaiter(deferred);
       const stopped = this.#takeQueuedStopped();
       if (stopped) return stopped;
+      if (this.startError) throw this.startError;
       throw error;
     }
   }
@@ -247,10 +286,19 @@ export class DapSession extends EventEmitter {
   }
 
   async continue(threadId: number | null = this.threadId): Promise<AnyRecord> {
-    if (!threadId) {
+    let resolved = threadId;
+    if (!resolved) {
+      // No thread has been selected yet (e.g. attach to a VM suspended at
+      // startup before any stopped event). Fall back to the first live thread
+      // so the runtime can be resumed.
+      const threads = await this.threads();
+      resolved = (threads[0]?.id as number | undefined) ?? null;
+    }
+    if (!resolved) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "threadId is required for continue.");
     }
-    return this.client.request("continue", { threadId });
+    this.threadId = resolved;
+    return this.client.request("continue", { threadId: resolved });
   }
 
   async stepOver(threadId: number | null = this.threadId): Promise<AnyRecord> {
