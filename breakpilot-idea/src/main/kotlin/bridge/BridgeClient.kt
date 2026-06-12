@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
+import java.io.File
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.WebSocket
@@ -23,20 +24,21 @@ class BridgeClient(private val project: Project) : Disposable {
     private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val disposed = AtomicBoolean(false)
     private var socket: WebSocket? = null
-    private var bridgeUrl: String = "ws://127.0.0.1:27891"
+    private var explicitBridgeUrl: String? = null
     private var heartbeat: ScheduledFuture<*>? = null
     private val pending = mutableListOf<BridgeMessage>()
 
-    fun connect(url: String = bridgeUrl) {
-        bridgeUrl = url
+    fun connect(url: String? = null) {
+        if (url != null) explicitBridgeUrl = url
         if (disposed.get()) return
         socket?.abort()
+        val bridgeUrl = explicitBridgeUrl ?: resolveBridgeUrl()
         val client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3))
             .build()
         client.newWebSocketBuilder()
             .connectTimeout(Duration.ofSeconds(3))
-            .buildAsync(URI.create(url), Listener())
+            .buildAsync(URI.create(bridgeUrl), Listener())
             .exceptionally {
                 scheduleReconnect()
                 null
@@ -99,8 +101,20 @@ class BridgeClient(private val project: Project) : Disposable {
     private fun scheduleReconnect() {
         if (disposed.get()) return
         scheduler.schedule({
-            if (!disposed.get()) connect(bridgeUrl)
+            if (!disposed.get()) connect()
         }, 2, TimeUnit.SECONDS)
+    }
+
+    private fun resolveBridgeUrl(): String {
+        val root = project.basePath ?: return "ws://127.0.0.1:27891"
+        val manifest = File(root, ".breakpilot/hub.json")
+        if (!manifest.exists()) return "ws://127.0.0.1:27891"
+        return try {
+            val parsed = gson.fromJson(manifest.readText(), Map::class.java)
+            parsed["bridgeUrl"] as? String ?: "ws://127.0.0.1:27891"
+        } catch (_: Throwable) {
+            "ws://127.0.0.1:27891"
+        }
     }
 
     override fun dispose() {

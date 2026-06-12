@@ -255,7 +255,7 @@ export class DebugSessionManager {
     const selected = updated.find((bp) => bp.id === breakpoint.id) ?? breakpoint;
 
     if (session.providerKind === "dap") {
-      this.ideBridge?.broadcast({
+      this.#broadcastToWorkspace(session.workspaceRoot, {
         type: "agent_set_breakpoint",
         sessionId: session.sessionId,
         workspaceRoot: session.workspaceRoot,
@@ -294,7 +294,7 @@ export class DebugSessionManager {
         await session.provider.setBreakpoints(breakpoint.file, remaining);
       }
       if (session.providerKind === "dap") {
-        this.ideBridge?.broadcast({
+        this.#broadcastToWorkspace(session.workspaceRoot, {
           type: "agent_remove_breakpoint",
           sessionId: session.sessionId,
           breakpointId: args.breakpointId,
@@ -324,7 +324,7 @@ export class DebugSessionManager {
     });
     session.state = SessionState.PAUSED;
     if (session.providerKind === "dap") {
-      this.ideBridge?.broadcast({
+      this.#broadcastToWorkspace(session.workspaceRoot, {
         type: "ide_breakpoint_hit",
         sessionId: session.sessionId,
         stopped
@@ -733,12 +733,30 @@ export class DebugSessionManager {
       clientId: args.clientId,
       workspaceRoot
     });
+    if (!args.ideSessionId && sessions.length > 1) {
+      throw new BreakPilotError(
+        ErrorCodes.IDE_SESSION_AMBIGUOUS,
+        "Multiple IDE debug sessions match. Pass clientId and ideSessionId to choose one.",
+        { sessions }
+      );
+    }
     return (
       sessions.find((session) => session.active && session.state === SessionState.PAUSED) ??
       sessions.find((session) => session.state === SessionState.PAUSED) ??
       sessions.find((session) => session.active) ??
       sessions[0]
     );
+  }
+
+  #broadcastToWorkspace(workspaceRoot: string, message: AnyRecord): void {
+    if (!this.ideBridge) return;
+    const clients = this.ideBridge.registry.list().filter((client) => client.workspaceRoot === workspaceRoot);
+    for (const client of clients) {
+      this.ideBridge.sendToClient(client.clientId, {
+        ...message,
+        workspaceRoot
+      });
+    }
   }
 
   async #adoptActiveIdeSession(args: DebugToolArgs): Promise<DebugSessionRecord> {
