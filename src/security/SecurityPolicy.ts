@@ -69,7 +69,11 @@ export class SecurityPolicy {
     }
   }
 
-  assertEvaluate(expression: string, mode: EvaluateMode = this.policy.evaluate.defaultMode): void {
+  assertEvaluate(
+    expression: string,
+    mode: EvaluateMode = this.policy.evaluate.defaultMode,
+    options: { ideConfirmationAvailable?: boolean } = {}
+  ): void {
     const text = String(expression || "");
     if (!text.trim()) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Expression is required.");
@@ -82,7 +86,10 @@ export class SecurityPolicy {
       );
     }
     if (mode === "unsafe") {
-      if (this.policy.evaluate.requireConfirmationForUnsafe) {
+      // Headless/DAP providers cannot collect interactive IDE consent, so unsafe
+      // evaluate remains blocked there. IDE providers may proceed only to the
+      // structured confirmation flow; the expression is not executed yet.
+      if (this.policy.evaluate.requireConfirmationForUnsafe && !options.ideConfirmationAvailable) {
         throw new BreakPilotError(
           ErrorCodes.EVALUATE_BLOCKED_BY_POLICY,
           "Unsafe evaluate requires explicit user confirmation through the IDE bridge.",

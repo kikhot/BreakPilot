@@ -7,6 +7,12 @@ import type { DebugLanguage, RuntimeStepKind } from "../../types/debug.ts";
 import type { InspectVariableResult, RuntimeSnapshot, VariableLimits } from "../../types/inspection.ts";
 import type { AnyRecord } from "../../types/json.ts";
 import type { BreakpointRecord, RuntimeDebugProvider } from "../../types/sessions.ts";
+import {
+  debugControlConfirmationRequest,
+  evaluateConfirmationRequest,
+  type IdeConfirmationRequest,
+  variableInspectionConfirmationRequest
+} from "../../ide/ConfirmationPolicy.ts";
 import { IdeBridgeServer } from "../../ide/IdeBridgeServer.ts";
 import { IdeMessageTypes } from "../../ide/IdeProtocol.ts";
 import { BreakPilotError, ErrorCodes } from "../../utils/errors.ts";
@@ -136,6 +142,15 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot> {
+    // IDE snapshots can expose application data, so they go through the same
+    // consent path as evaluate even though they do not resume or mutate runtime.
+    await this.#confirm(
+      variableInspectionConfirmationRequest({
+        profile: args.profile,
+        frameId: args.frameId,
+        threadId: args.threadId
+      })
+    );
     const response = await this.#request(
       IdeMessageTypes.AGENT_REQUEST_VARIABLES,
       {
@@ -192,7 +207,13 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async evaluate(expression: string, options: AnyRecord = {}): Promise<AnyRecord> {
-    await this.#confirm("evaluate", { expression });
+    await this.#confirm(
+      evaluateConfirmationRequest(expression, options.mode ?? "readonly", {
+        frameId: options.frameId,
+        threadId: options.threadId,
+        context: options.context ?? "watch"
+      })
+    );
     return this.#command("evaluate", {
       expression,
       frameId: options.frameId,
@@ -202,12 +223,12 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async continue(threadId: number | null = this.threadId): Promise<AnyRecord> {
-    await this.#confirm("continue", { threadId });
+    await this.#confirm(debugControlConfirmationRequest("continue", { threadId }));
     return this.#command("continue", { threadId }, IdeMessageTypes.AGENT_CONTINUE);
   }
 
   async step(kind: RuntimeStepKind, threadId: number | null = this.threadId): Promise<AnyRecord> {
-    await this.#confirm(`step_${kind}`, { threadId });
+    await this.#confirm(debugControlConfirmationRequest(`step_${kind}`, { threadId }));
     const messageType =
       kind === "into"
         ? IdeMessageTypes.AGENT_STEP_INTO
@@ -221,7 +242,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     if (!options.terminateDebuggee) {
       return { detached: true, ideSessionId: this.ideSessionId };
     }
-    await this.#confirm("stop_debug", {});
+    await this.#confirm(debugControlConfirmationRequest("stop_debug", {}));
     return this.#command("stop_debug", options, IdeMessageTypes.AGENT_STOP_DEBUG);
   }
 
@@ -244,8 +265,11 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     return response.result ?? response;
   }
 
-  async #confirm(action: string, payload: AnyRecord): Promise<void> {
+  async #confirm(request: IdeConfirmationRequest): Promise<void> {
     const confirmationId = makeId("confirm");
+    const sessionInfo = this.#sessionInfo();
+    const topFrame = sessionInfo?.topFrame as AnyRecord | undefined;
+    const source = topFrame?.source as AnyRecord | undefined;
     const deferred = createDeferred<void>();
     const listener = ({ message }: BridgeEvent) => {
       if (message.confirmationId !== confirmationId) return;
@@ -253,7 +277,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         this.bridge.off("message", listener);
         deferred.reject(
           new BreakPilotError(ErrorCodes.USER_REJECTED_CONTINUE, "User rejected IDE debug command.", {
-            action,
+            action: request.action,
             sessionId: this.sessionId,
             ideSessionId: this.ideSessionId
           })
@@ -266,17 +290,28 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       }
     };
     this.bridge.on("message", listener);
+    // Enrich the policy-level request with live IDE context here so every
+    // caller gets consistent dialog text, audit metadata, and allowlist inputs.
     this.#send({
       type: "agent_request_confirmation",
       confirmationId,
-      action,
-      payload
+      action: request.action,
+      actionKind: request.actionKind,
+      riskLevel: request.riskLevel,
+      title: request.title,
+      description: request.description,
+      expressionPreview: request.expressionPreview,
+      sessionName: request.sessionName ?? sessionInfo?.name,
+      file: request.file ?? source?.path,
+      line: request.line ?? topFrame?.line,
+      rememberScopes: request.rememberScopes,
+      payload: request.payload
     });
     return withTimeout(deferred.promise, this.confirmationTimeoutMs, () => {
       this.bridge.off("message", listener);
       return new BreakPilotError(ErrorCodes.IDE_CONFIRMATION_TIMEOUT, "Timed out waiting for IDE confirmation.", {
         confirmationId,
-        action,
+        action: request.action,
         sessionId: this.sessionId,
         ideSessionId: this.ideSessionId
       });

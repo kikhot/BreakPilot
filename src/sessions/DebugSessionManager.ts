@@ -387,8 +387,11 @@ export class DebugSessionManager {
       expression: args.expression,
       mode
     });
-    this.security.assertEvaluate(args.expression, mode);
+    this.security.assertEvaluate(args.expression, mode, {
+      ideConfirmationAvailable: session.providerKind === "ide"
+    });
     const result = await session.provider.evaluate(args.expression, {
+      mode,
       frameId: args.frameId,
       threadId: args.threadId,
       context: args.context ?? "watch",
