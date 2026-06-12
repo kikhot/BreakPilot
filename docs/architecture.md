@@ -71,7 +71,7 @@
 - TypeScript 项目开启 sourceMap。
 - Java 项目支持 JDWP attach 或 Java Debug Adapter。
 - MCP Server、IDE 插件运行在同一可信 workspace。
-- 高风险 evaluate、远程 attach、长时间暂停必须经用户确认。
+- 高风险 evaluate、远程 attach、长时间暂停必须经用户确认；低风险 inspection 可按项目记住，调试控制可按 debug session 记住。
 - 本地 policy 文件可以限制 workspace、host、port、evaluate 和变量读取范围。
 
 ## 4. Not In Scope
@@ -317,21 +317,16 @@ TypeScript source map、Java pending breakpoint、异常断点、函数断点、
 
 ## 14. 用户确认机制
 
-命中断点默认暂停。IDE 插件弹窗：
+IDE bridge 使用结构化确认请求，而不是只传裸 action 字符串。请求包含 `actionKind`、`riskLevel`、`title`、`description`、`expressionPreview`、`sessionName`、`file`、`line` 和 `rememberScopes`。
 
-```text
-AI Debugger 命中断点
+权限分层：
 
-文件：src/service/order.ts
-行号：42
-函数：calculateAmount
+- `safe_inspection`：变量快照、inspect variable、readonly evaluate。默认首次按项目确认，可记住到当前 workspace。
+- `debug_control`：continue、step over/into/out、stop debug。默认首次按 debug session 确认，可记住到本次 debug session；`stop_debug` 也只允许 session 级记忆。
+- `high_risk`：unsafe evaluate、函数调用 evaluate、remote attach、workspace 外目标。默认每次确认，不提供永久允许；只有 IDEA Settings 中开启 advanced high-risk approvals 且 allowlist 命中时才可自动允许。
+- `breakpoint_management`：Agent 设置或移除断点。IDE 插件使用 notification/tool window 状态提示，不弹 modal。
 
-Agent 想读取当前变量并分析问题。
-
-[查看变量] [让 AI 分析] [继续执行] [单步跳过] [停止调试]
-```
-
-超时策略由 `breakpilot.yaml` 控制：可自动 continue 或 stop。为了避免打扰，未来应支持项目级、断点级自动允许。所有用户确认写审计日志。
+IDEA 插件提供 `Settings | Tools | BreakPilot`，可配置 safe inspection、debug control、trusted project、advanced high-risk allowlist，并可重置当前项目、当前 debug session 或全部 BreakPilot 决策。超时策略仍由 `breakpilot.yaml` 控制。所有 MCP 侧确认请求和执行结果写审计日志。
 
 ## 15. 安全设计
 

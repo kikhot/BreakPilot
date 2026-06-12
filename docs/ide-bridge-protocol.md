@@ -165,15 +165,48 @@
 
 ### 用户确认
 
+MCP 向 IDE 发送结构化确认请求。IDE 插件根据本地 Settings、项目 trusted 状态、session 级记忆和 allowlist 决定自动确认或弹出 modal。
+
+```json
+{
+  "type": "agent_request_confirmation",
+  "confirmationId": "confirm_001",
+  "sessionId": "sess_001",
+  "ideSessionId": "idea_ab12",
+  "action": "readonly_evaluate",
+  "actionKind": "safe_inspection",
+  "riskLevel": "safe",
+  "title": "Allow BreakPilot to inspect the paused debug state?",
+  "description": "BreakPilot wants to read a field or expression from the paused frame. Function calls are blocked by policy.",
+  "expressionPreview": "order[\"discount\"]",
+  "sessionName": "Debug Application",
+  "file": "/path/to/project/src/App.java",
+  "line": 42,
+  "rememberScopes": ["once", "project"]
+}
+```
+
+字段约束：
+
+- `actionKind`: `safe_inspection`、`debug_control`、`high_risk`、`breakpoint_management`。
+- `riskLevel`: `safe`、`control`、`high`。
+- `rememberScopes`: 当前请求允许的记忆范围。`safe_inspection` 默认 `once/project`，`debug_control` 默认 `once/session`，`high_risk` 默认只有 `once`。
+- `expressionPreview` 只用于 UI 展示和 allowlist 匹配，真正执行的表达式仍随 `agent_evaluate` 请求发送。
+
+IDE 用户确认后回传：
+
 ```json
 {
   "type": "user_confirm_continue",
   "confirmationId": "confirm_001",
   "sessionId": "sess_001",
   "ideSessionId": "idea_ab12",
-  "action": "continue"
+  "action": "continue",
+  "rememberScope": "session"
 }
 ```
+
+拒绝时继续发送 `user_reject_continue`。IDE 自动确认也必须发送 `user_confirm_continue`，便于 MCP 侧保持同一审计路径。
 
 ## 多窗口、多 Agent、路径映射
 
