@@ -30,7 +30,6 @@ export function createRuntime(options: RuntimeOptions = {}): RuntimeContext {
       port: bridgePort,
       audit
     });
-    ideBridge.start();
   }
   const manager = new DebugSessionManager({ policy, ideBridge });
   const router = new ControlToolRouter(manager);

@@ -52,6 +52,22 @@ function scanControlUrl(argv: string[]): string | undefined {
   return undefined;
 }
 
+function scanStringOption(argv: string[], name: string): string | undefined {
+  if (!Array.isArray(argv)) return undefined;
+  const prefix = `--${name}=`;
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (typeof token !== "string") continue;
+    if (token === `--${name}`) {
+      const next = argv[i + 1];
+      if (typeof next === "string" && !next.startsWith("--")) return next;
+      continue;
+    }
+    if (token.startsWith(prefix)) return token.slice(prefix.length);
+  }
+  return undefined;
+}
+
 /**
  * Build and run the yargs CLI program.
  *
@@ -70,8 +86,16 @@ function scanControlUrl(argv: string[]): string | undefined {
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   const locale = resolveLocale(argv);
   const t = createTranslator(locale);
-  const controlUrl = resolveControlUrl(scanControlUrl(argv), process.env);
-  const ctx = createContext({ controlUrl, t, locale });
+  const controlUrlFlag = scanControlUrl(argv);
+  const controlUrl = resolveControlUrl(controlUrlFlag, process.env);
+  const policyPath = scanStringOption(argv, "policy");
+  const ctx = createContext({
+    controlUrl,
+    t,
+    locale,
+    policyPath,
+    controlUrlExplicit: Boolean(controlUrlFlag || process.env.BREAKPILOT_CONTROL_URL)
+  });
   const program = buildProgram(ctx, getVersion());
 
   // Bare invocation: show global help on stdout and exit 0 (R1.2). yargs renders

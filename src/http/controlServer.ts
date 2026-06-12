@@ -2,6 +2,21 @@ import http from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { ToolRouter } from "../control/ToolRouter.ts";
 import type { ToolResponse } from "../types/control.ts";
+import type { AnyRecord } from "../types/json.ts";
+
+export interface ControlServerOptions {
+  controlToken?: string;
+  status?: () => AnyRecord | Promise<AnyRecord>;
+  onShutdown?: () => void | Promise<void>;
+}
+
+export interface ControlServerHandle {
+  server: Server;
+  host: string;
+  port: number;
+  url: string;
+  close(): Promise<void>;
+}
 
 function readRequestBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -15,35 +30,95 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-export function startHttp(router: ToolRouter, port: number | string, host = "127.0.0.1"): Server {
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(payload));
+}
+
+function isAuthorized(req: IncomingMessage, token?: string): boolean {
+  if (!token) return true;
+  return req.headers.authorization === `Bearer ${token}`;
+}
+
+export async function startHttp(
+  router: ToolRouter,
+  port: number | string,
+  host = "127.0.0.1",
+  options: ControlServerOptions = {}
+): Promise<ControlServerHandle> {
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       if (req.method === "GET" && req.url === "/tools/list") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ tools: router.listTools() }));
+        if (!isAuthorized(req, options.controlToken)) {
+          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          return;
+        }
+        sendJson(res, 200, { tools: router.listTools() });
         return;
       }
       if (req.method === "GET" && req.url === "/status") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
+        sendJson(res, 200, options.status ? await options.status() : { ok: true });
         return;
       }
       if (req.method === "POST" && req.url === "/tools/call") {
+        if (!isAuthorized(req, options.controlToken)) {
+          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          return;
+        }
         const body = await readRequestBody(req);
         const payload = JSON.parse(body || "{}");
         const result: ToolResponse = await router.callTool(payload.name, payload.arguments ?? {});
-        res.writeHead(result.ok ? 200 : 400, { "content-type": "application/json" });
-        res.end(JSON.stringify(result));
+        sendJson(res, result.ok ? 200 : 400, result);
         return;
       }
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: { message: "Not found" } }));
+      if (req.method === "POST" && req.url === "/shutdown") {
+        if (!isAuthorized(req, options.controlToken)) {
+          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          return;
+        }
+        sendJson(res, 200, { ok: true });
+        setImmediate(() => {
+          void Promise.resolve(options.onShutdown?.()).finally(() => server.close());
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: { message: "Not found" } });
     } catch (error) {
       const typedError = error as Error;
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: { message: typedError.message } }));
+      sendJson(res, 500, { ok: false, error: { message: typedError.message } });
     }
   });
-  server.listen(Number(port), host);
-  return server;
+  const actualPort = await listen(server, Number(port), host);
+  return {
+    server,
+    host,
+    port: actualPort,
+    url: `http://${host}:${actualPort}`,
+    close: () =>
+      new Promise((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      })
+  };
+}
+
+function listen(server: Server, port: number, host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off("listening", onListening);
+      try {
+        server.close();
+      } catch {
+        // Best effort cleanup after a listen failure.
+      }
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off("error", onError);
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : port);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, host);
+  });
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import { startHttp } from "./http/controlServer.ts";
+import { LocalControlGateway } from "./control/ControlGateway.ts";
 import { startStdio } from "./mcp/stdioServer.ts";
 import { createRuntime } from "./runtime/createRuntime.ts";
 
@@ -38,17 +39,18 @@ async function main(): Promise<void> {
   if (args["http-port"]) {
     const host = stringArg(args, "host") || "127.0.0.1";
     const port = stringArg(args, "http-port") || "27890";
-    startHttp(runtime.router, port, host);
-    process.stderr.write(`breakpilot HTTP listening on ${host}:${port}\n`);
+    const http = await startHttp(runtime.router, port, host);
+    process.stderr.write(`breakpilot HTTP listening on ${http.url}\n`);
   }
 
   if (enableIdeBridge && runtime.ideBridge) {
+    await runtime.ideBridge.start();
     const bridge = runtime.ideBridge.status();
     process.stderr.write(`breakpilot IDE bridge listening on ${bridge.host}:${bridge.port}\n`);
   }
 
   if (!args["http-port"] || args.stdio) {
-    startStdio(runtime.router);
+    startStdio(new LocalControlGateway(runtime.router));
   }
 }
 

@@ -12,6 +12,7 @@
  */
 
 import type { AnyRecord } from "../types/json.ts";
+import { hubContext, manifestForControlUrl, readHubManifest } from "../hub/HubManifest.ts";
 import { postTool } from "./controlClient.ts";
 import type { Locale } from "./i18n.ts";
 import { output } from "./main.ts";
@@ -29,12 +30,18 @@ export interface CommandContext {
   output: (value: unknown, pretty?: boolean) => void;
   /** Invoke a control-plane tool and emit its JSON result. */
   runTool: (toolName: string, args: AnyRecord, pretty: boolean) => Promise<void>;
+  /** Runtime policy path used for hub discovery. */
+  policyPath?: string;
+  /** Whether the user or environment explicitly selected the control URL. */
+  controlUrlExplicit?: boolean;
 }
 
 export interface CreateContextOptions {
   controlUrl: string;
   t: (key: string) => string;
   locale: Locale;
+  policyPath?: string;
+  controlUrlExplicit?: boolean;
 }
 
 /**
@@ -89,19 +96,42 @@ export function resolveControlUrl(
  *   start command and the original error cause) and sets exit code 1 (R5.8).
  */
 export function createContext(options: CreateContextOptions): CommandContext {
-  const { controlUrl, t, locale } = options;
+  const { controlUrl, t, locale, policyPath, controlUrlExplicit } = options;
 
   const runTool = async (toolName: string, args: AnyRecord, pretty: boolean): Promise<void> => {
+    const target = resolveControlTarget(controlUrl, policyPath, Boolean(controlUrlExplicit));
     try {
-      const result = await postTool(controlUrl, toolName, args);
+      const result = await postTool(target.controlUrl, toolName, args, target.controlToken);
       output(result, pretty);
       if (result.ok === false) process.exitCode = 1;
     } catch (error) {
       const typedError = error as Error;
-      output(daemonUnreachableError(controlUrl, typedError.message), true);
+      output(daemonUnreachableError(target.controlUrl, typedError.message), true);
       process.exitCode = 1;
     }
   };
 
-  return { controlUrl, t, locale, output, runTool };
+  return { controlUrl, t, locale, output, runTool, policyPath, controlUrlExplicit };
+}
+
+function resolveControlTarget(
+  controlUrl: string,
+  policyPath: string | undefined,
+  explicit: boolean
+): { controlUrl: string; controlToken?: string } {
+  if (explicit) {
+    const manifest = manifestForControlUrl(controlUrl, policyPath);
+    return { controlUrl, controlToken: manifest?.controlToken };
+  }
+  try {
+    const context = hubContext(policyPath);
+    const manifest = readHubManifest(context.workspaceRoot);
+    if (manifest?.controlUrl) {
+      return { controlUrl: manifest.controlUrl, controlToken: manifest.controlToken };
+    }
+  } catch {
+    // Fall back to the configured/default control URL.
+  }
+  const manifest = manifestForControlUrl(controlUrl, policyPath);
+  return { controlUrl, controlToken: manifest?.controlToken };
 }

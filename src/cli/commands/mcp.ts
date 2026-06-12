@@ -17,6 +17,8 @@
 
 import type { Argv } from "yargs";
 
+import { DaemonControlGateway, LocalControlGateway } from "../../control/ControlGateway.ts";
+import { ensureDaemon } from "../../hub/HubManifest.ts";
 import { startStdio } from "../../mcp/stdioServer.ts";
 import { createRuntime } from "../../runtime/createRuntime.ts";
 import type { CommandContext } from "../context.ts";
@@ -46,23 +48,51 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
           .option("ide-bridge", {
             type: "boolean",
             describe: ctx.t("opt.ide-bridge")
+          })
+          .option("runtime", {
+            type: "string",
+            choices: ["auto", "daemon", "standalone"],
+            default: "auto",
+            describe: ctx.t("opt.runtime")
+          })
+          .option("ensure-daemon", {
+            type: "boolean",
+            default: true,
+            describe: ctx.t("opt.ensure-daemon")
           }),
-      (argv) => {
+      async (argv) => {
         const policyPath = argv.policy as string | undefined;
+        const runtimeMode = String(argv.runtime ?? "auto");
         const ideBridgePort = argv["ide-bridge-port"] as number | undefined;
         const ideBridge = argv["ide-bridge"] as boolean | undefined;
+        if (runtimeMode !== "standalone") {
+          if (ideBridgePort || ideBridge) {
+            process.stderr.write(
+              "breakpilot mcp serve ignores --ide-bridge options outside --runtime standalone; using daemon hub.\n"
+            );
+          }
+          const ensure = runtimeMode === "auto" && argv["ensure-daemon"] !== false;
+          const manifest = await ensureDaemon({
+            policyPath,
+            controlUrl: ctx.controlUrlExplicit ? ctx.controlUrl : undefined,
+            ensure
+          });
+          startStdio(new DaemonControlGateway(manifest.controlUrl, manifest.controlToken));
+          return;
+        }
         const runtime = createRuntime({
           policyPath,
           enableIdeBridge: Boolean(ideBridgePort || ideBridge),
           ideBridgePort
         });
         if (runtime.ideBridge) {
+          await runtime.ideBridge.start();
           const status = runtime.ideBridge.status();
           process.stderr.write(
             `breakpilot IDE bridge listening on ${status.host}:${status.port}\n`
           );
         }
-        startStdio(runtime.router);
+        startStdio(new LocalControlGateway(runtime.router));
       }
     );
     sub.demandCommand(1);

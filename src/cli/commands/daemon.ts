@@ -16,9 +16,21 @@ import type { Argv } from "yargs";
 
 import { startHttp } from "../../http/controlServer.ts";
 import { createRuntime } from "../../runtime/createRuntime.ts";
+import {
+  ensureDaemon,
+  findHealthyHub,
+  hubContext,
+  makeControlToken,
+  makeInstanceId,
+  manifestForControlUrl,
+  removeHubManifest,
+  writeHubManifest,
+  type HubManifest
+} from "../../hub/HubManifest.ts";
 import type { CommandContext } from "../context.ts";
 import { daemonUnreachableError } from "../context.ts";
 import { getJson } from "../controlClient.ts";
+import { getVersion } from "../version.ts";
 
 const DEFAULT_HTTP_PORT = 27890;
 const DEFAULT_HOST = "127.0.0.1";
@@ -52,27 +64,94 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
           type: "boolean",
           describe: ctx.t("opt.ide-bridge")
         })
+        .option("auto-port", {
+          type: "boolean",
+          describe: ctx.t("opt.auto-port")
+        })
         .option("policy", {
           type: "string",
           describe: ctx.t("opt.policy")
         }),
-    (argv) => {
+    async (argv) => {
       const policyPath = argv.policy as string | undefined;
-      const ideBridgePort = argv["ide-bridge-port"] as number | undefined;
+      const context = hubContext(policyPath);
+      const httpPortExplicit = argv["http-port"] !== undefined;
+      const bridgePortExplicit = argv["ide-bridge-port"] !== undefined;
+      if (!httpPortExplicit && !bridgePortExplicit) {
+        const existing = await findHealthyHub(context);
+        if (existing) {
+          process.stderr.write(
+            `breakpilot daemon already running at ${existing.controlUrl}; IDE bridge ${existing.bridgeUrl ?? "disabled"}\n`
+          );
+          return;
+        }
+      }
+      const requestedBridgePort = argv["ide-bridge-port"] as number | undefined;
       const ideBridge = argv["ide-bridge"] as boolean | undefined;
+      const enableIdeBridge = ideBridge !== false;
       const runtime = createRuntime({
         policyPath,
-        enableIdeBridge: Boolean(ideBridgePort || ideBridge),
-        ideBridgePort
+        enableIdeBridge,
+        ideBridgePort: requestedBridgePort
       });
-      const port = (argv["http-port"] as number | undefined) ?? DEFAULT_HTTP_PORT;
+      const requestedHttpPort = (argv["http-port"] as number | undefined) ?? DEFAULT_HTTP_PORT;
       const host = (argv.host as string | undefined) || DEFAULT_HOST;
-      startHttp(runtime.router, port, host);
-      process.stderr.write(`breakpilot HTTP listening on ${host}:${port}\n`);
+      const startedAt = new Date().toISOString();
+      const instanceId = makeInstanceId();
+      const controlToken = makeControlToken();
+
       if (runtime.ideBridge) {
-        const status = runtime.ideBridge.status();
-        process.stderr.write(`breakpilot IDE bridge listening on ${status.host}:${status.port}\n`);
+        await startBridgeWithPortRules(runtime.ideBridge, bridgePortExplicit);
       }
+      let manifest: HubManifest | null = null;
+      const http = await startHttpWithPortRules(
+        runtime.router,
+        requestedHttpPort,
+        host,
+        httpPortExplicit,
+        {
+          controlToken,
+          status: () => ({
+            ok: true,
+            server: "breakpilot",
+            instanceId,
+            pid: process.pid,
+            version: getVersion(),
+            workspaceRoot: context.workspaceRoot,
+            policyPath: context.policyPath,
+            policyHash: context.policyHash,
+            controlUrl: manifest?.controlUrl,
+            bridgeUrl: manifest?.bridgeUrl,
+            ideBridge: runtime.ideBridge?.status() ?? { enabled: false, clients: [] },
+            clients: runtime.ideBridge?.status().clients ?? [],
+            sessions: runtime.ideBridge?.status().sessions ?? [],
+            startedAt,
+            updatedAt: new Date().toISOString()
+          }),
+          onShutdown: () => {
+            runtime.ideBridge?.stop();
+            removeHubManifest(context.workspaceRoot);
+          }
+        }
+      );
+      manifest = {
+        instanceId,
+        pid: process.pid,
+        version: getVersion(),
+        workspaceRoot: context.workspaceRoot,
+        policyPath: context.policyPath,
+        policyHash: context.policyHash,
+        controlUrl: http.url,
+        bridgeUrl: runtime.ideBridge
+          ? `ws://${runtime.ideBridge.status().host}:${runtime.ideBridge.status().port}`
+          : undefined,
+        controlToken,
+        startedAt,
+        updatedAt: new Date().toISOString()
+      };
+      writeHubManifest(manifest);
+      process.stderr.write(`breakpilot HTTP listening on ${http.url}\n`);
+      if (manifest.bridgeUrl) process.stderr.write(`breakpilot IDE bridge listening on ${manifest.bridgeUrl}\n`);
     }
   );
 
@@ -86,9 +165,61 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
         // On transport failure, emit the same daemon-unreachable JSON shape that
         // ctx.runTool produces (to stdout, pretty) and exit 1 (R5.8) instead of
         // letting the rejection be swallowed with no output.
+        let targetUrl = ctx.controlUrl;
         try {
-          const status = await getJson(`${ctx.controlUrl}/status`);
+          const target = await resolveDaemonTarget(ctx, argv.policy as string | undefined);
+          targetUrl = target.controlUrl;
+          const status = await getJson(`${target.controlUrl}/status`, target.controlToken);
           ctx.output(status, Boolean(argv.pretty));
+        } catch (error) {
+          const typedError = error as Error;
+          ctx.output(daemonUnreachableError(targetUrl, typedError.message), true);
+          process.exitCode = 1;
+        }
+      }
+    );
+    sub.command(
+      "stop",
+      ctx.t("cmd.daemon stop"),
+      (b) => b,
+      async (argv) => {
+        const target = await resolveDaemonTarget(ctx, argv.policy as string | undefined);
+        if (!target.controlToken) {
+          ctx.output(daemonUnreachableError(target.controlUrl, "No matching hub control token was found."), true);
+          process.exitCode = 1;
+          return;
+        }
+        try {
+          const response = await fetch(`${target.controlUrl}/shutdown`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${target.controlToken}` }
+          });
+          const payload = await response.json();
+          ctx.output(payload, Boolean(argv.pretty));
+          if (!response.ok) process.exitCode = 1;
+        } catch (error) {
+          const typedError = error as Error;
+          ctx.output(daemonUnreachableError(ctx.controlUrl, typedError.message), true);
+          process.exitCode = 1;
+        }
+      }
+    );
+    sub.command(
+      "restart",
+      ctx.t("cmd.daemon restart"),
+      (b) => b,
+      async (argv) => {
+        const target = await resolveDaemonTarget(ctx, argv.policy as string | undefined);
+        if (target.controlToken) {
+          await fetch(`${target.controlUrl}/shutdown`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${target.controlToken}` }
+          }).catch(() => undefined);
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        try {
+          const started = await ensureDaemon({ policyPath: argv.policy as string | undefined, ensure: true });
+          ctx.output({ ok: true, data: started }, Boolean(argv.pretty));
         } catch (error) {
           const typedError = error as Error;
           ctx.output(daemonUnreachableError(ctx.controlUrl, typedError.message), true);
@@ -101,4 +232,54 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
   });
 
   return y;
+}
+
+async function startBridgeWithPortRules(
+  bridge: { start(): Promise<void>; stop(): void; port: number },
+  explicitPort: boolean
+): Promise<void> {
+  try {
+    await bridge.start();
+  } catch (error) {
+    if (explicitPort || !isAddressInUse(error)) throw error;
+    bridge.stop();
+    bridge.port = 0;
+    await bridge.start();
+  }
+}
+
+async function startHttpWithPortRules(
+  router: Parameters<typeof startHttp>[0],
+  port: number,
+  host: string,
+  explicitPort: boolean,
+  options: Parameters<typeof startHttp>[3]
+): ReturnType<typeof startHttp> {
+  try {
+    return await startHttp(router, port, host, options);
+  } catch (error) {
+    if (explicitPort || !isAddressInUse(error)) throw error;
+    return startHttp(router, 0, host, options);
+  }
+}
+
+function isAddressInUse(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: string }).code === "EADDRINUSE";
+}
+
+async function resolveDaemonTarget(
+  ctx: CommandContext,
+  policyPath: string | undefined
+): Promise<{ controlUrl: string; controlToken?: string }> {
+  if (ctx.controlUrlExplicit) {
+    const manifest = manifestForControlUrl(ctx.controlUrl, policyPath);
+    return { controlUrl: ctx.controlUrl, controlToken: manifest?.controlToken };
+  }
+  try {
+    const manifest = await ensureDaemon({ policyPath, ensure: false });
+    return { controlUrl: manifest.controlUrl, controlToken: manifest.controlToken };
+  } catch {
+    const manifest = manifestForControlUrl(ctx.controlUrl, policyPath);
+    return { controlUrl: manifest?.controlUrl ?? ctx.controlUrl, controlToken: manifest?.controlToken };
+  }
 }

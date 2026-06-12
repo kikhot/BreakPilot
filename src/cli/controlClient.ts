@@ -1,10 +1,18 @@
 import type { ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
 
-export async function postTool(controlUrl: string, name: string, args: AnyRecord): Promise<ToolResponse> {
+export async function postTool(
+  controlUrl: string,
+  name: string,
+  args: AnyRecord,
+  controlToken?: string
+): Promise<ToolResponse> {
   const response = await fetch(`${controlUrl}/tools/call`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(controlToken ? { authorization: `Bearer ${controlToken}` } : {})
+    },
     body: JSON.stringify({ name, arguments: args })
   });
   const text = await response.text();
@@ -15,7 +23,9 @@ export async function postTool(controlUrl: string, name: string, args: AnyRecord
   }
 }
 
-export async function getJson(url: string): Promise<AnyRecord> {
-  const response = await fetch(url);
+export async function getJson(url: string, controlToken?: string): Promise<AnyRecord> {
+  const response = await fetch(url, {
+    headers: controlToken ? { authorization: `Bearer ${controlToken}` } : {}
+  });
   return response.json() as Promise<AnyRecord>;
 }

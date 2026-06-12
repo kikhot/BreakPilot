@@ -31,8 +31,8 @@ export interface MessageCatalog {
 
 const EN_EPILOG = [
   "Examples:",
-  "  breakpilot serve --http-port 27890 --ide-bridge-port 27891",
-  "  breakpilot mcp serve --policy ./breakpilot.yaml",
+  "  breakpilot serve --auto-port",
+  "  breakpilot mcp serve --runtime auto --policy ./breakpilot.yaml",
   "",
   "MCP client configuration (recommended when `breakpilot` is on PATH):",
   "  {",
@@ -52,8 +52,8 @@ const EN_EPILOG = [
 
 const ZH_EPILOG = [
   "示例：",
-  "  breakpilot serve --http-port 27890 --ide-bridge-port 27891",
-  "  breakpilot mcp serve --policy ./breakpilot.yaml",
+  "  breakpilot serve --auto-port",
+  "  breakpilot mcp serve --runtime auto --policy ./breakpilot.yaml",
   "",
   "MCP 客户端配置（当 `breakpilot` 已在 PATH 中时推荐使用）：",
   "  {",
@@ -78,6 +78,8 @@ const EN_CATALOG: MessageCatalog = {
     serve: "Start the BreakPilot HTTP control daemon (optionally with the IDE bridge).",
     daemon: "Inspect the running BreakPilot daemon.",
     "daemon status": "Print the daemon status as JSON.",
+    "daemon stop": "Ask the workspace daemon to shut down.",
+    "daemon restart": "Restart the workspace daemon.",
     mcp: "Model Context Protocol (MCP) server commands.",
     "mcp serve": "Start the stdio MCP server (stdout carries only MCP protocol traffic).",
     tools: "Print the available control-plane tool definitions as JSON.",
@@ -153,7 +155,10 @@ const EN_CATALOG: MessageCatalog = {
     "ide-session": "IDE session id.",
     "http-port": "HTTP control port to listen on.",
     "ide-bridge-port": "IDE bridge port to listen on.",
-    "ide-bridge": "Enable the IDE bridge."
+    "ide-bridge": "Enable the IDE bridge.",
+    "auto-port": "Allow BreakPilot to choose free local ports when defaults are occupied.",
+    runtime: "MCP runtime mode: auto, daemon, or standalone.",
+    "ensure-daemon": "Automatically start the workspace daemon when MCP runs in auto mode."
   }
 };
 
@@ -164,6 +169,8 @@ const ZH_CATALOG: MessageCatalog = {
     serve: "启动 BreakPilot HTTP 控制守护进程（可选启用 IDE 桥接）。",
     daemon: "查看正在运行的 BreakPilot 守护进程。",
     "daemon status": "以 JSON 输出守护进程状态。",
+    "daemon stop": "请求当前工作区守护进程关闭。",
+    "daemon restart": "重启当前工作区守护进程。",
     mcp: "Model Context Protocol（MCP）服务相关命令。",
     "mcp serve": "启动 stdio MCP server（stdout 仅承载 MCP 协议内容）。",
     tools: "以 JSON 输出可用的控制平面工具定义。",
@@ -239,7 +246,10 @@ const ZH_CATALOG: MessageCatalog = {
     "ide-session": "IDE 会话 id。",
     "http-port": "监听的 HTTP 控制端口。",
     "ide-bridge-port": "监听的 IDE 桥接端口。",
-    "ide-bridge": "启用 IDE 桥接。"
+    "ide-bridge": "启用 IDE 桥接。",
+    "auto-port": "默认端口被占用时允许 BreakPilot 自动选择本地空闲端口。",
+    runtime: "MCP 运行模式：auto、daemon 或 standalone。",
+    "ensure-daemon": "MCP auto 模式下未找到守护进程时自动启动。"
   }
 };
 

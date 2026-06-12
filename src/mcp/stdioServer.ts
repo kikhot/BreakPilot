@@ -1,4 +1,4 @@
-import type { ToolRouter } from "../control/ToolRouter.ts";
+import type { ControlGateway } from "../control/ControlGateway.ts";
 import type { AnyRecord } from "../types/json.ts";
 import { stableJson } from "../utils/json.ts";
 
@@ -19,7 +19,7 @@ function writeJsonRpc(id: JsonRpcMessage["id"], result?: unknown, error?: AnyRec
   process.stdout.write(`${JSON.stringify(response)}\n`);
 }
 
-async function handleJsonRpc(router: ToolRouter, message: JsonRpcMessage): Promise<AnyRecord> {
+async function handleJsonRpc(gateway: ControlGateway, message: JsonRpcMessage): Promise<AnyRecord> {
   if (message.method === "initialize") {
     return {
       protocolVersion: "2025-03-26",
@@ -33,11 +33,11 @@ async function handleJsonRpc(router: ToolRouter, message: JsonRpcMessage): Promi
     };
   }
   if (message.method === "tools/list") {
-    return { tools: router.listTools() };
+    return { tools: await gateway.listTools() };
   }
   if (message.method === "tools/call") {
     const { name, arguments: args } = message.params ?? {};
-    const result = await router.callTool(name, args ?? {});
+    const result = await gateway.callTool(name, args ?? {});
     return {
       content: [
         {
@@ -52,7 +52,7 @@ async function handleJsonRpc(router: ToolRouter, message: JsonRpcMessage): Promi
   throw new Error(`Unsupported JSON-RPC method: ${message.method}`);
 }
 
-export function startStdio(router: ToolRouter): void {
+export function startStdio(gateway: ControlGateway): void {
   let buffer = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => {
@@ -71,7 +71,7 @@ export function startStdio(router: ToolRouter): void {
         continue;
       }
       if (!message.id && message.method?.startsWith("notifications/")) continue;
-      handleJsonRpc(router, message)
+      handleJsonRpc(gateway, message)
         .then((result) => writeJsonRpc(message.id, result))
         .catch((error: unknown) => {
           const typedError = error as Error;

@@ -115,7 +115,7 @@ export class IdeBridgeServer extends EventEmitter {
     this.socketClientIds = new WeakMap();
   }
 
-  start(): void {
+  async start(): Promise<void> {
     this.server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
       if (req.url === "/status") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -152,7 +152,25 @@ export class IdeBridgeServer extends EventEmitter {
       socket.on("error", () => this.#removeSocket(socket));
     });
 
-    this.server.listen(this.port, this.host);
+    this.port = await new Promise<number>((resolve, reject) => {
+      const server = this.server;
+      if (!server) {
+        reject(new Error("IDE bridge server was not initialized."));
+        return;
+      }
+      const onError = (error: Error): void => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = (): void => {
+        server.off("error", onError);
+        const address = server.address();
+        resolve(typeof address === "object" && address ? address.port : this.port);
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(this.port, this.host);
+    });
   }
 
   stop(): void {
