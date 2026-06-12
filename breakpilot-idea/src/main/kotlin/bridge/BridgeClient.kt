@@ -79,6 +79,8 @@ class BridgeClient(private val project: Project) : Disposable {
                     "visualBreakpoints" to true,
                     "debugCommands" to true,
                     "confirmationDialog" to true,
+                    "structuredConfirmation" to true,
+                    "consentSettings" to true,
                     "toolWindow" to true,
                     "variableSnapshot" to true,
                     "provider" to "xdebugger"

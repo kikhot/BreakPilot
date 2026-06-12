@@ -4,6 +4,8 @@ import bridge.AgentBreakpoint
 import bridge.BridgeClient
 import bridge.BridgeMessage
 import bridge.MessageTypes
+import com.intellij.notification.NotificationGroupManager
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.xdebugger.XDebuggerManager
@@ -69,6 +71,7 @@ class BreakpointSync(
             typed.createBreakpointProperties(file, breakpoint.line - 1)
         )
         byAgentId[breakpoint.id] = lineBreakpoint
+        notify("BreakPilot set a breakpoint at ${file.name}:${breakpoint.line}.")
         bridge.send(
             BridgeMessage(
                 type = MessageTypes.IdeBreakpointAdded,
@@ -91,6 +94,7 @@ class BreakpointSync(
             return
         }
         XDebuggerManager.getInstance(project).breakpointManager.removeBreakpoint(breakpoint)
+        notify("BreakPilot removed an agent breakpoint.")
         bridge.send(
             BridgeMessage(
                 type = MessageTypes.IdeBreakpointRemoved,
@@ -98,5 +102,12 @@ class BreakpointSync(
                 breakpointId = agentId
             )
         )
+    }
+
+    private fun notify(content: String) {
+        NotificationGroupManager.getInstance()
+            .getNotificationGroup("BreakPilot")
+            .createNotification(content, NotificationType.INFORMATION)
+            .notify(project)
     }
 }

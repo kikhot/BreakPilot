@@ -5,12 +5,12 @@ import debugger.BreakpointSync
 import debugger.CommandExecutor
 import debugger.IdeSessionTracker
 import debugger.VariableReader
-import ui.showBreakpointConfirmation
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.StartupActivity
+import security.ConsentManager
 
 class BreakPilotIdeaPlugin : StartupActivity.DumbAware {
     override fun runActivity(project: Project) {
@@ -21,7 +21,8 @@ class BreakPilotIdeaPlugin : StartupActivity.DumbAware {
 @Service(Service.Level.PROJECT)
 class BreakPilotIdeaProjectService(private val project: Project) : Disposable {
     private val bridge = BridgeClient(project)
-    private val tracker = IdeSessionTracker(project, bridge)
+    private val consentManager = project.service<ConsentManager>()
+    private val tracker = IdeSessionTracker(project, bridge) { consentManager.clearSession(it) }
     private val variableReader = VariableReader(project, tracker)
     private val breakpoints = BreakpointSync(project, bridge)
     private val commands = CommandExecutor(project, bridge, tracker, variableReader)
@@ -34,7 +35,7 @@ class BreakPilotIdeaProjectService(private val project: Project) : Disposable {
                 variableReader.handle(message, bridge)
             }
             if (message.type == "agent_request_confirmation") {
-                showBreakpointConfirmation(bridge, message)
+                consentManager.handleConfirmation(bridge, message)
             }
         }
         tracker.start()

@@ -8,5 +8,11 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <postStartupActivity implementation="plugin.BreakPilotIdeaPlugin"/>
+        <projectConfigurable
+                parentId="tools"
+                instance="settings.BreakPilotSettingsConfigurable"
+                id="breakpilot.settings"
+                displayName="BreakPilot"/>
+        <notificationGroup id="BreakPilot" displayType="BALLOON"/>
     </extensions>
 </idea-plugin>

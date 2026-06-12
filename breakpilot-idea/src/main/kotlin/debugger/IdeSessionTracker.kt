@@ -12,7 +12,8 @@ import com.intellij.xdebugger.XDebuggerManagerListener
 
 class IdeSessionTracker(
     private val project: Project,
-    private val bridge: BridgeClient
+    private val bridge: BridgeClient,
+    private val onSessionTerminated: (String) -> Unit = {}
 ) {
     private val sessions = mutableMapOf<String, XDebugSession>()
 
@@ -29,6 +30,7 @@ class IdeSessionTracker(
                     val session = debugProcess.session
                     val ideSessionId = sessionId(session)
                     sessions.remove(ideSessionId)
+                    onSessionTerminated(ideSessionId)
                     bridge.send(
                         BridgeMessage(
                             type = MessageTypes.IdeSessionTerminated,
@@ -69,6 +71,7 @@ class IdeSessionTracker(
 
                 override fun sessionStopped() {
                     sessions.remove(ideSessionId)
+                    onSessionTerminated(ideSessionId)
                     bridge.send(sessionMessage(MessageTypes.IdeSessionTerminated, session, "terminated"))
                 }
 
