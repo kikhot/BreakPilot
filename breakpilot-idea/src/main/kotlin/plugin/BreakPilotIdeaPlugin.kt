@@ -43,6 +43,7 @@ class BreakPilotIdeaProjectService(private val project: Project) : Disposable {
     }
 
     override fun dispose() {
+        breakpoints.clearAgentBreakpoints()
         bridge.dispose()
     }
 }

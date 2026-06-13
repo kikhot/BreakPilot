@@ -54,6 +54,9 @@ data class AgentBreakpoint(
 )
 
 object MessageTypes {
+    const val BridgeWelcome = "bridge_welcome"
+    const val BridgeRejected = "bridge_rejected"
+    const val BridgeDisconnected = "bridge_disconnected"
     const val IdeRegister = "ide_register"
     const val IdeHeartbeat = "ide_heartbeat"
     const val IdeSessionStarted = "ide_session_started"
@@ -68,6 +71,7 @@ object MessageTypes {
     const val IdeCommandResult = "ide_command_result"
     const val AgentSetBreakpoint = "agent_set_breakpoint"
     const val AgentRemoveBreakpoint = "agent_remove_breakpoint"
+    const val AgentClearBreakpoints = "agent_clear_breakpoints"
     const val AgentRequestVariables = "agent_request_variables"
     const val AgentContinue = "agent_continue"
     const val AgentStepOver = "agent_step_over"

@@ -28,8 +28,8 @@
       "properties": {
         "breakpilot.bridgeUrl": {
           "type": "string",
-          "default": "ws://127.0.0.1:27891",
-          "description": "Local BreakPilot IDE Bridge WebSocket URL."
+          "default": "",
+          "description": "Optional explicit BreakPilot IDE Bridge WebSocket URL. Leave empty to follow .breakpilot/hub.json."
         }
       }
     }
