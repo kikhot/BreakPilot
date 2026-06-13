@@ -83,6 +83,7 @@ export class DebugSessionManager {
   breakpoints: BreakpointManager;
   coordinator: SessionCoordinator;
   ideBridge?: IdeBridgeServer | null;
+  cleaningSessions: Set<string>;
 
   constructor({ policy, ideBridge }: { policy: BreakPilotPolicy; ideBridge?: IdeBridgeServer | null }) {
     this.policy = policy;
@@ -94,6 +95,7 @@ export class DebugSessionManager {
     this.breakpoints = new BreakpointManager();
     this.coordinator = new SessionCoordinator();
     this.ideBridge = ideBridge;
+    this.cleaningSessions = new Set();
     this.#wireIdeBridge();
   }
 
@@ -445,15 +447,18 @@ export class DebugSessionManager {
     }
     const session = this.sessions.get(args.sessionId);
     const auditId = this.audit.record("disconnect_requested", { sessionId: session.sessionId });
-    const result = await session.provider.disconnect({
+    const result = await this.#cleanupSession(session, {
+      reason: "disconnect",
       terminateDebuggee: Boolean(args.terminateDebuggee),
       restart: Boolean(args.restart)
     });
-    session.state = SessionState.TERMINATED;
-    this.breakpoints.clear(session.sessionId);
-    this.sessions.remove(session.sessionId);
     const warnings = result.acknowledged === false ? [result.message ?? "Debug adapter did not acknowledge disconnect."] : [];
     return ok(session.sessionId, { disconnected: true, result }, auditId, warnings);
+  }
+
+  async cleanupAll(reason = "shutdown"): Promise<void> {
+    const sessions = [...this.sessions.sessions.values()];
+    await Promise.allSettled(sessions.map((session) => this.#cleanupSession(session, { reason })));
   }
 
   listIdeSessions(args: DebugToolArgs = {}): ToolResponse {
@@ -631,6 +636,11 @@ export class DebugSessionManager {
     });
     dap.on("terminated", () => {
       record.state = SessionState.TERMINATED;
+      void this.#cleanupSession(record, { reason: "dap_terminated", disconnectProvider: false });
+    });
+    dap.on("exited", () => {
+      record.state = SessionState.TERMINATED;
+      void this.#cleanupSession(record, { reason: "dap_exited", disconnectProvider: false });
     });
     this.sessions.add(record);
     dap.startClient();
@@ -650,6 +660,49 @@ export class DebugSessionManager {
       ideSessionId: session.ideSessionId,
       capabilities: session.provider.capabilities
     };
+  }
+
+  async #cleanupSession(
+    session: DebugSessionRecord,
+    {
+      reason,
+      terminateDebuggee = false,
+      restart = false,
+      disconnectProvider = true
+    }: {
+      reason: string;
+      terminateDebuggee?: boolean;
+      restart?: boolean;
+      disconnectProvider?: boolean;
+    }
+  ): Promise<AnyRecord> {
+    if (this.cleaningSessions.has(session.sessionId)) {
+      return { acknowledged: true, alreadyCleaning: true, reason };
+    }
+    this.cleaningSessions.add(session.sessionId);
+    try {
+      this.#broadcastToWorkspace(session.workspaceRoot, {
+        type: IdeMessageTypes.AGENT_CLEAR_BREAKPOINTS,
+        sessionId: session.sessionId,
+        workspaceRoot: session.workspaceRoot,
+        reason
+      });
+      let result: AnyRecord = { acknowledged: true, reason };
+      if (disconnectProvider) {
+        try {
+          result = await session.provider.disconnect({ terminateDebuggee, restart });
+        } catch (error) {
+          const typedError = error as Error;
+          result = { acknowledged: false, message: typedError.message, reason };
+        }
+      }
+      session.state = SessionState.TERMINATED;
+      this.breakpoints.clear(session.sessionId);
+      this.sessions.remove(session.sessionId);
+      return result;
+    } finally {
+      this.cleaningSessions.delete(session.sessionId);
+    }
   }
 
   async #recoverBreakpointHit(session: DebugSessionRecord): Promise<StoppedEvent | null> {
@@ -710,7 +763,22 @@ export class DebugSessionManager {
     });
     this.ideBridge.on(IdeMessageTypes.IDE_SESSION_TERMINATED, ({ message }: { message: AnyRecord }) => {
       this.#updateAdoptedIdeSession(message.ideSessionId, message.clientId, SessionState.TERMINATED);
+      void this.#cleanupAdoptedIdeSession(message.ideSessionId, message.clientId, "ide_session_terminated");
     });
+  }
+
+  async #cleanupAdoptedIdeSession(
+    ideSessionId: string | undefined,
+    clientId: string | undefined,
+    reason: string
+  ): Promise<void> {
+    if (!ideSessionId) return;
+    const sessions = [...this.sessions.sessions.values()].filter((session) => {
+      if (session.ideSessionId !== ideSessionId) return false;
+      if (clientId && session.ideClientId && session.ideClientId !== clientId) return false;
+      return true;
+    });
+    await Promise.allSettled(sessions.map((session) => this.#cleanupSession(session, { reason, disconnectProvider: false })));
   }
 
   #updateAdoptedIdeSession(

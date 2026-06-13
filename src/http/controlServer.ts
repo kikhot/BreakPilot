@@ -3,11 +3,13 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { ToolRouter } from "../control/ToolRouter.ts";
 import type { ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
+import type { ClientLeaseManager } from "./ClientLeaseManager.ts";
 
 export interface ControlServerOptions {
   controlToken?: string;
   status?: () => AnyRecord | Promise<AnyRecord>;
   onShutdown?: () => void | Promise<void>;
+  clients?: ClientLeaseManager;
 }
 
 export interface ControlServerHandle {
@@ -69,6 +71,37 @@ export async function startHttp(
         const payload = JSON.parse(body || "{}");
         const result: ToolResponse = await router.callTool(payload.name, payload.arguments ?? {});
         sendJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      if (req.method === "POST" && req.url === "/clients/acquire") {
+        if (!isAuthorized(req, options.controlToken)) {
+          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          return;
+        }
+        const body = await readRequestBody(req);
+        const payload = JSON.parse(body || "{}");
+        sendJson(res, 200, options.clients?.acquire(payload) ?? { ok: true, activeClients: 0 });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/clients/heartbeat") {
+        if (!isAuthorized(req, options.controlToken)) {
+          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          return;
+        }
+        const body = await readRequestBody(req);
+        const payload = JSON.parse(body || "{}");
+        const result = options.clients?.heartbeat(payload) ?? { ok: true, activeClients: 0 };
+        sendJson(res, result.ok === false ? 404 : 200, result);
+        return;
+      }
+      if (req.method === "POST" && req.url === "/clients/release") {
+        if (!isAuthorized(req, options.controlToken)) {
+          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          return;
+        }
+        const body = await readRequestBody(req);
+        const payload = JSON.parse(body || "{}");
+        sendJson(res, 200, options.clients?.release(payload) ?? { ok: true, activeClients: 0 });
         return;
       }
       if (req.method === "POST" && req.url === "/shutdown") {

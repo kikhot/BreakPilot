@@ -10,6 +10,9 @@ export interface RuntimeOptions {
   policyPath?: string;
   enableIdeBridge?: boolean;
   ideBridgePort?: number | string;
+  bridgeInstanceId?: string;
+  bridgePolicyHash?: string;
+  bridgeLifecycle?: string;
 }
 
 export interface RuntimeContext {
@@ -28,7 +31,11 @@ export function createRuntime(options: RuntimeOptions = {}): RuntimeContext {
     ideBridge = new IdeBridgeServer({
       host: policy.ide.bridge.host,
       port: bridgePort,
-      audit
+      audit,
+      workspaceRoot: policy.workspace.root,
+      policyHash: options.bridgePolicyHash,
+      instanceId: options.bridgeInstanceId,
+      lifecycle: options.bridgeLifecycle
     });
   }
   const manager = new DebugSessionManager({ policy, ideBridge });

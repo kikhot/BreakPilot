@@ -14,9 +14,11 @@
 
 import type { Argv } from "yargs";
 
-import { startHttp } from "../../http/controlServer.ts";
+import { startHttp, type ControlServerHandle } from "../../http/controlServer.ts";
+import { ClientLeaseManager } from "../../http/ClientLeaseManager.ts";
 import { createRuntime } from "../../runtime/createRuntime.ts";
 import {
+  type DaemonLifecycle,
   ensureDaemon,
   findHealthyHub,
   hubContext,
@@ -68,6 +70,12 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
           type: "boolean",
           describe: ctx.t("opt.auto-port")
         })
+        .option("lifecycle", {
+          type: "string",
+          choices: ["managed", "persistent"],
+          default: "persistent",
+          describe: ctx.t("opt.lifecycle")
+        })
         .option("policy", {
           type: "string",
           describe: ctx.t("opt.policy")
@@ -77,6 +85,7 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
       const context = hubContext(policyPath);
       const httpPortExplicit = argv["http-port"] !== undefined;
       const bridgePortExplicit = argv["ide-bridge-port"] !== undefined;
+      const lifecycle = String(argv.lifecycle ?? "persistent") as DaemonLifecycle;
       if (!httpPortExplicit && !bridgePortExplicit) {
         const existing = await findHealthyHub(context);
         if (existing) {
@@ -89,16 +98,34 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
       const requestedBridgePort = argv["ide-bridge-port"] as number | undefined;
       const ideBridge = argv["ide-bridge"] as boolean | undefined;
       const enableIdeBridge = ideBridge !== false;
-      const runtime = createRuntime({
-        policyPath,
-        enableIdeBridge,
-        ideBridgePort: requestedBridgePort
-      });
       const requestedHttpPort = (argv["http-port"] as number | undefined) ?? DEFAULT_HTTP_PORT;
       const host = (argv.host as string | undefined) || DEFAULT_HOST;
       const startedAt = new Date().toISOString();
       const instanceId = makeInstanceId();
       const controlToken = makeControlToken();
+      const runtime = createRuntime({
+        policyPath,
+        enableIdeBridge,
+        ideBridgePort: requestedBridgePort,
+        bridgeInstanceId: instanceId,
+        bridgePolicyHash: context.policyHash,
+        bridgeLifecycle: lifecycle
+      });
+      let httpHandle: ControlServerHandle | null = null;
+      let shuttingDown = false;
+      const shutdown = async (closeHttp: boolean, reason = "shutdown"): Promise<void> => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        leaseManager.stop();
+        await runtime.manager.cleanupAll(reason);
+        runtime.ideBridge?.stop();
+        if (closeHttp && httpHandle) await httpHandle.close().catch(() => undefined);
+        removeHubManifest(context.workspaceRoot);
+      };
+      const leaseManager = new ClientLeaseManager({
+        lifecycle,
+        onInactive: () => shutdown(true, "mcp_clients_inactive")
+      });
 
       if (runtime.ideBridge) {
         await startBridgeWithPortRules(runtime.ideBridge, bridgePortExplicit);
@@ -115,6 +142,7 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
             ok: true,
             server: "breakpilot",
             instanceId,
+            lifecycle,
             pid: process.pid,
             version: getVersion(),
             workspaceRoot: context.workspaceRoot,
@@ -128,16 +156,16 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
             startedAt,
             updatedAt: new Date().toISOString()
           }),
-          onShutdown: () => {
-            runtime.ideBridge?.stop();
-            removeHubManifest(context.workspaceRoot);
-          }
+          clients: leaseManager,
+          onShutdown: () => shutdown(false, "daemon_shutdown")
         }
       );
+      httpHandle = http;
       manifest = {
         instanceId,
         pid: process.pid,
         version: getVersion(),
+        lifecycle,
         workspaceRoot: context.workspaceRoot,
         policyPath: context.policyPath,
         policyHash: context.policyHash,
@@ -150,6 +178,11 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
         updatedAt: new Date().toISOString()
       };
       writeHubManifest(manifest);
+      const stopFromSignal = (code: number, reason: string): void => {
+        void shutdown(true, reason).finally(() => process.exit(code));
+      };
+      process.once("SIGINT", () => stopFromSignal(130, "sigint"));
+      process.once("SIGTERM", () => stopFromSignal(143, "sigterm"));
       process.stderr.write(`breakpilot HTTP listening on ${http.url}\n`);
       if (manifest.bridgeUrl) process.stderr.write(`breakpilot IDE bridge listening on ${manifest.bridgeUrl}\n`);
     }

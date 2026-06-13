@@ -20,6 +20,7 @@ export interface HubManifest {
   instanceId: string;
   pid: number;
   version: string;
+  lifecycle?: DaemonLifecycle;
   workspaceRoot: string;
   policyPath: string;
   policyHash: string;
@@ -34,6 +35,7 @@ export interface HubStatus extends AnyRecord {
   ok?: boolean;
   server?: string;
   instanceId?: string;
+  lifecycle?: DaemonLifecycle;
   workspaceRoot?: string;
   policyHash?: string;
   controlUrl?: string;
@@ -44,6 +46,7 @@ export interface EnsureDaemonOptions {
   policyPath?: string;
   controlUrl?: string;
   ensure?: boolean;
+  lifecycle?: DaemonLifecycle;
   timeoutMs?: number;
 }
 
@@ -52,6 +55,8 @@ const HUB_FILE = "hub.json";
 const HUB_LOCK = "hub.lock";
 const DEFAULT_VERSION = "0.1.0";
 const DEFAULT_CONTROL_URL = "http://127.0.0.1:27890";
+
+export type DaemonLifecycle = "managed" | "persistent";
 
 export function hubContext(policyPath = "breakpilot.yaml"): HubContext {
   const policy = loadPolicy(policyPath);
@@ -94,12 +99,16 @@ export function readHubManifest(workspaceRoot: string): HubManifest | null {
   if (!fs.existsSync(file)) return null;
   const parsed = safeJsonParse<HubManifest>(fs.readFileSync(file, "utf8"));
   if (!parsed || typeof parsed.controlUrl !== "string") return null;
+  parsed.lifecycle ??= "persistent";
   return parsed;
 }
 
 export function writeHubManifest(manifest: HubManifest): void {
   fs.mkdirSync(hubDir(manifest.workspaceRoot), { recursive: true });
-  fs.writeFileSync(hubManifestPath(manifest.workspaceRoot), `${stableJson(manifest, true)}\n`);
+  const target = hubManifestPath(manifest.workspaceRoot);
+  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, `${stableJson(manifest, true)}\n`);
+  fs.renameSync(tmp, target);
 }
 
 export function removeHubManifest(workspaceRoot: string): void {
@@ -150,6 +159,7 @@ export async function findHealthyHub(context: HubContext, controlUrl?: string): 
       instanceId: String(status.instanceId ?? ""),
       pid: Number(status.pid ?? 0),
       version: String(status.version ?? DEFAULT_VERSION),
+      lifecycle: status.lifecycle ?? candidate.lifecycle ?? "persistent",
       workspaceRoot: context.workspaceRoot,
       policyPath: context.policyPath,
       policyHash: context.policyHash,
@@ -245,6 +255,8 @@ function spawnDaemon(context: HubContext, options: EnsureDaemonOptions): void {
     cliEntry,
     "serve",
     "--auto-port",
+    "--lifecycle",
+    options.lifecycle ?? "persistent",
     "--policy",
     context.policyPath
   ];

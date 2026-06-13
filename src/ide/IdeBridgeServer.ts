@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
+import path from "node:path";
 import type { BridgeMessage, IdeClientInfo, IdeDebugSessionInfo } from "../types/ide.ts";
 import { AuditLogger } from "../audit/AuditLogger.ts";
 import { IdeClientRegistry } from "./IdeClientRegistry.ts";
@@ -25,12 +26,20 @@ interface IdeBridgeServerOptions {
   host?: string;
   port?: number | string;
   audit?: AuditLogger;
+  workspaceRoot?: string;
+  policyHash?: string;
+  instanceId?: string;
+  lifecycle?: string;
 }
 
 export interface IdeBridgeStatus {
   enabled: true;
   host: string;
   port: number;
+  workspaceRoot?: string;
+  policyHash?: string;
+  instanceId?: string;
+  lifecycle?: string;
   clients: IdeClientInfo[];
   sessions: IdeDebugSessionInfo[];
 }
@@ -99,16 +108,32 @@ export class IdeBridgeServer extends EventEmitter {
   host: string;
   port: number;
   audit?: AuditLogger;
+  workspaceRoot?: string;
+  policyHash?: string;
+  instanceId?: string;
+  lifecycle?: string;
   registry: IdeClientRegistry;
   server: Server | null;
   buffers: WeakMap<Socket, Buffer>;
   socketClientIds: WeakMap<Socket, string>;
 
-  constructor({ host = "127.0.0.1", port = 27891, audit }: IdeBridgeServerOptions = {}) {
+  constructor({
+    host = "127.0.0.1",
+    port = 27891,
+    audit,
+    workspaceRoot,
+    policyHash,
+    instanceId,
+    lifecycle
+  }: IdeBridgeServerOptions = {}) {
     super();
     this.host = host;
     this.port = Number(port);
     this.audit = audit;
+    this.workspaceRoot = workspaceRoot ? path.resolve(workspaceRoot) : undefined;
+    this.policyHash = policyHash;
+    this.instanceId = instanceId;
+    this.lifecycle = lifecycle;
     this.registry = new IdeClientRegistry();
     this.server = null;
     this.buffers = new WeakMap();
@@ -146,7 +171,13 @@ export class IdeBridgeServer extends EventEmitter {
       const client = this.registry.add(socket, {});
       this.socketClientIds.set(socket, client.clientId);
       this.buffers.set(socket, Buffer.alloc(0));
-      this.#send(socket, makeBridgeMessage("bridge_welcome", { clientId: client.clientId }));
+      this.#send(socket, makeBridgeMessage("bridge_welcome", {
+        clientId: client.clientId,
+        workspaceRoot: this.workspaceRoot,
+        policyHash: this.policyHash,
+        instanceId: this.instanceId,
+        lifecycle: this.lifecycle
+      }));
       socket.on("data", (chunk) => this.#onSocketData(socket, chunk));
       socket.on("close", () => this.#removeSocket(socket));
       socket.on("error", () => this.#removeSocket(socket));
@@ -205,6 +236,10 @@ export class IdeBridgeServer extends EventEmitter {
       enabled: true,
       host: this.host,
       port: this.port,
+      workspaceRoot: this.workspaceRoot,
+      policyHash: this.policyHash,
+      instanceId: this.instanceId,
+      lifecycle: this.lifecycle,
       clients: this.registry.list(),
       sessions: this.registry.listSessions()
     };
@@ -229,12 +264,27 @@ export class IdeBridgeServer extends EventEmitter {
     const clientId = this.socketClientIds.get(socket);
     if (clientId) message.clientId = clientId;
     if (message.type === IdeMessageTypes.IDE_REGISTER) {
+      if (!this.#isWorkspaceAllowed(message.workspaceRoot)) {
+        this.#send(socket, makeBridgeMessage("bridge_rejected", {
+          clientId,
+          workspaceRoot: this.workspaceRoot,
+          reason: "workspace_mismatch",
+          message: "IDE workspace does not match this BreakPilot daemon workspace."
+        }));
+        socket.end();
+        return;
+      }
       this.registry.update(clientId, {
         ide: message.ide,
-        workspaceRoot: message.workspaceRoot,
+        workspaceRoot: message.workspaceRoot ? path.resolve(message.workspaceRoot) : message.workspaceRoot,
         capabilities: message.capabilities ?? {}
       });
-      this.#send(socket, makeBridgeMessage("ide_registered", { clientId }));
+      this.#send(socket, makeBridgeMessage("ide_registered", {
+        clientId,
+        workspaceRoot: this.workspaceRoot,
+        policyHash: this.policyHash,
+        instanceId: this.instanceId
+      }));
     } else if (message.type === IdeMessageTypes.IDE_HEARTBEAT) {
       this.registry.update(clientId, { lastHeartbeatAt: new Date().toISOString() });
       this.#send(socket, makeBridgeMessage("ide_heartbeat_ack", { clientId }));
@@ -259,6 +309,12 @@ export class IdeBridgeServer extends EventEmitter {
   #send(socket: Socket, message: BridgeMessage): void {
     if (!socket.writable) return;
     socket.write(encodeFrame(JSON.stringify(message)));
+  }
+
+  #isWorkspaceAllowed(workspaceRoot: string | undefined): boolean {
+    if (!this.workspaceRoot) return true;
+    if (!workspaceRoot) return false;
+    return path.resolve(workspaceRoot) === this.workspaceRoot;
   }
 
   #removeSocket(socket: Socket): void {

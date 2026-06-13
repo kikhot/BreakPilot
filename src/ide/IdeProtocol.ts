@@ -18,6 +18,7 @@ export const IdeMessageTypes = Object.freeze({
   IDE_COMMAND_RESULT: "ide_command_result",
   AGENT_SET_BREAKPOINT: "agent_set_breakpoint",
   AGENT_REMOVE_BREAKPOINT: "agent_remove_breakpoint",
+  AGENT_CLEAR_BREAKPOINTS: "agent_clear_breakpoints",
   AGENT_REQUEST_VARIABLES: "agent_request_variables",
   AGENT_CONTINUE: "agent_continue",
   AGENT_STEP_OVER: "agent_step_over",

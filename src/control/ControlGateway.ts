@@ -68,6 +68,34 @@ export class DaemonControlGateway implements ControlGateway {
     }
   }
 
+  async acquireClient(clientId: string, kind = "mcp"): Promise<AnyRecord> {
+    return this.#postClient("acquire", { clientId, kind, pid: process.pid });
+  }
+
+  async heartbeatClient(clientId: string): Promise<AnyRecord> {
+    return this.#postClient("heartbeat", { clientId });
+  }
+
+  async releaseClient(clientId: string): Promise<AnyRecord> {
+    return this.#postClient("release", { clientId });
+  }
+
+  async #postClient(action: "acquire" | "heartbeat" | "release", payload: AnyRecord): Promise<AnyRecord> {
+    const response = await fetch(`${this.controlUrl}/clients/${action}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...this.#headers()
+      },
+      body: JSON.stringify(payload)
+    });
+    const parsed = (await response.json()) as AnyRecord;
+    if (!response.ok || parsed.ok === false) {
+      throw new Error(String((parsed.error as AnyRecord | undefined)?.message ?? `Client lease ${action} failed.`));
+    }
+    return parsed;
+  }
+
   #headers(): Record<string, string> {
     return this.controlToken ? { authorization: `Bearer ${this.controlToken}` } : {};
   }

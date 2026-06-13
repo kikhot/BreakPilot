@@ -21,6 +21,7 @@ import { DaemonControlGateway, LocalControlGateway } from "../../control/Control
 import { ensureDaemon } from "../../hub/HubManifest.ts";
 import { startStdio } from "../../mcp/stdioServer.ts";
 import { createRuntime } from "../../runtime/createRuntime.ts";
+import { makeId } from "../../utils/ids.ts";
 import type { CommandContext } from "../context.ts";
 
 /**
@@ -75,9 +76,12 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
           const manifest = await ensureDaemon({
             policyPath,
             controlUrl: ctx.controlUrlExplicit ? ctx.controlUrl : undefined,
-            ensure
+            ensure,
+            lifecycle: "managed"
           });
-          startStdio(new DaemonControlGateway(manifest.controlUrl, manifest.controlToken));
+          const gateway = new DaemonControlGateway(manifest.controlUrl, manifest.controlToken);
+          await attachMcpClientLease(gateway);
+          startStdio(gateway);
           return;
         }
         const runtime = createRuntime({
@@ -100,4 +104,32 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
   });
 
   return y;
+}
+
+async function attachMcpClientLease(gateway: DaemonControlGateway): Promise<void> {
+  const clientId = makeId("mcp");
+  await gateway.acquireClient(clientId, "mcp");
+  const heartbeat = setInterval(() => {
+    void gateway.heartbeatClient(clientId).catch(() => undefined);
+  }, 5000);
+  heartbeat.unref?.();
+
+  let released = false;
+  const release = async (): Promise<void> => {
+    if (released) return;
+    released = true;
+    clearInterval(heartbeat);
+    await gateway.releaseClient(clientId).catch(() => undefined);
+  };
+  const releaseAndExit = (code: number): void => {
+    void release().finally(() => process.exit(code));
+  };
+
+  process.stdin.once("end", () => releaseAndExit(0));
+  process.stdin.once("close", () => releaseAndExit(0));
+  process.once("SIGINT", () => releaseAndExit(130));
+  process.once("SIGTERM", () => releaseAndExit(143));
+  process.once("beforeExit", () => {
+    void release();
+  });
 }

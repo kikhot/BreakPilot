@@ -157,6 +157,7 @@ const EN_CATALOG: MessageCatalog = {
     "ide-bridge-port": "IDE bridge port to listen on.",
     "ide-bridge": "Enable the IDE bridge.",
     "auto-port": "Allow BreakPilot to choose free local ports when defaults are occupied.",
+    lifecycle: "Daemon lifecycle: managed exits when MCP clients disconnect; persistent stays running.",
     runtime: "MCP runtime mode: auto, daemon, or standalone.",
     "ensure-daemon": "Automatically start the workspace daemon when MCP runs in auto mode."
   }
@@ -248,6 +249,7 @@ const ZH_CATALOG: MessageCatalog = {
     "ide-bridge-port": "监听的 IDE 桥接端口。",
     "ide-bridge": "启用 IDE 桥接。",
     "auto-port": "默认端口被占用时允许 BreakPilot 自动选择本地空闲端口。",
+    lifecycle: "守护进程生命周期：managed 会在 MCP 客户端断开后退出，persistent 保持运行。",
     runtime: "MCP 运行模式：auto、daemon 或 standalone。",
     "ensure-daemon": "MCP auto 模式下未找到守护进程时自动启动。"
   }
