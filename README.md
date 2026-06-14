@@ -38,6 +38,11 @@ For MCP stdio integration:
 breakpilot mcp serve
 ```
 
+`breakpilot mcp serve` is a true stdio MCP process: the MCP client owns its
+lifetime, and closing the client stdin or sending SIGTERM shuts it down. When
+the IDE bridge is enabled, the MCP process writes `.breakpilot/bridge.json` so
+IDE plugins can discover and reconnect to the active bridge.
+
 After `npm run build`, the compiled entrypoints are also available:
 
 ```bash

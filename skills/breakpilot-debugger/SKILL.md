@@ -13,6 +13,7 @@ Use BreakPilot when an AI Agent needs runtime facts from a local, authorized deb
 - MCP stdio command: `breakpilot mcp serve`
 - CLI daemon command: `breakpilot serve --http-port 27890 --ide-bridge-port 27891`
 - Default control URL: `http://127.0.0.1:27890`
+- IDE bridge discovery file: `.breakpilot/bridge.json`
 
 ## When To Use
 

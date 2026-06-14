@@ -14,6 +14,7 @@ agents:
     instructions: |
       Use BreakPilot when runtime facts are needed to resolve a coding task.
       Prefer MCP tools over CLI. Do not start MCP stdio and the CLI daemon together unless the task explicitly requires it.
+      MCP stdio is client-owned and exposes its IDE bridge through .breakpilot/bridge.json while it is running.
       First use attach/launch or adopt an IDE session, set minimal breakpoints, wait with a timeout, then read a focused snapshot.
       Prefer inspect_variable over full snapshots. Use evaluate with mode readonly by default.
       Record observed file, line, frame, variables, and eval results before continue_execution or disconnect.

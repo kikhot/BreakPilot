@@ -283,6 +283,11 @@ For vibecoding agents, prefer MCP mode:
 breakpilot mcp serve
 ```
 
+MCP mode is a true stdio lifecycle: the MCP client starts the process, and the
+process exits when stdin closes or the client sends SIGTERM. It does not start
+or reuse the HTTP daemon. IDE plugins discover the active MCP-owned bridge from
+`.breakpilot/bridge.json` and reconnect when that file changes.
+
 For manual CLI, scripts, or IDE Bridge work, use daemon mode:
 
 ```bash
