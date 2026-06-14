@@ -92,9 +92,9 @@ export class BridgeClient {
     if (configured && configured.trim()) return { url: configured.trim() };
     const workspaceRoot = this.workspaceRoot();
     if (workspaceRoot) {
-      const hubFile = path.join(workspaceRoot, ".breakpilot", "hub.json");
+      const bridgeFile = path.join(workspaceRoot, ".breakpilot", "bridge.json");
       try {
-        const manifest = JSON.parse(fs.readFileSync(hubFile, "utf8")) as { bridgeUrl?: string; instanceId?: string };
+        const manifest = JSON.parse(fs.readFileSync(bridgeFile, "utf8")) as { bridgeUrl?: string; instanceId?: string };
         if (manifest.bridgeUrl) return { url: manifest.bridgeUrl, instanceId: manifest.instanceId };
       } catch {
         return null;
@@ -110,7 +110,7 @@ export class BridgeClient {
   private startManifestWatcher() {
     const workspaceRoot = this.workspaceRoot();
     if (!workspaceRoot) return;
-    const pattern = new vscode.RelativePattern(workspaceRoot, ".breakpilot/hub.json");
+    const pattern = new vscode.RelativePattern(workspaceRoot, ".breakpilot/bridge.json");
     this.watcher = vscode.workspace.createFileSystemWatcher(pattern);
     this.watcher.onDidCreate(() => this.connect());
     this.watcher.onDidChange(() => this.connect());

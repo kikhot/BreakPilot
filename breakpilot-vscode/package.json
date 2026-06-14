@@ -29,7 +29,7 @@
         "breakpilot.bridgeUrl": {
           "type": "string",
           "default": "",
-          "description": "Optional explicit BreakPilot IDE Bridge WebSocket URL. Leave empty to follow .breakpilot/hub.json."
+          "description": "Optional explicit BreakPilot IDE Bridge WebSocket URL. Leave empty to follow .breakpilot/bridge.json."
         }
       }
     }

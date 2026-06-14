@@ -127,7 +127,7 @@ class BridgeClient(private val project: Project) : Disposable {
     private fun resolveBridgeTarget(): BridgeTarget? {
         explicitBridgeUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { return BridgeTarget(it, null) }
         val root = project.basePath ?: return null
-        val manifest = File(root, ".breakpilot/hub.json")
+        val manifest = File(root, ".breakpilot/bridge.json")
         if (!manifest.exists()) return null
         return try {
             val parsed = gson.fromJson(manifest.readText(), Map::class.java)
@@ -188,14 +188,14 @@ class BridgeClient(private val project: Project) : Disposable {
                     }
                     val relevant = key.pollEvents().any {
                         val name = it.context()?.toString()
-                        name == ".breakpilot" || name == "hub.json"
+                        name == ".breakpilot" || name == "bridge.json"
                     }
                     key.reset()
                     if (relevant) refreshManifestConnection()
                 }
             }
             thread.isDaemon = true
-            thread.name = "BreakPilot hub manifest watcher"
+            thread.name = "BreakPilot bridge manifest watcher"
             thread.start()
         } catch (_: Throwable) {
             // Polling still keeps the connection state fresh.
