@@ -32,7 +32,7 @@ export interface MessageCatalog {
 const EN_EPILOG = [
   "Examples:",
   "  breakpilot serve --auto-port",
-  "  breakpilot mcp serve --runtime auto --policy ./breakpilot.yaml",
+  "  breakpilot mcp serve --policy ./breakpilot.yaml",
   "",
   "MCP client configuration (recommended when `breakpilot` is on PATH):",
   "  {",
@@ -53,7 +53,7 @@ const EN_EPILOG = [
 const ZH_EPILOG = [
   "示例：",
   "  breakpilot serve --auto-port",
-  "  breakpilot mcp serve --runtime auto --policy ./breakpilot.yaml",
+  "  breakpilot mcp serve --policy ./breakpilot.yaml",
   "",
   "MCP 客户端配置（当 `breakpilot` 已在 PATH 中时推荐使用）：",
   "  {",
@@ -157,9 +157,7 @@ const EN_CATALOG: MessageCatalog = {
     "ide-bridge-port": "IDE bridge port to listen on.",
     "ide-bridge": "Enable the IDE bridge.",
     "auto-port": "Allow BreakPilot to choose free local ports when defaults are occupied.",
-    lifecycle: "Daemon lifecycle: managed exits when MCP clients disconnect; persistent stays running.",
-    runtime: "MCP runtime mode: auto, daemon, or standalone.",
-    "ensure-daemon": "Automatically start the workspace daemon when MCP runs in auto mode."
+    lifecycle: "Daemon lifecycle; persistent daemons stay running until stopped."
   }
 };
 
@@ -249,9 +247,7 @@ const ZH_CATALOG: MessageCatalog = {
     "ide-bridge-port": "监听的 IDE 桥接端口。",
     "ide-bridge": "启用 IDE 桥接。",
     "auto-port": "默认端口被占用时允许 BreakPilot 自动选择本地空闲端口。",
-    lifecycle: "守护进程生命周期：managed 会在 MCP 客户端断开后退出，persistent 保持运行。",
-    runtime: "MCP 运行模式：auto、daemon 或 standalone。",
-    "ensure-daemon": "MCP auto 模式下未找到守护进程时自动启动。"
+    lifecycle: "守护进程生命周期；persistent 会保持运行直到显式停止。"
   }
 };
 

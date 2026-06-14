@@ -1,5 +1,6 @@
 import type { AnyRecord } from "../types/json.ts";
-import type { DaemonLifecycle } from "../hub/HubManifest.ts";
+
+export type DaemonLifecycle = "managed" | "persistent";
 
 export interface ClientLeasePayload {
   clientId?: string;

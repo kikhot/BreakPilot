@@ -12,7 +12,7 @@
  */
 
 import type { AnyRecord } from "../types/json.ts";
-import { hubContext, manifestForControlUrl, readHubManifest } from "../hub/HubManifest.ts";
+import { bridgeContext, manifestForControlUrl, readBridgeManifest } from "../hub/BridgeManifest.ts";
 import { postTool } from "./controlClient.ts";
 import type { Locale } from "./i18n.ts";
 import { output } from "./main.ts";
@@ -124,9 +124,9 @@ function resolveControlTarget(
     return { controlUrl, controlToken: manifest?.controlToken };
   }
   try {
-    const context = hubContext(policyPath);
-    const manifest = readHubManifest(context.workspaceRoot);
-    if (manifest?.controlUrl) {
+    const context = bridgeContext(policyPath);
+    const manifest = readBridgeManifest(context.workspaceRoot);
+    if (manifest?.owner === "daemon" && manifest.controlUrl) {
       return { controlUrl: manifest.controlUrl, controlToken: manifest.controlToken };
     }
   } catch {

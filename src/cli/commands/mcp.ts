@@ -17,11 +17,15 @@
 
 import type { Argv } from "yargs";
 
-import { DaemonControlGateway, LocalControlGateway } from "../../control/ControlGateway.ts";
-import { ensureDaemon } from "../../hub/HubManifest.ts";
+import { LocalControlGateway } from "../../control/ControlGateway.ts";
+import {
+  bridgeContext,
+  makeInstanceId,
+  removeBridgeManifestForInstance,
+  writeBridgeManifest
+} from "../../hub/BridgeManifest.ts";
 import { startStdio } from "../../mcp/stdioServer.ts";
 import { createRuntime } from "../../runtime/createRuntime.ts";
-import { makeId } from "../../utils/ids.ts";
 import type { CommandContext } from "../context.ts";
 
 /**
@@ -49,53 +53,49 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
           .option("ide-bridge", {
             type: "boolean",
             describe: ctx.t("opt.ide-bridge")
-          })
-          .option("runtime", {
-            type: "string",
-            choices: ["auto", "daemon", "standalone"],
-            default: "auto",
-            describe: ctx.t("opt.runtime")
-          })
-          .option("ensure-daemon", {
-            type: "boolean",
-            default: true,
-            describe: ctx.t("opt.ensure-daemon")
           }),
       async (argv) => {
         const policyPath = argv.policy as string | undefined;
-        const runtimeMode = String(argv.runtime ?? "auto");
         const ideBridgePort = argv["ide-bridge-port"] as number | undefined;
         const ideBridge = argv["ide-bridge"] as boolean | undefined;
-        if (runtimeMode !== "standalone") {
-          if (ideBridgePort || ideBridge) {
-            process.stderr.write(
-              "breakpilot mcp serve ignores --ide-bridge options outside --runtime standalone; using daemon hub.\n"
-            );
-          }
-          const ensure = runtimeMode === "auto" && argv["ensure-daemon"] !== false;
-          const manifest = await ensureDaemon({
-            policyPath,
-            controlUrl: ctx.controlUrlExplicit ? ctx.controlUrl : undefined,
-            ensure,
-            lifecycle: "managed"
-          });
-          const gateway = new DaemonControlGateway(manifest.controlUrl, manifest.controlToken);
-          await attachMcpClientLease(gateway);
-          startStdio(gateway);
-          return;
-        }
+        const context = bridgeContext(policyPath);
+        const instanceId = makeInstanceId("mcp");
         const runtime = createRuntime({
           policyPath,
-          enableIdeBridge: Boolean(ideBridgePort || ideBridge),
-          ideBridgePort
+          enableIdeBridge: ideBridge !== false,
+          ideBridgePort: ideBridgePort ?? 0,
+          bridgeInstanceId: instanceId,
+          bridgePolicyHash: context.policyHash,
+          bridgeLifecycle: "stdio"
         });
+        const startedAt = new Date().toISOString();
         if (runtime.ideBridge) {
           await runtime.ideBridge.start();
           const status = runtime.ideBridge.status();
+          writeBridgeManifest({
+            schemaVersion: 1,
+            owner: "mcp",
+            instanceId,
+            pid: process.pid,
+            lifecycle: "stdio",
+            workspaceRoot: context.workspaceRoot,
+            policyPath: context.policyPath,
+            policyHash: context.policyHash,
+            bridgeUrl: `ws://${status.host}:${status.port}`,
+            startedAt,
+            updatedAt: new Date().toISOString()
+          });
           process.stderr.write(
             `breakpilot IDE bridge listening on ${status.host}:${status.port}\n`
           );
         }
+        attachMcpCleanup({
+          cleanup: async (reason) => {
+            await runtime.manager.cleanupAll(reason);
+            runtime.ideBridge?.stop();
+            removeBridgeManifestForInstance(context.workspaceRoot, instanceId);
+          }
+        });
         startStdio(new LocalControlGateway(runtime.router));
       }
     );
@@ -106,30 +106,22 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
   return y;
 }
 
-async function attachMcpClientLease(gateway: DaemonControlGateway): Promise<void> {
-  const clientId = makeId("mcp");
-  await gateway.acquireClient(clientId, "mcp");
-  const heartbeat = setInterval(() => {
-    void gateway.heartbeatClient(clientId).catch(() => undefined);
-  }, 5000);
-  heartbeat.unref?.();
-
-  let released = false;
-  const release = async (): Promise<void> => {
-    if (released) return;
-    released = true;
-    clearInterval(heartbeat);
-    await gateway.releaseClient(clientId).catch(() => undefined);
+function attachMcpCleanup(options: { cleanup(reason: string): Promise<void> }): void {
+  let cleaned = false;
+  const cleanupOnce = async (reason: string): Promise<void> => {
+    if (cleaned) return;
+    cleaned = true;
+    await options.cleanup(reason).catch(() => undefined);
   };
-  const releaseAndExit = (code: number): void => {
-    void release().finally(() => process.exit(code));
+  const cleanupAndExit = (code: number, reason: string): void => {
+    void cleanupOnce(reason).finally(() => process.exit(code));
   };
 
-  process.stdin.once("end", () => releaseAndExit(0));
-  process.stdin.once("close", () => releaseAndExit(0));
-  process.once("SIGINT", () => releaseAndExit(130));
-  process.once("SIGTERM", () => releaseAndExit(143));
+  process.stdin.once("end", () => cleanupAndExit(0, "stdio_end"));
+  process.stdin.once("close", () => cleanupAndExit(0, "stdio_close"));
+  process.once("SIGINT", () => cleanupAndExit(130, "sigint"));
+  process.once("SIGTERM", () => cleanupAndExit(143, "sigterm"));
   process.once("beforeExit", () => {
-    void release();
+    void cleanupOnce("before_exit");
   });
 }

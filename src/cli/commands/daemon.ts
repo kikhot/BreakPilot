@@ -12,23 +12,28 @@
  * via `ctx.t`) so that local help works (R3.1).
  */
 
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
 import type { Argv } from "yargs";
 
 import { startHttp, type ControlServerHandle } from "../../http/controlServer.ts";
 import { ClientLeaseManager } from "../../http/ClientLeaseManager.ts";
 import { createRuntime } from "../../runtime/createRuntime.ts";
 import {
-  type DaemonLifecycle,
-  ensureDaemon,
-  findHealthyHub,
-  hubContext,
+  type BridgeManifest,
+  type BridgeContext,
+  bridgeDir,
+  bridgeContext,
   makeControlToken,
   makeInstanceId,
   manifestForControlUrl,
-  removeHubManifest,
-  writeHubManifest,
-  type HubManifest
-} from "../../hub/HubManifest.ts";
+  readBridgeManifest,
+  removeBridgeManifestForInstance,
+  writeBridgeManifest
+} from "../../hub/BridgeManifest.ts";
 import type { CommandContext } from "../context.ts";
 import { daemonUnreachableError } from "../context.ts";
 import { getJson } from "../controlClient.ts";
@@ -36,6 +41,7 @@ import { getVersion } from "../version.ts";
 
 const DEFAULT_HTTP_PORT = 27890;
 const DEFAULT_HOST = "127.0.0.1";
+type DaemonLifecycle = "persistent";
 
 /**
  * Register the `serve` and `daemon status` commands.
@@ -72,7 +78,7 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
         })
         .option("lifecycle", {
           type: "string",
-          choices: ["managed", "persistent"],
+          choices: ["persistent"],
           default: "persistent",
           describe: ctx.t("opt.lifecycle")
         })
@@ -82,12 +88,12 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
         }),
     async (argv) => {
       const policyPath = argv.policy as string | undefined;
-      const context = hubContext(policyPath);
+      const context = bridgeContext(policyPath);
       const httpPortExplicit = argv["http-port"] !== undefined;
       const bridgePortExplicit = argv["ide-bridge-port"] !== undefined;
-      const lifecycle = String(argv.lifecycle ?? "persistent") as DaemonLifecycle;
+      const lifecycle: DaemonLifecycle = "persistent";
       if (!httpPortExplicit && !bridgePortExplicit) {
-        const existing = await findHealthyHub(context);
+        const existing = await findHealthyDaemon(context.workspaceRoot, context.policyHash);
         if (existing) {
           process.stderr.write(
             `breakpilot daemon already running at ${existing.controlUrl}; IDE bridge ${existing.bridgeUrl ?? "disabled"}\n`
@@ -120,7 +126,7 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
         await runtime.manager.cleanupAll(reason);
         runtime.ideBridge?.stop();
         if (closeHttp && httpHandle) await httpHandle.close().catch(() => undefined);
-        removeHubManifest(context.workspaceRoot);
+        removeBridgeManifestForInstance(context.workspaceRoot, instanceId);
       };
       const leaseManager = new ClientLeaseManager({
         lifecycle,
@@ -130,7 +136,7 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
       if (runtime.ideBridge) {
         await startBridgeWithPortRules(runtime.ideBridge, bridgePortExplicit);
       }
-      let manifest: HubManifest | null = null;
+      let manifest: BridgeManifest | null = null;
       const http = await startHttpWithPortRules(
         runtime.router,
         requestedHttpPort,
@@ -162,9 +168,10 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
       );
       httpHandle = http;
       manifest = {
+        schemaVersion: 1,
+        owner: "daemon",
         instanceId,
         pid: process.pid,
-        version: getVersion(),
         lifecycle,
         workspaceRoot: context.workspaceRoot,
         policyPath: context.policyPath,
@@ -177,7 +184,7 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
         startedAt,
         updatedAt: new Date().toISOString()
       };
-      writeHubManifest(manifest);
+      writeBridgeManifest(manifest);
       const stopFromSignal = (code: number, reason: string): void => {
         void shutdown(true, reason).finally(() => process.exit(code));
       };
@@ -216,13 +223,13 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
       ctx.t("cmd.daemon stop"),
       (b) => b,
       async (argv) => {
-        const target = await resolveDaemonTarget(ctx, argv.policy as string | undefined);
-        if (!target.controlToken) {
-          ctx.output(daemonUnreachableError(target.controlUrl, "No matching hub control token was found."), true);
-          process.exitCode = 1;
-          return;
-        }
         try {
+          const target = await resolveDaemonTarget(ctx, argv.policy as string | undefined);
+          if (!target.controlToken) {
+            ctx.output(daemonUnreachableError(target.controlUrl, "No matching daemon control token was found."), true);
+            process.exitCode = 1;
+            return;
+          }
           const response = await fetch(`${target.controlUrl}/shutdown`, {
             method: "POST",
             headers: { authorization: `Bearer ${target.controlToken}` }
@@ -242,16 +249,17 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
       ctx.t("cmd.daemon restart"),
       (b) => b,
       async (argv) => {
-        const target = await resolveDaemonTarget(ctx, argv.policy as string | undefined);
-        if (target.controlToken) {
-          await fetch(`${target.controlUrl}/shutdown`, {
-            method: "POST",
-            headers: { authorization: `Bearer ${target.controlToken}` }
-          }).catch(() => undefined);
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
         try {
-          const started = await ensureDaemon({ policyPath: argv.policy as string | undefined, ensure: true });
+          const target = await resolveDaemonTarget(ctx, argv.policy as string | undefined);
+          if (target.controlToken) {
+            await fetch(`${target.controlUrl}/shutdown`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${target.controlToken}` }
+            }).catch(() => undefined);
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+          const context = bridgeContext(argv.policy as string | undefined);
+          const started = await startDetachedDaemon(context);
           ctx.output({ ok: true, data: started }, Boolean(argv.pretty));
         } catch (error) {
           const typedError = error as Error;
@@ -265,6 +273,58 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
   });
 
   return y;
+}
+
+async function startDetachedDaemon(context: BridgeContext): Promise<BridgeManifest> {
+  const cliEntry = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "cli.ts");
+  const logFile = path.join(bridgeDir(context.workspaceRoot), "daemon.log");
+  fs.mkdirSync(bridgeDir(context.workspaceRoot), { recursive: true });
+  const out = fs.openSync(logFile, "a");
+  const err = fs.openSync(logFile, "a");
+  const child = spawn(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      cliEntry,
+      "serve",
+      "--auto-port",
+      "--policy",
+      context.policyPath
+    ],
+    {
+      cwd: context.workspaceRoot,
+      detached: true,
+      stdio: ["ignore", out, err],
+      env: {
+        ...process.env,
+        BREAKPILOT_WORKSPACE: context.workspaceRoot
+      }
+    }
+  );
+  child.unref();
+
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const manifest = await findHealthyDaemon(context.workspaceRoot, context.policyHash);
+    if (manifest) return manifest;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("Timed out waiting for BreakPilot daemon to become ready.");
+}
+
+async function findHealthyDaemon(
+  workspaceRoot: string,
+  policyHash: string
+): Promise<BridgeManifest | null> {
+  const manifest = readBridgeManifest(workspaceRoot);
+  if (manifest?.owner !== "daemon" || !manifest.controlUrl || manifest.policyHash !== policyHash) return null;
+  try {
+    const status = await getJson(`${manifest.controlUrl}/status`, manifest.controlToken);
+    if (status?.server === "breakpilot") return manifest;
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 async function startBridgeWithPortRules(
@@ -308,11 +368,17 @@ async function resolveDaemonTarget(
     const manifest = manifestForControlUrl(ctx.controlUrl, policyPath);
     return { controlUrl: ctx.controlUrl, controlToken: manifest?.controlToken };
   }
-  try {
-    const manifest = await ensureDaemon({ policyPath, ensure: false });
-    return { controlUrl: manifest.controlUrl, controlToken: manifest.controlToken };
-  } catch {
-    const manifest = manifestForControlUrl(ctx.controlUrl, policyPath);
-    return { controlUrl: manifest?.controlUrl ?? ctx.controlUrl, controlToken: manifest?.controlToken };
+  const context = bridgeContext(policyPath);
+  const manifest = readBridgeManifest(context.workspaceRoot);
+  if (manifest?.owner === "mcp") {
+    throw new Error("Current BreakPilot bridge is a stdio MCP instance; close the MCP client instead of using daemon commands.");
   }
+  if (manifest?.owner === "daemon" && manifest.controlUrl) {
+    return { controlUrl: manifest.controlUrl, controlToken: manifest.controlToken };
+  }
+  const fallbackManifest = manifestForControlUrl(ctx.controlUrl, policyPath);
+  return {
+    controlUrl: fallbackManifest?.controlUrl ?? ctx.controlUrl,
+    controlToken: fallbackManifest?.controlToken
+  };
 }
