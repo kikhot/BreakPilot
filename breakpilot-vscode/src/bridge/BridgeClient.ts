@@ -1,7 +1,9 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { BridgeMessage, MessageTypes } from "./MessageProtocol";
+import { AnyRecord, BridgeMessage, MessageTypes } from "./MessageProtocol";
+
+export type BridgeConnectionState = "disconnected" | "connecting" | "connected" | "rejected";
 
 export class BridgeClient {
   private socket?: WebSocket;
@@ -10,13 +12,28 @@ export class BridgeClient {
   private watcher?: vscode.FileSystemWatcher;
   private currentUrl?: string;
   private currentInstanceId?: string;
+  private explicitBridgeUrl?: string;
+  private state: BridgeConnectionState = "disconnected";
+  private disposed = false;
   private listeners = new Set<(message: BridgeMessage) => void>();
+  private pending: BridgeMessage[] = [];
+  private readonly connectionEmitter = new vscode.EventEmitter<BridgeConnectionState>();
+
+  readonly onDidChangeConnectionState = this.connectionEmitter.event;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.startManifestWatcher();
+    this.context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        this.restartManifestWatcher();
+        this.connect();
+      })
+    );
   }
 
-  connect() {
+  connect(url?: string) {
+    if (this.disposed) return;
+    if (url?.trim()) this.explicitBridgeUrl = url.trim();
     const target = this.resolveBridgeTarget();
     if (!target) {
       this.closeSocket();
@@ -24,37 +41,34 @@ export class BridgeClient {
       return;
     }
     if (this.socket && this.currentUrl === target.url && this.currentInstanceId === target.instanceId) return;
+    this.setState("connecting");
     this.currentUrl = target.url;
     this.currentInstanceId = target.instanceId;
     this.socket?.close();
     this.socket = new WebSocket(target.url);
     this.socket.onopen = () => {
       if (this.reconnect) clearTimeout(this.reconnect);
+      this.setState("connected");
       this.send({
         type: MessageTypes.IdeRegister,
         ide: "vscode",
-        workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-        capabilities: {
-          visualBreakpoints: true,
-          debugCommands: true,
-          confirmationDialog: true,
-          webviewPanel: true,
-          variableSnapshot: false,
-          adoptSession: false,
-          provider: "vscode-partial"
-        }
+        workspaceRoot: this.workspaceRoot(),
+        capabilities: this.capabilities()
       });
+      this.flushPending();
       this.heartbeat = setInterval(() => {
         this.send({ type: MessageTypes.IdeHeartbeat });
       }, 5000);
     };
     this.socket.onmessage = (event) => {
-      const message = JSON.parse(String(event.data)) as BridgeMessage;
-      if (message.type === MessageTypes.BridgeWelcome && message.workspaceRoot && message.workspaceRoot !== this.workspaceRoot()) {
+      const message = this.parseMessage(event.data);
+      if (!message) return;
+      if (message.type === MessageTypes.BridgeWelcome && !this.workspaceMatches(message.workspaceRoot)) {
         this.socket?.close();
         return;
       }
       if (message.type === MessageTypes.BridgeRejected) {
+        this.setState("rejected");
         this.socket?.close();
         return;
       }
@@ -63,6 +77,12 @@ export class BridgeClient {
     this.socket.onclose = () => {
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.socket = undefined;
+      this.setState("disconnected");
+      this.scheduleReconnect();
+    };
+    this.socket.onerror = () => {
+      this.socket = undefined;
+      this.setState("disconnected");
       this.scheduleReconnect();
     };
   }
@@ -75,17 +95,46 @@ export class BridgeClient {
   send(message: BridgeMessage) {
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ ...message, timestamp: new Date().toISOString() }));
+      return;
+    }
+    if (message.type !== MessageTypes.IdeHeartbeat) {
+      this.pending.push(message);
+      if (this.pending.length > 200) this.pending.splice(0, this.pending.length - 200);
     }
   }
 
   dispose() {
+    this.disposed = true;
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.reconnect) clearTimeout(this.reconnect);
     this.watcher?.dispose();
     this.socket?.close();
+    this.connectionEmitter.dispose();
+  }
+
+  capabilities(): AnyRecord {
+    return {
+      visualBreakpoints: true,
+      debugCommands: true,
+      confirmationDialog: true,
+      structuredConfirmation: true,
+      consentSettings: true,
+      webviewPanel: true,
+      variableSnapshot: true,
+      adoptSession: true,
+      debugSessionTracking: true,
+      breakpointHitTracking: true,
+      evaluate: true,
+      provider: "vscode-debug-api"
+    };
+  }
+
+  workspaceRoot(): string | undefined {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   }
 
   private resolveBridgeTarget(): { url: string; instanceId?: string } | null {
+    if (this.explicitBridgeUrl) return { url: this.explicitBridgeUrl };
     const config = vscode.workspace.getConfiguration("breakpilot");
     const inspected = config.inspect<string>("bridgeUrl");
     const configured = inspected?.workspaceValue ?? inspected?.globalValue;
@@ -101,10 +150,6 @@ export class BridgeClient {
       }
     }
     return null;
-  }
-
-  private workspaceRoot(): string | undefined {
-    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   }
 
   private startManifestWatcher() {
@@ -124,16 +169,57 @@ export class BridgeClient {
     this.context.subscriptions.push(this.watcher);
   }
 
+  private restartManifestWatcher() {
+    this.watcher?.dispose();
+    this.watcher = undefined;
+    this.startManifestWatcher();
+  }
+
   private closeSocket() {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     this.socket?.close();
     this.socket = undefined;
+    this.setState("disconnected");
   }
 
   private scheduleReconnect() {
+    if (this.disposed) return;
     if (this.reconnect) clearTimeout(this.reconnect);
     this.reconnect = setTimeout(() => this.connect(), 2000);
+  }
+
+  private flushPending() {
+    const queued = this.pending.splice(0);
+    for (const message of queued) this.send(message);
+  }
+
+  private parseMessage(data: unknown): BridgeMessage | null {
+    try {
+      return JSON.parse(String(data)) as BridgeMessage;
+    } catch {
+      return null;
+    }
+  }
+
+  private workspaceMatches(remote: unknown): boolean {
+    if (typeof remote !== "string" || !remote) return true;
+    const local = this.workspaceRoot();
+    if (!local) return false;
+    return path.resolve(remote) === path.resolve(local);
+  }
+
+  private setState(state: BridgeConnectionState) {
+    if (this.state === state) return;
+    this.state = state;
+    this.connectionEmitter.fire(state);
+    if (state === "connected" || state === "disconnected" || state === "rejected") {
+      this.emitLocal({
+        type: state === "connected" ? MessageTypes.IdeRegistered : MessageTypes.BridgeDisconnected,
+        workspaceRoot: this.workspaceRoot(),
+        state
+      });
+    }
   }
 
   private emitLocal(message: BridgeMessage) {

@@ -8,8 +8,10 @@
   },
   "activationEvents": [
     "onStartupFinished",
+    "onDebug",
     "onCommand:breakpilot.connect",
-    "onCommand:breakpilot.showPanel"
+    "onCommand:breakpilot.showPanel",
+    "onCommand:breakpilot.resetDecisions"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -21,6 +23,10 @@
       {
         "command": "breakpilot.showPanel",
         "title": "BreakPilot: Show AI Debug Panel"
+      },
+      {
+        "command": "breakpilot.resetDecisions",
+        "title": "BreakPilot: Reset Decisions"
       }
     ],
     "configuration": {
@@ -30,13 +36,72 @@
           "type": "string",
           "default": "",
           "description": "Optional explicit BreakPilot IDE Bridge WebSocket URL. Leave empty to follow .breakpilot/bridge.json."
+        },
+        "breakpilot.safeInspectionsMode": {
+          "type": "string",
+          "enum": [
+            "ask_once_per_project",
+            "always_ask",
+            "always_allow_trusted_projects"
+          ],
+          "default": "ask_once_per_project",
+          "description": "Controls how BreakPilot remembers safe paused-state inspections."
+        },
+        "breakpilot.debugControlsMode": {
+          "type": "string",
+          "enum": [
+            "ask_once_per_session",
+            "always_ask"
+          ],
+          "default": "ask_once_per_session",
+          "description": "Controls how BreakPilot remembers continue and step approvals."
+        },
+        "breakpilot.trustedProject": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Trust this workspace for BreakPilot safe inspection approvals."
+        },
+        "breakpilot.allowPersistentHighRiskApprovals": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow narrow project-level allowlists for high-risk evaluate requests."
+        },
+        "breakpilot.allowedActions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "readonly_evaluate"
+          ],
+          "description": "High-risk action names that may be auto-approved when persistent approvals are enabled."
+        },
+        "breakpilot.allowedExpressionPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Regular expressions or substrings for high-risk evaluate expressions that may be auto-approved when persistent approvals are enabled."
+        },
+        "breakpilot.allowlistTrustedProjectsOnly": {
+          "type": "boolean",
+          "default": true,
+          "description": "Only apply persistent high-risk allowlists when the workspace is trusted."
         }
       }
     }
   },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "1.90.0",
     "typescript": "^5.0.0"
   }
 }
