@@ -1,290 +1,361 @@
-# MCP 工具接口
+# BreakPilot MCP Tool Reference
 
-这些工具名和 schema 属于 BreakPilot 的共享 control plane。MCP stdio 是主要 Agent-facing 协议，CLI/HTTP daemon 也复用同一套 `src/control/toolDefinitions.ts` 和 `src/control/ToolRouter.ts`。目录职责见 [control-tools.md](control-tools.md) 和 [project-structure.md](project-structure.md)。
+Language: English | [中文](mcp-tools.zh-CN.md)
 
-统一成功格式：
+BreakPilot exposes the Agent Runtime Debugger through an MCP stdio server named
+`breakpilot-debugger`. Agents use it to launch or attach to local debug targets,
+set breakpoints, inspect paused runtime state, evaluate safe expressions, and
+coordinate with supported IDE sessions.
+
+Start MCP with:
+
+```bash
+breakpilot mcp serve
+```
+
+## Protocol Surface
+
+The MCP stdio adapter accepts newline-delimited JSON-RPC messages.
+
+| JSON-RPC method | Purpose |
+|---|---|
+| `initialize` | Returns MCP protocol metadata, the server name `breakpilot-debugger`, and tool capability support. |
+| `tools/list` | Returns every callable BreakPilot tool definition with JSON Schema input. |
+| `tools/call` | Calls a tool by `{ "name": "...", "arguments": { ... } }`. |
+| `ping` | Health check; returns an empty object. |
+
+`tools/call` returns MCP text content containing the BreakPilot JSON response.
+When the tool response has `ok: false`, MCP marks the tool result as
+`isError: true`.
+
+## Shared Response Format
+
+Successful tool responses use:
 
 ```json
 {
   "ok": true,
-  "sessionId": "sess_001",
+  "sessionId": "sess_abc123",
   "data": {},
   "warnings": [],
-  "auditId": "audit_001"
+  "auditId": "audit_abc123"
 }
 ```
 
-统一失败格式：
+Failed tool responses use:
 
 ```json
 {
   "ok": false,
   "error": {
-    "code": "BREAKPOINT_NOT_VERIFIED",
-    "message": "Breakpoint was not verified by debug adapter",
+    "code": "INVALID_ARGUMENT",
+    "message": "sessionId is required.",
     "details": {}
   },
-  "auditId": "audit_002"
+  "auditId": "audit_abc123"
 }
 ```
 
-## 1. `debug_launch`
+Common error codes include `SESSION_NOT_FOUND`, `ADAPTER_START_FAILED`,
+`ATTACH_FAILED`, `LAUNCH_FAILED`, `BREAKPOINT_NOT_VERIFIED`,
+`BREAKPOINT_TIMEOUT`, `EVALUATE_BLOCKED_BY_POLICY`, `DEBUG_PORT_NOT_ALLOWED`,
+`WORKSPACE_VIOLATION`, `IDE_NOT_CONNECTED`, `IDE_SESSION_NOT_FOUND`,
+`SESSION_OWNER_CONFLICT`, `POLICY_VIOLATION`, `UNSUPPORTED_LANGUAGE`,
+`INVALID_LANGUAGE_IDENTIFIER`, `INVALID_ARGUMENT`, and `TOOL_FAILED`.
 
-用途：通过 Debug Adapter launch 目标程序。
+## Common Concepts
 
-输入：
+`sessionId` is returned by `debug_launch`, `debug_attach`, or
+`adopt_ide_session`. Pass it to session-scoped tools.
+
+`lang` is the preferred language selector. Supported built-in identifiers are
+reported dynamically by `list_supported_languages`; the default registry includes
+`python`, `node`, `typescript`, and `java`. When `lang` is omitted, launch can
+infer from the `program` extension. The advertised MCP attach schema does not
+include a source path, so `debug_attach` should pass `lang` explicitly.
+
+`mode` describes the runtime coordination mode:
+
+| Value | Meaning |
+|---|---|
+| `headless` | BreakPilot controls a DAP session directly. Default for launch/attach. |
+| `ide` | BreakPilot adopts and queries an IDE-owned debug session. |
+| `hybrid` | BreakPilot coordinates MCP calls with IDE bridge state. |
+
+`owner` controls who is allowed to drive execution:
+
+| Value | Meaning |
+|---|---|
+| `mcp` | MCP owns execution. Default for launch/attach. |
+| `ide` | IDE owns execution. |
+| `hybrid` | Shared ownership, used most often for adopted IDE sessions. |
+
+`objectFields` controls variable expansion:
+
+| Value | Meaning |
+|---|---|
+| `none` | Do not expand object children. |
+| `preview` | Keep object previews and `variablesReference`, but do not fetch children. |
+| `shallow` | Expand one object level. |
+| `deep` | Expand recursively up to `maxDepth`. |
+
+## Recommended Flows
+
+Headless DAP debugging:
+
+```json
+{"tool":"debug_launch","arguments":{"lang":"python","program":"examples/python/app.py"}}
+{"tool":"set_breakpoint","arguments":{"sessionId":"<sessionId>","file":"examples/python/app.py","line":12}}
+{"tool":"wait_for_breakpoint","arguments":{"sessionId":"<sessionId>","timeoutMs":30000}}
+{"tool":"get_runtime_snapshot","arguments":{"sessionId":"<sessionId>","profile":"focused","objectFields":"preview"}}
+{"tool":"inspect_variable","arguments":{"sessionId":"<sessionId>","variablesReference":7}}
+{"tool":"evaluate","arguments":{"sessionId":"<sessionId>","expression":"order.customer.name","mode":"readonly"}}
+{"tool":"continue_execution","arguments":{"sessionId":"<sessionId>"}}
+{"tool":"disconnect","arguments":{"sessionId":"<sessionId>"}}
+```
+
+Paused IDE debugging:
+
+```json
+{"tool":"ide_status","arguments":{}}
+{"tool":"list_ide_sessions","arguments":{"workspace":"/absolute/workspace/path"}}
+{"tool":"adopt_ide_session","arguments":{"ideSessionId":"<ideSessionId>","workspace":"/absolute/workspace/path"}}
+{"tool":"get_active_breakpoint_context","arguments":{"sessionId":"<sessionId>","profile":"focused"}}
+```
+
+## Tool Index
+
+| Tool | Purpose |
+|---|---|
+| `debug_launch` | Start a target program through a DAP adapter. |
+| `debug_attach` | Attach to an existing debug target through a DAP adapter. |
+| `set_breakpoint` | Set an agent-owned source breakpoint. |
+| `wait_for_breakpoint` | Wait for a stopped event. |
+| `get_runtime_snapshot` | Read stack frames and scoped variables from a paused runtime. |
+| `inspect_variable` | Expand one `variablesReference`. |
+| `evaluate` | Evaluate an expression with policy-controlled risk mode. |
+| `continue_execution` | Resume a paused thread. |
+| `step_over` | Step over the current statement. |
+| `step_into` | Step into a call. |
+| `step_out` | Step out of the current frame. |
+| `remove_breakpoint` | Remove an agent-owned breakpoint. |
+| `list_breakpoints` | List breakpoints for a session. |
+| `list_sessions` | List active BreakPilot sessions. |
+| `list_supported_languages` | Report registered adapter capabilities and availability. |
+| `disconnect` | Disconnect a debug session and clear agent breakpoints. |
+| `ide_status` | Report IDE bridge status and connected clients. |
+| `list_ide_sessions` | List IDE-reported debug sessions. |
+| `adopt_ide_session` | Convert an IDE session into a BreakPilot session. |
+| `get_active_breakpoint_context` | Adopt or use an active paused IDE session and return context. |
+
+## `debug_launch`
+
+Launch a target program through a registered Debug Adapter Protocol adapter.
+
+Required by schema: none. Operationally, provide either `lang` or an inferable
+`program`; most adapters also need `program`, `module`, `mainClass`, or a
+raw `dap` launch object.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `lang` | string | No | inferred | Registered language identifier such as `python`, `node`, `typescript`, or `java`. |
+| `program` | string | No | none | Program path or, for Java, a main class / `.java` file used to derive `mainClass`. Must stay inside the workspace when present. |
+| `module` | string | No | none | Python module name for module launch. |
+| `args` | string[] | No | `[]` | Program arguments. |
+| `cwd` | string | No | workspace root | Runtime working directory passed to the adapter. |
+| `env` | object | No | process env | Extra environment for adapter/target configuration. Production-like env markers may be blocked by policy. |
+| `mode` | string | No | `headless` | `headless`, `ide`, or `hybrid`. |
+| `owner` | string | No | `mcp` | `mcp`, `ide`, or `hybrid`. |
+| `adapterCommand` | string | No | adapter default/env | Override the debug adapter executable. |
+| `adapterArgs` | string[] | No | adapter default | Override adapter process arguments. |
+| `dap` | object | No | generated | Raw adapter-specific DAP launch arguments. Use this only when you need to pass adapter-native settings directly. |
+
+Adapter notes:
+
+| Language | Launch configuration highlights |
+|---|---|
+| `python` | `{ program, module, args, cwd, env, justMyCode: true, stopOnEntry: false }` |
+| `node` / `typescript` | `{ type: "pwa-node", request: "launch", program, args, cwd, env, sourceMaps: true }` |
+| `java` | `{ request: "launch", mainClass, classpath: ".", cwd, args, stopOnEntry: true }`; supports `vmArgs`, `javaPath`, `classpath`, and explicit `mainClass`. |
+
+Example:
 
 ```json
 {
   "lang": "python",
   "program": "examples/python/app.py",
-  "args": [],
+  "args": ["--port", "5000"],
   "cwd": ".",
-  "mode": "headless",
-  "owner": "mcp",
-  "adapterCommand": "python",
-  "adapterArgs": ["-m", "debugpy.adapter"]
-}
-```
-
-DAP 映射：`initialize` -> `launch` -> `initialized` -> 后续 `configurationDone`。
-
-安全点：workspace path、production marker、launch env。
-
-失败：`ADAPTER_START_FAILED`、`LAUNCH_FAILED`、`WORKSPACE_VIOLATION`。
-
-## 2. `debug_attach`
-
-用途：attach 到已开启 debug 端口的 runtime。
-
-输入：
-
-```json
-{
-  "lang": "python",
-  "host": "127.0.0.1",
-  "port": 5678,
   "mode": "headless",
   "owner": "mcp"
 }
 ```
 
-Python debugpy 会映射为：
+Success data is a `SessionSummary` with `sessionId`, `language`, `mode`,
+`owner`, `state`, `workspaceRoot`, `providerKind`, optional IDE IDs, and provider
+`capabilities`.
+
+## `debug_attach`
+
+Attach to an already running target through a DAP adapter or adapter-managed
+attach transport.
+
+Required by schema: none. Operationally, pass `lang` explicitly because the
+advertised MCP attach schema does not include a source path for language
+inference. `host` and `port` default to language-specific local values, but
+callers should pass them explicitly for clarity.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `lang` | string | No | inferred | Registered language identifier. Recommended for MCP attach because no source path is advertised in the attach schema. |
+| `host` | string | No | `127.0.0.1` | Target host. Must be allowed by policy. Java attach uses `localhost` when no host is supplied. |
+| `port` | number | No | Python `5678`, Node `9229` | Target debug port. Must be allowed by policy. |
+| `mode` | string | No | `headless` | `headless`, `ide`, or `hybrid`. |
+| `owner` | string | No | `mcp` | `mcp`, `ide`, or `hybrid`. |
+| `adapterCommand` | string | No | adapter default/env | Override adapter executable. |
+| `adapterArgs` | string[] | No | adapter default | Override adapter process arguments. |
+| `dapHost` | string | No | none | Connect directly to an existing DAP server instead of spawning/using adapter transport. |
+| `dapPort` | number | No | none | Existing DAP server port used with `dapHost`. |
+| `dap` | object | No | generated | Raw adapter-specific attach arguments. |
+
+Adapter notes:
+
+| Language | Attach behavior |
+|---|---|
+| `python` | Can connect directly to a debugpy DAP socket, or delegate through `debugpy.adapter` when adapter overrides are used. Normalized config is `{ connect: { host, port }, justMyCode: true }`. |
+| `node` / `typescript` | Uses the JS debug adapter with `{ type: "pwa-node", request: "attach", address, port, cwd, sourceMaps: true }`. |
+| `java` | Treats `host:port` as a JDWP endpoint and delegates through the Java bridge. The port must be an integer in `1..65535`. |
+
+Example:
 
 ```json
 {
-  "connect": {
-    "host": "127.0.0.1",
-    "port": 5678
-  },
-  "justMyCode": true
+  "lang": "node",
+  "host": "127.0.0.1",
+  "port": 9229,
+  "cwd": "."
 }
 ```
 
-DAP 映射：`initialize` -> `attach`。
+Success data is the same `SessionSummary` shape as `debug_launch`.
 
-安全点：host/port allowlist、forbidProduction、远程 attach 确认。
+## `set_breakpoint`
 
-失败：`DEBUG_PORT_NOT_ALLOWED`、`ATTACH_FAILED`。
+Set an agent-owned line breakpoint and synchronize it to the runtime provider.
+For DAP sessions, BreakPilot also broadcasts breakpoint changes to IDE clients
+connected to the same workspace.
 
-## 3. `set_breakpoint`
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id returned by launch, attach, or adopt. |
+| `file` | string | Yes | none | Source file path. It is resolved against the workspace and must pass workspace policy. |
+| `line` | number | Yes | none | 1-based source line. |
+| `column` | number | No | none | Optional source column. |
+| `condition` | string | No | none | Conditional breakpoint expression. |
+| `hitCondition` | string | No | none | Adapter-specific hit-count condition. |
+| `logMessage` | string | No | none | Adapter-specific logpoint message. |
+| `requireVerified` | boolean | No | `false` | If true, return `BREAKPOINT_NOT_VERIFIED` when the adapter does not verify this breakpoint. |
 
-用途：设置 Agent-owned 断点，并在 IDE Bridge 在线时同步。
-
-输入：
+Example:
 
 ```json
 {
-  "sessionId": "sess_001",
-  "file": "src/service/order.py",
+  "sessionId": "sess_abc123",
+  "file": "app/service/order.py",
   "line": 42,
   "condition": "order is not None",
-  "requireVerified": false
+  "requireVerified": true
 }
 ```
 
-DAP 映射：`setBreakpoints`。注意 DAP 对同一 source 是全量覆盖，所以 BreakpointManager 会按文件汇总后发送。
-
-Bridge 消息：`agent_set_breakpoint`。
-
-失败：`SESSION_NOT_FOUND`、`WORKSPACE_VIOLATION`、`BREAKPOINT_NOT_VERIFIED`。
-
-## 4. `wait_for_breakpoint`
-
-用途：等待 `stopped` event。
-
-输入：
+Success data:
 
 ```json
 {
-  "sessionId": "sess_001",
+  "breakpoint": {
+    "id": "bp_abc123",
+    "sessionId": "sess_abc123",
+    "file": "/absolute/path/app/service/order.py",
+    "line": 42,
+    "verified": true,
+    "createdAt": "2026-06-16T00:00:00.000Z"
+  },
+  "breakpoints": []
+}
+```
+
+## `wait_for_breakpoint`
+
+Wait until the target runtime stops at a breakpoint or step event. Always use a
+finite timeout in agent workflows.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+| `timeoutMs` | number | No | `30000` | Maximum wait time in milliseconds. |
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123",
   "timeoutMs": 30000
 }
 ```
 
-DAP 映射：监听 `stopped` event，记录 `threadId`。
+Success data contains `stopped`, a DAP-style stopped event with fields such as
+`reason`, `threadId`, `description`, `allThreadsStopped`, and sometimes
+`topFrame` when BreakPilot recovered a missed stopped event from stack trace.
 
-Bridge 消息：`ide_breakpoint_hit`，用于通知插件展示确认框。
+## `get_runtime_snapshot`
 
-失败：`BREAKPOINT_TIMEOUT`、`TARGET_PROCESS_EXITED`。
+Read a progressive runtime snapshot from a paused session. Start with
+`profile: "focused"` and `objectFields: "preview"`; use `inspect_variable` for
+targeted expansion before requesting a broad `full` snapshot.
 
-## 5. `get_runtime_snapshot`
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+| `threadId` | number | No | provider thread | Thread to inspect. |
+| `frameId` | number | No | selected by `frameIndex` | DAP frame id to inspect directly. |
+| `frameIndex` | number | No | `0` | Stack frame index when `frameId` is not supplied. |
+| `profile` | string | No | `focused` | `focused`, `locals`, `full`, or `custom`. |
+| `includeCategories` | string[] | No | profile-derived | Categories to include for `custom` snapshots. |
+| `includeScopes` | string[] | No | none | Raw adapter scope names, such as `Locals` or `Globals`, to include. |
+| `objectFields` | string | No | profile-derived | `none`, `preview`, `shallow`, or `deep`. |
+| `maxDepth` | number | No | policy/schema default | Maximum recursive object depth. Schema default is `1`; policy may provide broader defaults. |
+| `maxItems` | number | No | policy/schema default | Maximum variables per scope/object. Schema default is `10`; policy may provide broader defaults. |
+| `maxStringLength` | number | No | `2000` | Maximum string preview length. |
 
-用途：读取当前暂停帧的渐进式运行时快照。默认返回低噪音的 `stackFrames`、`arguments`、`locals`、`receiver` 和对象 preview；需要完整上下文时再显式请求 `profile: "full"` 或自定义 category/scope。
+Profiles:
 
-输入：
+| Profile | Behavior |
+|---|---|
+| `focused` | Includes arguments, locals, and receiver-like values. Best default for agents. |
+| `locals` | Similar focused categories with `objectFields: "none"` unless overridden. |
+| `custom` | Includes only `includeCategories` and/or `includeScopes`. |
+| `full` | Includes every scope category, still bounded by limits. |
+
+Scope categories:
+
+| Category | Meaning |
+|---|---|
+| `arguments` | Function or method arguments. |
+| `locals` | Local variables in the selected frame. |
+| `receiver` | `this`, `self`, or equivalent current object. |
+| `closures` | Closure-captured variables. |
+| `globals` | Global variables. |
+| `statics` | Static fields. |
+| `module` | Module/script scope. |
+| `runtime` | Built-in, class/function, framework, or runtime scopes. |
+| `other` | Scope that could not be classified. |
+
+Example:
 
 ```json
 {
-  "sessionId": "sess_001",
+  "sessionId": "sess_abc123",
   "frameIndex": 0,
-  "profile": "focused",
-  "includeCategories": ["locals", "receiver"],
-  "includeScopes": ["Locals"],
-  "objectFields": "preview",
-  "maxDepth": 1,
-  "maxItems": 10,
-  "maxStringLength": 1000
-}
-```
-
-DAP 映射：`threads` -> `stackTrace` -> `scopes` -> `variables`。
-
-跨语言 category：
-
-| category | 说明 |
-|---|---|
-| `arguments` | 函数/方法参数 |
-| `locals` | 当前帧局部变量 |
-| `receiver` | `this` / `self` / 当前对象 |
-| `closures` | JS/TS 闭包变量 |
-| `globals` | 全局/模块级变量 |
-| `statics` | Java/C# 等静态字段 |
-| `module` | module/script scope |
-| `runtime` | 内置、class/function/special/framework runtime |
-| `other` | 未识别 scope |
-
-profile：
-
-| profile | 说明 |
-|---|---|
-| `focused` | 默认，读取 `arguments`/`locals`/`receiver`，对象只给 preview |
-| `locals` | 更小输出，只读当前帧关键变量，不展开对象 |
-| `custom` | 按 `includeCategories` / `includeScopes` 读取 |
-| `full` | 恢复完整 scopes 输出，仍受 limits 限制 |
-
-安全点：深度、数量、字符串长度、敏感字段脱敏。
-
-失败：`VARIABLE_TOO_LARGE`、`SESSION_NOT_FOUND`、adapter-specific variable failure。
-
-## 6. `inspect_variable`
-
-用途：根据 snapshot 返回的 `variablesReference` 定向展开某个变量，避免为了看一个对象而请求 full snapshot。
-
-输入：
-
-```json
-{
-  "sessionId": "sess_001",
-  "variablesReference": 7,
-  "start": 0,
-  "count": 20,
-  "objectFields": "deep",
-  "maxDepth": 1,
-  "maxItems": 20
-}
-```
-
-DAP 映射：`variables`。
-
-## 7. `evaluate`
-
-用途：在当前 frame 求值。
-
-输入：
-
-```json
-{
-  "sessionId": "sess_001",
-  "expression": "order.customer.name",
-  "mode": "readonly",
-  "timeoutMs": 1000
-}
-```
-
-DAP 映射：`evaluate`。
-
-模式：
-
-| 模式 | 说明 |
-|---|---|
-| `readonly` | 字段、属性、索引读取，禁止函数调用和赋值 |
-| `guarded` | 后续白名单 getter |
-| `unsafe` | 必须用户确认，默认策略禁止 |
-
-失败：`EVALUATE_BLOCKED_BY_POLICY`、`EVALUATE_TIMEOUT`。
-
-## 8. `continue_execution`
-
-用途：继续执行暂停线程。
-
-输入：
-
-```json
-{
-  "sessionId": "sess_001",
-  "threadId": 1
-}
-```
-
-DAP 映射：`continue`。
-
-安全点：必须经过 SessionCoordinator，避免 IDE/MCP 同时控制。
-
-失败：`SESSION_OWNER_CONFLICT`、`SESSION_NOT_FOUND`。
-
-## 9. `list_ide_sessions`
-
-用途：列出已连接 IDEA/VS Code 插件上报的 IDE debug sessions。
-
-输入：
-
-```json
-{
-  "clientId": "ide_001",
-  "workspace": "."
-}
-```
-
-Bridge 来源：`ide_session_started`、`ide_session_paused`、`ide_session_resumed`、`ide_session_terminated`。
-
-## 10. `adopt_ide_session`
-
-用途：把用户已经在 IDE 中启动的 debug session 注册为 BreakPilot session。未传 `ideSessionId` 时，优先选择当前 workspace 下 active 且 paused 的 IDE session。
-
-输入：
-
-```json
-{
-  "ideSessionId": "idea_ab12",
-  "mode": "ide",
-  "owner": "hybrid"
-}
-```
-
-成功后，`get_runtime_snapshot`、`set_breakpoint`、`continue_execution` 和 `step_*` 会自动走 IDE provider。IDE provider 的执行类命令默认弹用户确认框。
-
-失败：`IDE_NOT_CONNECTED`、`IDE_SESSION_NOT_FOUND`、`WORKSPACE_VIOLATION`。
-
-## 11. `get_active_breakpoint_context`
-
-用途：快捷读取当前 IDE 暂停点。如果未传 `sessionId`，会先自动 adopt active paused IDE session。
-
-输入：
-
-```json
-{
-  "ideSessionId": "idea_ab12",
   "profile": "focused",
   "objectFields": "preview",
   "maxDepth": 1,
@@ -292,39 +363,418 @@ Bridge 来源：`ide_session_started`、`ide_session_paused`、`ide_session_resu
 }
 ```
 
-输出包含 `stopped`、`topFrame`、`snapshot`、`providerKind`。
+Success data is a `RuntimeSnapshot`:
 
-## 其他工具
-
-| 工具 | 说明 | DAP/Bridge |
-|---|---|---|
-| `remove_breakpoint` | 删除 Agent 断点 | `setBreakpoints` 全量刷新 + `agent_remove_breakpoint` |
-| `list_sessions` | 列出 session | 内部 SessionStore |
-| `list_ide_sessions` | 列出 IDE 上报的 debug session | Bridge registry |
-| `adopt_ide_session` | 采纳 IDE 已有 debug session | IDE provider |
-| `get_active_breakpoint_context` | 读取当前暂停点上下文 | IDE provider + snapshot |
-| `list_breakpoints` | 列出断点 | BreakpointManager |
-| `step_over` | 单步跳过 | DAP `next` 或 IDE command |
-| `step_into` | 单步进入 | DAP `stepIn` 或 IDE command |
-| `step_out` | 单步跳出 | DAP `stepOut` 或 IDE command |
-| `inspect_variable` | 定向展开变量引用 | DAP `variables`；IDE provider 返回快照降级 |
-| `disconnect` | 断开会话 | DAP `disconnect` 或 IDE detach/stop |
-| `ide_status` | 查看 IDE Bridge 在线状态 | Bridge registry |
-
-## CLI 示例
-
-```bash
-breakpilot serve --http-port 27890 --ide-bridge-port 27891
-breakpilot attach --lang python --host 127.0.0.1 --port 5678 --pretty
-breakpilot bp set --session sess_001 --file src/app.py --line 42 --pretty
-breakpilot wait --session sess_001 --timeout 30000 --pretty
-breakpilot snapshot --session sess_001 --profile focused --max-items 10 --pretty
-breakpilot inspect-variable --session sess_001 --ref 7 --depth 1 --max-items 20 --pretty
-breakpilot snapshot --session sess_001 --profile full --depth 2 --max-items 20 --pretty
-breakpilot eval --session sess_001 --mode readonly order.customer.name --pretty
-breakpilot continue --session sess_001 --pretty
-breakpilot disconnect --session sess_001 --pretty
-breakpilot ide sessions --pretty
-breakpilot ide adopt --ide-session idea_ab12 --pretty
-breakpilot ide context --ide-session idea_ab12 --profile focused --pretty
+```json
+{
+  "sessionId": "sess_abc123",
+  "source": "headless",
+  "language": "python",
+  "profile": "focused",
+  "threadId": 1,
+  "frameId": 7,
+  "stackFrames": [],
+  "variables": {
+    "locals": {
+      "name": "locals",
+      "category": "locals",
+      "rawScopes": ["Locals"],
+      "expensive": false,
+      "variables": {}
+    }
+  },
+  "availableCategories": [],
+  "omittedCategories": [],
+  "availableScopes": [],
+  "omittedScopes": [],
+  "scopeMetadata": [],
+  "limits": {
+    "maxDepth": 1,
+    "maxItems": 10,
+    "maxStringLength": 2000
+  }
+}
 ```
+
+Serialized variables include `name`, `type`, `kind`, `valuePreview`, `value`,
+`variablesReference`, `truncated`, optional `redacted`, optional `cycle`, and
+optional `presentationError`.
+
+## `inspect_variable`
+
+Expand one DAP `variablesReference` returned by a snapshot or previous variable
+inspection. This is the preferred way to drill into a single object, array, map,
+or scope without collecting a full runtime snapshot.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+| `variablesReference` | number | Yes | none | DAP variables reference to expand. |
+| `start` | number | No | `0` | Start offset for indexed variables. |
+| `count` | number | No | none | Number of child variables to request. Also influences `maxItems`. |
+| `objectFields` | string | No | `deep` | `none`, `preview`, `shallow`, or `deep`. |
+| `maxDepth` | number | No | `1` | Recursive child depth. |
+| `maxItems` | number | No | `20` | Maximum serialized child variables. |
+| `maxStringLength` | number | No | `2000` | Maximum string preview length. |
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123",
+  "variablesReference": 7,
+  "start": 0,
+  "count": 20,
+  "objectFields": "deep",
+  "maxDepth": 1
+}
+```
+
+Success data usually contains `variablesReference`, `start`, `count`, and a
+serialized `variables` map. IDE providers may return provider-specific context.
+
+## `evaluate`
+
+Evaluate an expression in the current debug frame with policy-controlled risk
+mode. Use `readonly` by default. In `readonly`, BreakPilot rejects calls,
+assignment, imports/requires, construction, deletion, `await`, semicolon
+sequences, and expressions longer than policy allows.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+| `expression` | string | Yes | none | Expression to evaluate. |
+| `mode` | string | No | policy default or `readonly` | `readonly`, `guarded`, or `unsafe`. |
+| `threadId` | number | No | provider thread | Thread context. |
+| `frameId` | number | No | current frame | Frame context. |
+| `timeoutMs` | number | No | policy timeout / `1000` schema | Evaluation timeout in milliseconds. |
+
+Modes:
+
+| Mode | Behavior |
+|---|---|
+| `readonly` | Intended for property, field, and index inspection only. |
+| `guarded` | Reserved for policy-mediated broader inspection. |
+| `unsafe` | Requires explicit IDE confirmation when policy requires it; blocked for headless providers in that case. |
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123",
+  "expression": "order.customer.name",
+  "mode": "readonly",
+  "timeoutMs": 1000
+}
+```
+
+Success data contains `{ "result": <adapter result>, "mode": "readonly" }`.
+
+## `continue_execution`
+
+Continue a paused runtime thread.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+| `threadId` | number | No | provider thread | Thread to continue. |
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123",
+  "threadId": 1
+}
+```
+
+Success data contains the provider `result`. For DAP sessions, the session state
+changes to `running`.
+
+## `step_over`
+
+Step over the current statement in the selected or provider-default thread.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+| `threadId` | number | No | provider thread | Thread to step. |
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123",
+  "threadId": 1
+}
+```
+
+Success data contains the provider step `result`; the session moves to
+`running` until the next stop.
+
+## `step_into`
+
+Step into the next call in the selected or provider-default thread.
+
+Parameters and response are the same as `step_over`.
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123"
+}
+```
+
+## `step_out`
+
+Step out of the current frame in the selected or provider-default thread.
+
+Parameters and response are the same as `step_over`.
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123"
+}
+```
+
+## `remove_breakpoint`
+
+Remove one agent-owned breakpoint. BreakPilot updates the runtime provider and,
+for DAP sessions, broadcasts the removal to connected IDE clients.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+| `breakpointId` | string | Yes | none | Breakpoint id returned by `set_breakpoint` or `list_breakpoints`. |
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123",
+  "breakpointId": "bp_abc123"
+}
+```
+
+Success data contains `{ "removed": true }` or `{ "removed": false }` if no
+matching BreakPilot-owned breakpoint was found.
+
+## `list_breakpoints`
+
+List BreakPilot-managed breakpoints for a session.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123"
+}
+```
+
+Success data contains `{ "breakpoints": [...] }`.
+
+## `list_sessions`
+
+List active BreakPilot sessions.
+
+Required parameters: none.
+
+Example:
+
+```json
+{}
+```
+
+Success data contains `{ "sessions": [...] }`, where each entry is a
+`SessionSummary`.
+
+## `list_supported_languages`
+
+Report registered language adapters and live environment availability. Each
+adapter validates its local toolchain and returns availability warnings/errors
+without treating ordinary missing dependencies as a tool failure.
+
+Required parameters: none.
+
+Example:
+
+```json
+{}
+```
+
+Success data:
+
+```json
+{
+  "languages": [
+    {
+      "language": "python",
+      "displayName": "Python",
+      "supportsAttach": true,
+      "availability": {
+        "available": true,
+        "errors": [],
+        "warnings": []
+      }
+    }
+  ]
+}
+```
+
+## `disconnect`
+
+Disconnect a debug session, clear BreakPilot-owned breakpoints, remove the
+session from the store, and notify IDE clients to clear agent breakpoints.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | Yes | none | Debug session id. |
+| `terminateDebuggee` | boolean | No | `false` | Request target termination when supported. |
+| `restart` | boolean | No | `false` | Request adapter restart behavior when supported. |
+
+Example:
+
+```json
+{
+  "sessionId": "sess_abc123",
+  "terminateDebuggee": false
+}
+```
+
+Success data contains `{ "disconnected": true, "result": ... }`. If the adapter
+does not acknowledge disconnect, `warnings` contains a message and the session
+is still cleaned up locally.
+
+## `ide_status`
+
+Return IDE bridge status and connected IDE clients.
+
+Required parameters: none.
+
+Example:
+
+```json
+{}
+```
+
+Success data is either `{ "enabled": false, "clients": [] }` when the bridge is
+not available, or the bridge status object with connected clients.
+
+## `list_ide_sessions`
+
+List debug sessions reported by connected IDE plugins.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `clientId` | string | No | all clients | Filter sessions by IDE client id. |
+| `workspace` | string | No | all workspaces | Filter sessions by workspace. Resolved relative to BreakPilot workspace root. |
+
+Example:
+
+```json
+{
+  "workspace": "/absolute/workspace/path"
+}
+```
+
+Success data contains `{ "sessions": [...] }`. IDE session entries are reported
+by the VS Code / IntelliJ bridge and generally include `clientId`,
+`ideSessionId`, `workspaceRoot`, `language`, `state`, and current pause metadata.
+
+## `adopt_ide_session`
+
+Adopt an existing IDE debug session as a BreakPilot session. Use this when the
+user already has VS Code or IntelliJ paused at a breakpoint and wants the agent
+to inspect runtime state without launching a separate debuggee.
+
+Required by schema: none. Operationally, provide enough filters to select one
+IDE session. If multiple sessions are active, pass `clientId` and/or
+`ideSessionId`.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `clientId` | string | No | inferred | IDE bridge client id. |
+| `ideSessionId` | string | No | inferred | IDE debug session id. |
+| `workspace` | string | No | selected session workspace | Workspace filter. |
+| `lang` | string | No | IDE session language or `idea` | Runtime language override. |
+| `mode` | string | No | `ide` | `ide` or `hybrid`. |
+| `owner` | string | No | `hybrid` | `ide` or `hybrid`. |
+
+Example:
+
+```json
+{
+  "ideSessionId": "idea_ab12",
+  "workspace": "/absolute/workspace/path",
+  "mode": "ide",
+  "owner": "hybrid"
+}
+```
+
+Success data is a `SessionSummary`. If the same IDE session was already adopted,
+BreakPilot returns the existing `sessionId` with a warning.
+
+## `get_active_breakpoint_context`
+
+Adopt or use the active paused IDE session and return the current breakpoint
+context. This is the fastest single call for "inspect what is currently paused
+in my IDE".
+
+Required by schema: none. Operationally, either pass `sessionId` for an already
+adopted IDE session or enough IDE filters to identify the active paused session.
+
+| Parameter | Type | Required | Default | Description |
+|---|---:|---:|---|---|
+| `sessionId` | string | No | auto-adopt | Existing BreakPilot session id. |
+| `clientId` | string | No | inferred | IDE client filter when auto-adopting. |
+| `ideSessionId` | string | No | inferred | IDE session filter when auto-adopting. |
+| `workspace` | string | No | inferred | Workspace filter. |
+| `timeoutMs` | number | No | `1000` | Short wait for an IDE stopped/breakpoint event before snapshotting. |
+| `frameIndex` | number | No | `0` | Stack frame index for `topFrame`. |
+| `profile` | string | No | `focused` | Snapshot profile. |
+| `objectFields` | string | No | `preview` | Snapshot object expansion. |
+| `maxDepth` | number | No | `1` | Snapshot object depth. |
+| `maxItems` | number | No | `10` | Snapshot item limit. |
+| `maxStringLength` | number | No | `2000` | Snapshot string limit. |
+
+Example:
+
+```json
+{
+  "workspace": "/absolute/workspace/path",
+  "profile": "focused",
+  "objectFields": "preview",
+  "timeoutMs": 1000
+}
+```
+
+Success data:
+
+```json
+{
+  "stopped": null,
+  "topFrame": {},
+  "snapshot": {},
+  "ideSessionId": "idea_ab12",
+  "providerKind": "ide"
+}
+```
+
+## Safety Notes
+
+Keep debugging local and authorized. BreakPilot policy checks workspace paths,
+allowed attach hosts/ports, production-like environment markers, variable
+limits, redaction, and evaluate mode. Prefer:
+
+- `profile: "focused"` before `profile: "full"`;
+- `inspect_variable` before broad object expansion;
+- `evaluate` with `mode: "readonly"`;
+- short, explicit `timeoutMs`;
+- `disconnect` or `remove_breakpoint` cleanup after collecting evidence.
