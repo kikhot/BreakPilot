@@ -15,7 +15,7 @@ python -m debugpy --listen 127.0.0.1:5678 --wait-for-client examples/python/app.
 ## 启动 BreakPilot daemon
 
 ```bash
-breakpilot serve --http-port 27890 --ide-bridge-port 27891
+breakpilot serve
 ```
 
 ## 调试顺序

@@ -1,6 +1,6 @@
 # Vibecoding MCP Setup
 
-BreakPilot can be used from vibecoding tools as a local stdio MCP server. Once connected, agents can call runtime debugging tools such as `debug_attach`, `set_breakpoint`, `wait_for_breakpoint`, `get_runtime_snapshot`, and `inspect_variable`.
+BreakPilot can be used from vibecoding tools as a local stdio MCP server. Once connected, agents can call runtime debugging tools such as `bp_debug_start`, `bp_debug_set_breakpoint`, `bp_debug_control`, `bp_debug_frame`, and `bp_debug_value`.
 
 The examples below use `{BREAKPILOT_ROOT}` as a placeholder for the absolute path to your local BreakPilot checkout. Replace the whole placeholder, including the braces, before running a command or saving config.
 
@@ -195,12 +195,14 @@ Recommended config when `breakpilot` is installed or linked:
       },
       "disabled": false,
       "autoApprove": [
-        "list_sessions",
-        "list_breakpoints",
+        "bp_debug_status",
+        "bp_debug_list_breakpoints",
         "ide_status",
-        "list_ide_sessions",
-        "get_runtime_snapshot",
-        "inspect_variable"
+        "bp_debug_threads",
+        "bp_debug_call_stack",
+        "bp_debug_frame",
+        "bp_debug_value",
+        "bp_debug_context"
       ]
     }
   }
@@ -227,12 +229,14 @@ Source checkout fallback:
       },
       "disabled": false,
       "autoApprove": [
-        "list_sessions",
-        "list_breakpoints",
+        "bp_debug_status",
+        "bp_debug_list_breakpoints",
         "ide_status",
-        "list_ide_sessions",
-        "get_runtime_snapshot",
-        "inspect_variable"
+        "bp_debug_threads",
+        "bp_debug_call_stack",
+        "bp_debug_frame",
+        "bp_debug_value",
+        "bp_debug_context"
       ]
     }
   }
@@ -242,16 +246,12 @@ Source checkout fallback:
 Keep mutating or execution-control tools under human approval unless your workflow explicitly allows them:
 
 ```text
-evaluate
-continue_execution
-disconnect
-debug_launch
-debug_attach
-set_breakpoint
-remove_breakpoint
-step_over
-step_into
-step_out
+bp_debug_start
+bp_debug_set_breakpoint
+bp_debug_remove_breakpoint
+bp_debug_eval
+bp_debug_control
+bp_debug_set_value
 ```
 
 ## Usage Prompt
@@ -259,39 +259,41 @@ step_out
 Use this style of prompt in Codex, Claude Code, Kiro, or another MCP-capable coding agent:
 
 ```text
-Use breakpilot-debugger MCP. Attach to the Python debugpy process on 127.0.0.1:5678, set a breakpoint in examples/python/app.py at line 12, wait for the breakpoint, then read a focused runtime snapshot. Do not use unsafe evaluate.
+Use breakpilot-debugger MCP. Attach to the Python debugpy process on 127.0.0.1:5678, set a breakpoint in examples/python/app.py at line 12, wait for the breakpoint, then inspect the top frame variables. Do not use unsafe evaluate.
 ```
 
 Expected tool flow:
 
 ```text
-debug_attach
-set_breakpoint
-wait_for_breakpoint
-get_runtime_snapshot
-inspect_variable
-evaluate
-continue_execution
-disconnect
+bp_debug_start
+bp_debug_set_breakpoint
+bp_debug_control(action="wait")
+bp_debug_call_stack
+bp_debug_frame
+bp_debug_value
+bp_debug_eval
+bp_debug_control(action="resume")
+bp_debug_control(action="disconnect")
 ```
 
-## MCP Mode vs CLI Daemon Mode
+## MCP Stdio And Hub Mode
 
-For vibecoding agents, prefer MCP mode:
+For vibecoding agents, prefer MCP stdio:
 
 ```bash
 breakpilot mcp serve
 ```
 
-MCP mode is a true stdio lifecycle: the MCP client starts the process, and the
-process exits when stdin closes or the client sends SIGTERM. It does not start
-or reuse the HTTP daemon. IDE plugins discover the active MCP-owned bridge from
-`.breakpilot/bridge.json` and reconnect when that file changes.
+MCP stdio proxies to the local BreakPilot hub. If the hub is not already
+running, the stdio process starts one in-process and exits it when stdin closes
+or the client sends SIGTERM.
 
-For manual CLI, scripts, or IDE Bridge work, use daemon mode:
+For manual CLI, scripts, Streamable HTTP, SSE, or IDE Bridge work, start the
+hub explicitly:
 
 ```bash
-breakpilot serve --http-port 27890 --ide-bridge-port 27891
+breakpilot serve
 ```
 
-Do not start both modes by default for the same workflow.
+The hub listens on `127.0.0.1:57987` by default and exposes `/stream`, `/sse`,
+`/message`, `/bridge`, and `/status`.

@@ -19,7 +19,7 @@ npm run smoke
 npm run typecheck
 npm run build
 npm link
-breakpilot serve --http-port 27890 --ide-bridge-port 27891
+breakpilot serve
 ```
 
 In another terminal:
@@ -38,10 +38,11 @@ For MCP stdio integration:
 breakpilot mcp serve
 ```
 
-`breakpilot mcp serve` is a true stdio MCP process: the MCP client owns its
-lifetime, and closing the client stdin or sending SIGTERM shuts it down. When
-the IDE bridge is enabled, the MCP process writes `.breakpilot/bridge.json` so
-IDE plugins can discover and reconnect to the active bridge.
+`breakpilot serve` starts the single-port local hub on `127.0.0.1:57987`.
+The same port serves MCP Streamable HTTP at `/stream`, legacy SSE at `/sse`,
+and the IDE bridge WebSocket at `/bridge`. `breakpilot mcp serve` is a stdio
+MCP proxy that connects to the hub and starts an in-process hub if one is not
+already available.
 
 After `npm run build`, the compiled entrypoints are also available:
 
@@ -70,22 +71,21 @@ breakpilot --help --locale zh_CN
 Breakpoint commands accept both `breakpoint` and the `bp` alias:
 
 ```bash
-breakpilot breakpoint set --session <sessionId> --file <file> --line <line>
-breakpilot bp set --session <sessionId> --file <file> --line <line>
+breakpilot breakpoint set --file <file> --line <line>
+breakpilot bp set --file <file> --line <line>
 ```
 
 ## Example MCP Tools
 
-- `debug_launch`
-- `debug_attach`
-- `set_breakpoint`
-- `wait_for_breakpoint`
-- `get_runtime_snapshot`
-- `inspect_variable`
-- `list_ide_sessions`
-- `adopt_ide_session`
-- `get_active_breakpoint_context`
-- `evaluate`
-- `continue_execution`
+- `bp_debug_start`
+- `bp_debug_status`
+- `bp_debug_control`
+- `bp_debug_threads`
+- `bp_debug_call_stack`
+- `bp_debug_frame`
+- `bp_debug_value`
+- `bp_debug_eval`
+- `bp_debug_context`
+- `bp_debug_set_breakpoint`
 
 See [docs/architecture.md](docs/architecture.md), [docs/project-structure.md](docs/project-structure.md), [docs/control-tools.md](docs/control-tools.md), [docs/mcp-tools.md](docs/mcp-tools.md), and [docs/vibecoding-mcp.md](docs/vibecoding-mcp.md) for the full design and agent setup.

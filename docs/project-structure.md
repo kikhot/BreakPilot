@@ -7,7 +7,7 @@ BreakPilot keeps protocol adapters thin and puts shared debugging behavior behin
 | `src/control/` | Shared tool definitions and `ToolRouter` used by MCP stdio, HTTP, and CLI flows. |
 | `src/mcp/` | MCP stdio / JSON-RPC adapter only. It should not own shared tool schemas or routing. |
 | `src/http/` | Local HTTP control server for daemon-backed CLI usage. |
-| `src/hub/BridgeManifest.ts` | Workspace bridge discovery manifest (`.breakpilot/bridge.json`) shared by MCP stdio, daemon, and IDE plugins. |
+| `src/hub/HubServer.ts` | Single-port local hub for MCP Streamable HTTP, legacy SSE, HTTP control, and IDE bridge WebSocket. |
 | `src/cli.ts`, `src/cli/` | `breakpilot` bin entrypoint plus the yargs program (`program.ts`), per-domain command modules (`commands/`), help/version i18n (`i18n.ts`), command context (`context.ts`), version reader (`version.ts`), and HTTP client. |
 | `src/runtime/` | Runtime factory and runtime provider adapters. |
 | `src/sessions/` | Session store, breakpoint manager, ownership/coordinator logic, and session orchestration. |
@@ -21,4 +21,4 @@ BreakPilot keeps protocol adapters thin and puts shared debugging behavior behin
 | `agents/`, `skills/` | Agent-facing prompt and skill artifacts. |
 | `breakpilot-vscode/`, `breakpilot-idea/` | IDE plugin skeletons. |
 
-External names remain stable even when internal directories change: package `@breakpilot/cli`, command `breakpilot`, MCP identity `breakpilot-debugger`, MCP command `breakpilot mcp serve`, and daemon command `breakpilot serve --http-port 27890 --ide-bridge-port 27891`.
+External names remain stable even when internal directories change: package `@breakpilot/cli`, command `breakpilot`, MCP identity `breakpilot-debugger`, MCP command `breakpilot mcp serve`, and hub command `breakpilot serve`.

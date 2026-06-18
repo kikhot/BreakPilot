@@ -1,6 +1,6 @@
 # IDE Bridge JSON 协议
 
-传输：localhost WebSocket，默认 `ws://127.0.0.1:27891`。
+传输：localhost WebSocket，默认 `ws://127.0.0.1:57987/bridge`，由 BreakPilot hub 与 MCP Stream/SSE 共享同一个端口。
 
 通用消息：
 

@@ -22,8 +22,8 @@
 
 | 能力 | 等级 | 理由 |
 |---|---:|---|
-| MCP Server 启动调试会话 | P0 | 本仓库已实现 `debug_launch` 工具入口和 DAP 会话管理 |
-| MCP Server attach 到已有 debug 端口 | P0 | 已实现 `debug_attach`，受 host/port policy 限制 |
+| MCP Server 启动调试会话 | P0 | 本仓库已通过 `bp_debug_start` 暴露 DAP launch 能力 |
+| MCP Server attach 到已有 debug 端口 | P0 | 已通过 `bp_debug_start` 的 `mode: "attach"` 暴露，受 host/port policy 限制 |
 | 通过 DAP 设置断点 | P0 | 已实现 `setBreakpoints` 映射 |
 | 等待 breakpoint hit | P0 | 已实现 `stopped` event 等待 |
 | 读取 stack trace | P0 | DAP 标准能力 |
