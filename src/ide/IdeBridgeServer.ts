@@ -119,7 +119,7 @@ export class IdeBridgeServer extends EventEmitter {
 
   constructor({
     host = "127.0.0.1",
-    port = 27891,
+    port = 57987,
     audit,
     workspaceRoot,
     policyHash,
@@ -142,45 +142,13 @@ export class IdeBridgeServer extends EventEmitter {
 
   async start(): Promise<void> {
     this.server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
-      if (req.url === "/status") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(this.status()));
-        return;
-      }
+      if (this.handleHttpRequest(req, res)) return;
       res.writeHead(404);
       res.end("Not found");
     });
 
     this.server.on("upgrade", (req: IncomingMessage, socket: Socket) => {
-      const key = req.headers["sec-websocket-key"];
-      if (!key) {
-        socket.destroy();
-        return;
-      }
-      const accept = crypto.createHash("sha1").update(`${key}${WS_GUID}`).digest("base64");
-      socket.write(
-        [
-          "HTTP/1.1 101 Switching Protocols",
-          "Upgrade: websocket",
-          "Connection: Upgrade",
-          `Sec-WebSocket-Accept: ${accept}`,
-          "",
-          ""
-        ].join("\r\n")
-      );
-      const client = this.registry.add(socket, {});
-      this.socketClientIds.set(socket, client.clientId);
-      this.buffers.set(socket, Buffer.alloc(0));
-      this.#send(socket, makeBridgeMessage("bridge_welcome", {
-        clientId: client.clientId,
-        workspaceRoot: this.workspaceRoot,
-        policyHash: this.policyHash,
-        instanceId: this.instanceId,
-        lifecycle: this.lifecycle
-      }));
-      socket.on("data", (chunk) => this.#onSocketData(socket, chunk));
-      socket.on("close", () => this.#removeSocket(socket));
-      socket.on("error", () => this.#removeSocket(socket));
+      this.handleUpgrade(req, socket);
     });
 
     this.port = await new Promise<number>((resolve, reject) => {
@@ -207,6 +175,47 @@ export class IdeBridgeServer extends EventEmitter {
   stop(): void {
     for (const socket of this.registry.sockets()) socket.destroy();
     this.server?.close();
+  }
+
+  handleHttpRequest(req: IncomingMessage, res: ServerResponse): boolean {
+    if (req.url === "/status") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(this.status()));
+      return true;
+    }
+    return false;
+  }
+
+  handleUpgrade(req: IncomingMessage, socket: Socket): void {
+    const key = req.headers["sec-websocket-key"];
+    if (!key) {
+      socket.destroy();
+      return;
+    }
+    const accept = crypto.createHash("sha1").update(`${key}${WS_GUID}`).digest("base64");
+    socket.write(
+      [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Accept: ${accept}`,
+        "",
+        ""
+      ].join("\r\n")
+    );
+    const client = this.registry.add(socket, {});
+    this.socketClientIds.set(socket, client.clientId);
+    this.buffers.set(socket, Buffer.alloc(0));
+    this.#send(socket, makeBridgeMessage("bridge_welcome", {
+      clientId: client.clientId,
+      workspaceRoot: this.workspaceRoot,
+      policyHash: this.policyHash,
+      instanceId: this.instanceId,
+      lifecycle: this.lifecycle
+    }));
+    socket.on("data", (chunk) => this.#onSocketData(socket, chunk));
+    socket.on("close", () => this.#removeSocket(socket));
+    socket.on("error", () => this.#removeSocket(socket));
   }
 
   broadcast(message: BridgeMessage): void {

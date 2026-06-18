@@ -8,10 +8,6 @@ import java.io.File
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.WebSocket
-import java.nio.file.FileSystems
-import java.nio.file.Path
-import java.nio.file.StandardWatchEventKinds
-import java.nio.file.WatchService
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
@@ -23,6 +19,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class BridgeClient(private val project: Project) : Disposable {
+    private val defaultBridgeUrl = "ws://127.0.0.1:57987/bridge"
     private val gson = Gson()
     private val listeners = mutableListOf<(BridgeMessage) -> Unit>()
     private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
@@ -32,15 +29,11 @@ class BridgeClient(private val project: Project) : Disposable {
     private var currentBridgeUrl: String? = null
     private var currentInstanceId: String? = null
     private var heartbeat: ScheduledFuture<*>? = null
-    private var manifestPoll: ScheduledFuture<*>? = null
-    private var watchService: WatchService? = null
-    private val manifestWatcherStarted = AtomicBoolean(false)
     private val pending = mutableListOf<BridgeMessage>()
 
     fun connect(url: String? = null) {
         if (url != null) explicitBridgeUrl = url
         if (disposed.get()) return
-        startManifestWatcher()
         val target = resolveBridgeTarget() ?: run {
             closeSocket()
             scheduleReconnect()
@@ -126,94 +119,14 @@ class BridgeClient(private val project: Project) : Disposable {
 
     private fun resolveBridgeTarget(): BridgeTarget? {
         explicitBridgeUrl?.trim()?.takeIf { it.isNotEmpty() }?.let { return BridgeTarget(it, null) }
-        val root = project.basePath ?: return null
-        val manifest = File(root, ".breakpilot/bridge.json")
-        if (!manifest.exists()) return null
-        return try {
-            val parsed = gson.fromJson(manifest.readText(), Map::class.java)
-            val bridgeUrl = parsed["bridgeUrl"] as? String ?: return null
-            BridgeTarget(bridgeUrl, parsed["instanceId"] as? String)
-        } catch (_: Throwable) {
-            null
-        }
+        return BridgeTarget(defaultBridgeUrl, null)
     }
 
     override fun dispose() {
         disposed.set(true)
         heartbeat?.cancel(false)
-        manifestPoll?.cancel(false)
-        try {
-            watchService?.close()
-        } catch (_: Throwable) {
-        }
         socket?.sendClose(WebSocket.NORMAL_CLOSURE, "disposed")
         scheduler.shutdownNow()
-    }
-
-    private fun startManifestWatcher() {
-        if (!manifestWatcherStarted.compareAndSet(false, true)) return
-        manifestPoll = scheduler.scheduleAtFixedRate({
-            if (!disposed.get()) refreshManifestConnection()
-        }, 1, 2, TimeUnit.SECONDS)
-        startWatchService()
-    }
-
-    private fun startWatchService() {
-        val root = project.basePath ?: return
-        try {
-            val service = FileSystems.getDefault().newWatchService()
-            watchService = service
-            val rootPath = Path.of(root)
-            rootPath.register(
-                service,
-                StandardWatchEventKinds.ENTRY_CREATE,
-                StandardWatchEventKinds.ENTRY_MODIFY,
-                StandardWatchEventKinds.ENTRY_DELETE
-            )
-            val breakpilotDir = rootPath.resolve(".breakpilot").toFile()
-            if (breakpilotDir.exists()) {
-                breakpilotDir.toPath().register(
-                    service,
-                    StandardWatchEventKinds.ENTRY_CREATE,
-                    StandardWatchEventKinds.ENTRY_MODIFY,
-                    StandardWatchEventKinds.ENTRY_DELETE
-                )
-            }
-            val thread = Thread {
-                while (!disposed.get()) {
-                    val key = try {
-                        service.take()
-                    } catch (_: Throwable) {
-                        return@Thread
-                    }
-                    val relevant = key.pollEvents().any {
-                        val name = it.context()?.toString()
-                        name == ".breakpilot" || name == "bridge.json"
-                    }
-                    key.reset()
-                    if (relevant) refreshManifestConnection()
-                }
-            }
-            thread.isDaemon = true
-            thread.name = "BreakPilot bridge manifest watcher"
-            thread.start()
-        } catch (_: Throwable) {
-            // Polling still keeps the connection state fresh.
-        }
-    }
-
-    private fun refreshManifestConnection() {
-        val target = resolveBridgeTarget()
-        if (target == null) {
-            if (socket != null || currentBridgeUrl != null) {
-                currentBridgeUrl = null
-                currentInstanceId = null
-                closeSocket()
-                emitLocal(BridgeMessage(type = MessageTypes.BridgeDisconnected, workspaceRoot = project.basePath))
-            }
-            return
-        }
-        if (target.url != currentBridgeUrl || target.instanceId != currentInstanceId) connect()
     }
 
     private fun closeSocket() {

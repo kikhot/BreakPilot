@@ -98,14 +98,14 @@ export function toolFromCommand(
 ): ToolCommand {
   if (command === "launch") {
     return [
-      "debug_launch",
+      "bp_debug_start",
       {
-        lang: stringFlag(flags, "lang"),
+        language: stringFlag(flags, "lang"),
+        mode: "launch",
         program: stringFlag(flags, "program"),
         module: stringFlag(flags, "module"),
         args: splitArgs(flags.args),
         cwd: stringFlag(flags, "cwd"),
-        mode: stringFlag(flags, "mode"),
         owner: stringFlag(flags, "owner"),
         adapterCommand: stringFlag(flags, "adapter-command"),
         adapterArgs: optionalSplitArgs(flags["adapter-args"]),
@@ -115,12 +115,12 @@ export function toolFromCommand(
   }
   if (command === "attach") {
     return [
-      "debug_attach",
+      "bp_debug_start",
       {
-        lang: stringFlag(flags, "lang"),
+        language: stringFlag(flags, "lang"),
+        mode: "attach",
         host: stringFlag(flags, "host"),
         port: parseNumber(flags.port),
-        mode: stringFlag(flags, "mode"),
         owner: stringFlag(flags, "owner"),
         adapterCommand: stringFlag(flags, "adapter-command"),
         adapterArgs: optionalSplitArgs(flags["adapter-args"]),
@@ -132,10 +132,10 @@ export function toolFromCommand(
   }
   if (command === "bp" && subcommand === "set") {
     return [
-      "set_breakpoint",
+      "bp_debug_set_breakpoint",
       {
         sessionId: stringFlag(flags, "session"),
-        file: stringFlag(flags, "file"),
+        filePath: stringFlag(flags, "file"),
         line: parseNumber(flags.line),
         column: parseNumber(flags.column),
         condition: stringFlag(flags, "condition"),
@@ -146,83 +146,86 @@ export function toolFromCommand(
     ];
   }
   if (command === "bp" && subcommand === "remove") {
-    return ["remove_breakpoint", { sessionId: stringFlag(flags, "session"), breakpointId: stringFlag(flags, "id") }];
+    return ["bp_debug_remove_breakpoint", {
+      sessionId: stringFlag(flags, "session"),
+      breakpointId: stringFlag(flags, "id"),
+      filePath: stringFlag(flags, "file"),
+      line: parseNumber(flags.line)
+    }];
   }
   if (command === "bp" && subcommand === "list") {
-    return ["list_breakpoints", { sessionId: stringFlag(flags, "session") }];
+    return ["bp_debug_list_breakpoints", { sessionId: stringFlag(flags, "session"), filePath: stringFlag(flags, "file") }];
   }
   if (command === "wait") {
     return [
-      "wait_for_breakpoint",
-      { sessionId: stringFlag(flags, "session"), timeoutMs: parseNumber(flags.timeout) }
+      "bp_debug_control",
+      { sessionId: stringFlag(flags, "session"), action: "wait", timeout: parseNumber(flags.timeout) }
     ];
   }
   if (command === "snapshot") {
     return [
-      "get_runtime_snapshot",
+      "bp_debug_frame",
       {
         sessionId: stringFlag(flags, "session"),
         threadId: parseNumber(flags.thread),
         frameId: parseNumber(flags.frame),
-        profile: stringFlag(flags, "profile"),
-        includeCategories: stringArrayFlag(flags, "category"),
-        includeScopes: stringArrayFlag(flags, "scope"),
-        objectFields: stringFlag(flags, "objects"),
-        maxDepth: parseNumber(flags.depth),
-        maxItems: parseNumber(flags["max-items"]),
-        maxStringLength: parseNumber(flags["max-string-length"])
+        expand: stringFlag(flags, "objects"),
+        depth: parseNumber(flags.depth),
+        limit: parseNumber(flags["max-items"]),
+        maxString: parseNumber(flags["max-string-length"])
       }
     ];
   }
   if (command === "inspect-variable") {
     return [
-      "inspect_variable",
+      "bp_debug_value",
       {
         sessionId: stringFlag(flags, "session"),
-        variablesReference: parseNumber(flags.ref),
+        ref: parseNumber(flags.ref),
         start: parseNumber(flags.start),
         count: parseNumber(flags.count),
-        objectFields: stringFlag(flags, "objects") ?? "deep",
-        maxDepth: parseNumber(flags.depth),
-        maxItems: parseNumber(flags["max-items"]),
-        maxStringLength: parseNumber(flags["max-string-length"])
+        expand: stringFlag(flags, "objects") ?? "deep",
+        depth: parseNumber(flags.depth),
+        limit: parseNumber(flags["max-items"]),
+        maxString: parseNumber(flags["max-string-length"])
       }
     ];
   }
   if (command === "eval") {
     return [
-      "evaluate",
+      "bp_debug_eval",
       {
         sessionId: stringFlag(flags, "session"),
         expression: positional.join(" "),
         mode: stringFlag(flags, "mode") ?? "readonly",
-        timeoutMs: parseNumber(flags.timeout)
+        timeout: parseNumber(flags.timeout)
       }
     ];
   }
   if (command === "continue") {
-    return ["continue_execution", { sessionId: stringFlag(flags, "session"), threadId: parseNumber(flags.thread) }];
+    return ["bp_debug_control", { sessionId: stringFlag(flags, "session"), action: "resume", threadId: parseNumber(flags.thread) }];
   }
   if (command === "step-over") {
-    return ["step_over", { sessionId: stringFlag(flags, "session"), threadId: parseNumber(flags.thread) }];
+    return ["bp_debug_control", { sessionId: stringFlag(flags, "session"), action: "stepOver", threadId: parseNumber(flags.thread) }];
   }
   if (command === "step-into") {
-    return ["step_into", { sessionId: stringFlag(flags, "session"), threadId: parseNumber(flags.thread) }];
+    return ["bp_debug_control", { sessionId: stringFlag(flags, "session"), action: "stepInto", threadId: parseNumber(flags.thread) }];
   }
   if (command === "step-out") {
-    return ["step_out", { sessionId: stringFlag(flags, "session"), threadId: parseNumber(flags.thread) }];
+    return ["bp_debug_control", { sessionId: stringFlag(flags, "session"), action: "stepOut", threadId: parseNumber(flags.thread) }];
   }
   if (command === "disconnect") {
     return [
-      "disconnect",
+      "bp_debug_control",
       {
         sessionId: stringFlag(flags, "session"),
+        action: "disconnect",
         terminateDebuggee: Boolean(flags.terminate)
       }
     ];
   }
   if (command === "sessions") {
-    return ["list_sessions", {}];
+    return ["bp_debug_status", {}];
   }
   if (command === "ide" && subcommand === "status") {
     return ["ide_status", {}];

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { AdapterRegistry } from "../debug-adapters/AdapterRegistry.ts";
 import { CapabilityReporter } from "../control/CapabilityReporter.ts";
@@ -9,9 +10,9 @@ import { SecurityPolicy } from "../security/SecurityPolicy.ts";
 import { AuditLogger } from "../audit/AuditLogger.ts";
 import type { ToolResponse } from "../types/control.ts";
 import type { DebugLanguage, DebugMode, SessionOwnerValue } from "../types/debug.ts";
-import type { StoppedEvent } from "../types/dap.ts";
-import type { IdeDebugSessionInfo } from "../types/ide.ts";
-import type { RuntimeSnapshot } from "../types/inspection.ts";
+import type { DapStackFrame, StoppedEvent } from "../types/dap.ts";
+import type { IdeClientInfo, IdeDebugSessionInfo } from "../types/ide.ts";
+import type { RuntimeSnapshot, VariableNode, VariableScopeView } from "../types/inspection.ts";
 import type { AnyRecord } from "../types/json.ts";
 import type { BreakPilotPolicy, EvaluateMode } from "../types/policy.ts";
 import type {
@@ -27,6 +28,7 @@ import { BreakpointManager } from "./BreakpointManager.ts";
 import { LanguageResolver } from "./LanguageResolver.ts";
 import { DapRuntimeProvider } from "../runtime/providers/DapRuntimeProvider.ts";
 import { IdeRuntimeProvider } from "../runtime/providers/IdeRuntimeProvider.ts";
+import { VariableSerializer } from "../inspection/VariableSerializer.ts";
 import { SessionCoordinator } from "./SessionCoordinator.ts";
 import { SessionOwner, SessionState } from "./SessionOwner.ts";
 import { SessionStore } from "./SessionStore.ts";
@@ -36,12 +38,15 @@ type DebugToolArgs = AnyRecord & {
   lang?: DebugLanguage;
   language?: DebugLanguage;
   workspace?: string;
+  projectPath?: string;
   program?: string;
+  runConfigName?: string;
   mode?: DebugMode | EvaluateMode;
   owner?: SessionOwnerValue;
   host?: string;
   port?: number | string;
   file?: string;
+  filePath?: string;
   line?: number;
   breakpointId?: string;
   requireVerified?: boolean;
@@ -49,6 +54,7 @@ type DebugToolArgs = AnyRecord & {
   frameId?: number;
   threadId?: number;
   timeoutMs?: number;
+  timeout?: number;
   terminateDebuggee?: boolean;
   restart?: boolean;
   clientId?: string;
@@ -57,10 +63,18 @@ type DebugToolArgs = AnyRecord & {
   maxDepth?: number;
   maxItems?: number;
   maxStringLength?: number;
+  depth?: number;
+  limit?: number;
+  maxString?: number;
   variablesReference?: number;
+  ref?: number;
+  path?: string[];
   start?: number;
   count?: number;
   objectFields?: string;
+  expand?: string;
+  action?: string;
+  newValue?: string;
   redactPatterns?: string[];
 };
 
@@ -97,6 +111,339 @@ export class DebugSessionManager {
     this.ideBridge = ideBridge;
     this.cleaningSessions = new Set();
     this.#wireIdeBridge();
+  }
+
+  async bpDebugStart(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const auditId = this.audit.record("bp_debug_start_requested", { args: this.#safeArgs(normalized) });
+
+    if (normalized.runConfigName || (normalized.filePath && normalized.line && normalized.mode !== "launch" && normalized.mode !== "attach")) {
+      return this.#startIdeDebug(normalized, auditId);
+    }
+
+    if (normalized.mode === "ide" || normalized.ideSessionId) {
+      const response = await this.adoptIdeSession(normalized);
+      return ok(response.sessionId, { session: response.data, startMode: "ide" }, auditId, response.warnings);
+    }
+
+    const mode = normalized.mode === "attach" || normalized.host || normalized.port ? "attach" : "launch";
+    const response = mode === "attach"
+      ? await this.debugAttach({ ...normalized, mode: "headless" })
+      : await this.debugLaunch({
+          ...normalized,
+          mode: "headless",
+          program: normalized.program ?? normalized.filePath
+        });
+    return ok(response.sessionId, { session: response.data, startMode: mode }, auditId, response.warnings);
+  }
+
+  async #startIdeDebug(args: DebugToolArgs, auditId: string): Promise<ToolResponse> {
+    if (!this.ideBridge) {
+      throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.");
+    }
+    const workspaceRoot = args.projectPath || args.workspace
+      ? resolveWorkspacePath(this.security.workspaceRoot(), String(args.projectPath ?? args.workspace))
+      : this.security.workspaceRoot();
+    const client = this.#selectIdeClient(args, workspaceRoot);
+    if (!client) {
+      throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "No IDE client is registered for this project.", {
+        projectPath: workspaceRoot,
+        clientId: args.clientId
+      });
+    }
+    const requestId = `start_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const timeoutMs = args.timeout ?? 30000;
+    const started = this.#waitForIdeDebugStart({
+      requestId,
+      clientId: client.clientId,
+      workspaceRoot,
+      timeoutMs
+    });
+    const sent = this.ideBridge.sendToClient(client.clientId, {
+      type: IdeMessageTypes.AGENT_START_DEBUG,
+      requestId,
+      workspaceRoot,
+      runConfigName: args.runConfigName,
+      filePath: args.filePath,
+      line: args.line,
+      sessionId: args.sessionId
+    });
+    if (!sent) {
+      throw new BreakPilotError(ErrorCodes.IDE_BRIDGE_DISCONNECTED, "IDE client disconnected before debug launch.", {
+        clientId: client.clientId,
+        projectPath: workspaceRoot
+      });
+    }
+    const ideSession = await started;
+    const response = await this.adoptIdeSession({
+      ...args,
+      clientId: ideSession.clientId,
+      ideSessionId: ideSession.ideSessionId,
+      projectPath: workspaceRoot,
+      mode: "ide"
+    });
+    return ok(response.sessionId, { session: response.data, startMode: "ide", ideLaunch: ideSession }, auditId, response.warnings);
+  }
+
+  async bpDebugStatus(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const auditId = this.audit.record("bp_debug_status_requested", { projectPath: args.projectPath });
+    const sessions = this.sessions.list();
+    const active = this.#selectSessionCandidate();
+    const languages = await new CapabilityReporter(this.adapters, this.audit).report();
+    return ok(null, {
+      activeSessionId: active?.sessionId ?? null,
+      sessions,
+      ide: this.ideBridge?.status() ?? { enabled: false, clients: [] },
+      languages
+    }, auditId);
+  }
+
+  async bpDebugControl(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const session = this.#resolveSession(normalized);
+    const action = normalized.action;
+    const auditId = this.audit.record("bp_debug_control_requested", { sessionId: session.sessionId, action });
+
+    if (action === "pause") {
+      if (!session.provider.pause) {
+        throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support pause.", {
+          sessionId: session.sessionId,
+          providerKind: session.providerKind
+        });
+      }
+      await session.provider.pause(normalized.threadId ?? session.provider.threadId);
+      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 5000).catch(() => null);
+      session.state = SessionState.PAUSED;
+      return ok(session.sessionId, await this.#controlView(session, "paused", stopped), auditId);
+    }
+
+    if (action === "wait") {
+      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 30000).catch(async (error) => {
+        if (error instanceof BreakPilotError && error.code === ErrorCodes.BREAKPOINT_TIMEOUT) {
+          const recovered = await this.#recoverBreakpointHit(session);
+          if (recovered) return recovered;
+        }
+        throw error;
+      });
+      session.state = SessionState.PAUSED;
+      return ok(session.sessionId, await this.#controlView(session, "paused", stopped), auditId);
+    }
+
+    if (action === "resume") {
+      if (session.providerKind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, "resume");
+      const result = await session.provider.continue(normalized.threadId ?? session.provider.threadId);
+      session.state = SessionState.RUNNING;
+      return ok(session.sessionId, { status: "running", sessionId: session.sessionId, result, events: this.#emptyEvents() }, auditId);
+    }
+
+    if (action === "stepOver" || action === "stepInto" || action === "stepOut") {
+      if (session.providerKind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, action);
+      const kind = action === "stepInto" ? "into" : action === "stepOut" ? "out" : "over";
+      await session.provider.step(kind, normalized.threadId ?? session.provider.threadId);
+      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 10000).catch(() => null);
+      session.state = SessionState.PAUSED;
+      return ok(session.sessionId, await this.#controlView(session, "paused", stopped), auditId);
+    }
+
+    if (action === "disconnect" || action === "stop") {
+      const result = await this.#cleanupSession(session, {
+        reason: action,
+        terminateDebuggee: action === "stop" || Boolean(normalized.terminateDebuggee)
+      });
+      return ok(session.sessionId, { status: "stopped", sessionId: session.sessionId, result, events: this.#emptyEvents() }, auditId);
+    }
+
+    if (action === "drainEvents") {
+      return ok(session.sessionId, { status: session.state, sessionId: session.sessionId, events: this.#emptyEvents() }, auditId);
+    }
+
+    throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, `Unsupported debug control action: ${String(action)}`, { action });
+  }
+
+  async bpDebugThreads(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const session = this.#resolveSession(args);
+    const auditId = this.audit.record("bp_debug_threads_requested", { sessionId: session.sessionId });
+    if (!session.provider.listThreads) {
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support thread listing.", {
+        sessionId: session.sessionId,
+        providerKind: session.providerKind
+      });
+    }
+    const threads = await session.provider.listThreads();
+    const limited = threads.slice(0, args.limit ?? 50);
+    return ok(session.sessionId, { sessionId: session.sessionId, threads: limited, totalCount: threads.length }, auditId);
+  }
+
+  async bpDebugCallStack(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const session = this.#resolveSession(args);
+    const auditId = this.audit.record("bp_debug_call_stack_requested", { sessionId: session.sessionId });
+    const stack = await this.#callStack(session, args.threadId, args.limit ?? 20);
+    return ok(session.sessionId, stack, auditId);
+  }
+
+  async bpDebugFrame(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const session = this.#resolveSession(normalized);
+    const auditId = this.audit.record("bp_debug_frame_requested", { sessionId: session.sessionId });
+    const frame = await this.#frameView(session, normalized);
+    return ok(session.sessionId, frame, auditId);
+  }
+
+  async bpDebugValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const session = this.#resolveSession(normalized);
+    const auditId = this.audit.record("bp_debug_value_requested", { sessionId: session.sessionId, ref: normalized.ref, path: normalized.path });
+
+    if (normalized.ref !== undefined) {
+      const limits = this.#variableLimits(normalized);
+      if (session.dap) {
+        const variables = await session.dap.variables(Number(normalized.ref), {
+          start: normalized.start ?? 0,
+          count: normalized.count ?? limits.maxItems
+        });
+        const serializer = new VariableSerializer(session.dap, limits, { objectFields: normalized.expand ?? "deep" });
+        const items = await serializer.serializeVariableNodes(variables);
+        return ok(session.sessionId, {
+          sessionId: session.sessionId,
+          ref: normalized.ref,
+          items,
+          presentation: this.#presentNodes(items)
+        }, auditId);
+      }
+      const result = await session.provider.inspectVariable?.({ variablesReference: normalized.ref, ...normalized }, limits);
+      return ok(session.sessionId, { sessionId: session.sessionId, ref: normalized.ref, result }, auditId);
+    }
+
+    if (!normalized.path || normalized.path.length === 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_value requires either ref or path.", {});
+    }
+
+    const found = await this.#resolveNodeByPath(session, { ...normalized, expand: "deep" }, normalized.path);
+    if (!found) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Variable path was not found in the selected frame.", {
+        path: normalized.path
+      });
+    }
+    return ok(session.sessionId, { sessionId: session.sessionId, path: normalized.path, value: found, presentation: found.label }, auditId);
+  }
+
+  async bpDebugSetValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const session = this.#resolveSession(normalized);
+    const auditId = this.audit.record("bp_debug_set_value_requested", { sessionId: session.sessionId, path: normalized.path, ref: normalized.ref });
+    if (!normalized.path || normalized.path.length === 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value requires path + newValue.", {});
+    }
+    if (normalized.ref !== undefined) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value does not accept ref; use path + newValue.", {});
+    }
+    if (!session.provider.setVariable) {
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support variable mutation.", {
+        sessionId: session.sessionId,
+        providerKind: session.providerKind
+      });
+    }
+    const node = await this.#resolveNodeByPath(session, normalized, normalized.path);
+    if (!node) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Variable path was not found in the selected frame.", {
+        path: normalized.path
+      });
+    }
+    if (!node.parentRef) {
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider cannot mutate this variable because parentRef is unavailable.", {
+        path: normalized.path,
+        providerKind: session.providerKind
+      });
+    }
+    const result = await session.provider.setVariable({
+      ...normalized,
+      parentRef: node.parentRef,
+      name: node.name
+    });
+    return ok(session.sessionId, { sessionId: session.sessionId, path: normalized.path, oldValue: node.value, result }, auditId);
+  }
+
+  async bpDebugEval(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const session = this.#resolveSession(normalized);
+    const mode = normalized.mode ?? this.policy.evaluate.defaultMode ?? "readonly";
+    const auditId = this.audit.record("bp_debug_eval_requested", { sessionId: session.sessionId, expression: normalized.expression, mode });
+    if (!normalized.expression) throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Expression is required.");
+    this.security.assertEvaluate(normalized.expression, mode, { ideConfirmationAvailable: session.providerKind === "ide" });
+    let frameId = normalized.frameId;
+    if (!frameId && normalized.frameIndex !== undefined && session.dap) {
+      const stack = await session.dap.stackTrace(normalized.threadId ?? session.dap.threadId, (normalized.frameIndex ?? 0) + 1);
+      frameId = stack.stackFrames[normalized.frameIndex ?? 0]?.id;
+    }
+    const result = await session.provider.evaluate(normalized.expression, {
+      mode,
+      frameId,
+      threadId: normalized.threadId,
+      context: normalized.context ?? "watch",
+      timeoutMs: normalized.timeout ?? this.policy.evaluate.timeoutMs
+    });
+    return ok(session.sessionId, { sessionId: session.sessionId, expression: normalized.expression, mode, result }, auditId);
+  }
+
+  async bpDebugContext(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    let session: DebugSessionRecord;
+    try {
+      session = this.#resolveSession(normalized);
+    } catch {
+      session = await this.#adoptActiveIdeSession(normalized);
+    }
+    const auditId = this.audit.record("bp_debug_context_requested", { sessionId: session.sessionId });
+    const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 1000).catch(() => null);
+    const stack = await this.#callStack(session, normalized.threadId, normalized.limit ?? 20).catch(() => null);
+    const frame = await this.#frameView(session, normalized).catch(() => null);
+    return ok(session.sessionId, {
+      sessionId: session.sessionId,
+      status: session.state,
+      stopped,
+      position: frame?.frame ? this.#positionFromFrame(frame.frame) : null,
+      stack,
+      frame
+    }, auditId);
+  }
+
+  async bpDebugSetBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const session = this.#resolveSession(normalized);
+    const response = await this.setBreakpoint({ ...normalized, sessionId: session.sessionId, file: normalized.filePath });
+    const breakpoint = (response.data as AnyRecord)?.breakpoint as AnyRecord | undefined;
+    const lineText = breakpoint?.file && breakpoint?.line ? this.#readLine(String(breakpoint.file), Number(breakpoint.line)) : undefined;
+    return ok(session.sessionId, { ...(response.data as AnyRecord), lineText }, response.auditId, response.warnings);
+  }
+
+  async bpDebugListBreakpoints(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const session = this.#resolveSession(normalized);
+    const auditId = this.audit.record("bp_debug_list_breakpoints_requested", { sessionId: session.sessionId });
+    let breakpoints = this.breakpoints.list(session.sessionId);
+    if (normalized.filePath) {
+      const file = this.security.assertWorkspacePath(normalized.filePath);
+      breakpoints = breakpoints.filter((bp) => path.resolve(bp.file) === path.resolve(file));
+    }
+    return ok(session.sessionId, { sessionId: session.sessionId, breakpoints, totalCount: breakpoints.length }, auditId);
+  }
+
+  async bpDebugRemoveBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const session = this.#resolveSession(normalized);
+    const auditId = this.audit.record("bp_debug_remove_breakpoint_requested", { sessionId: session.sessionId });
+    let breakpointId = normalized.breakpointId;
+    if (!breakpointId && normalized.filePath && normalized.line) {
+      const file = this.security.assertWorkspacePath(normalized.filePath);
+      breakpointId = this.breakpoints
+        .list(session.sessionId)
+        .find((bp) => path.resolve(bp.file) === path.resolve(file) && bp.line === normalized.line)?.id;
+    }
+    if (!breakpointId) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Pass breakpointId or filePath + line to remove a breakpoint.", {});
+    }
+    const response = await this.removeBreakpoint({ sessionId: session.sessionId, breakpointId });
+    return ok(session.sessionId, { ...(response.data as AnyRecord), breakpointId }, auditId, response.warnings);
   }
 
   async debugLaunch(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -592,6 +939,289 @@ export class DebugSessionManager {
     return ok(null, this.ideBridge?.status() ?? { enabled: false, clients: [] }, auditId);
   }
 
+  #normalizeBpArgs(args: DebugToolArgs = {}): DebugToolArgs {
+    return {
+      ...args,
+      lang: args.lang ?? args.language,
+      workspace: args.workspace ?? args.projectPath,
+      file: args.file ?? args.filePath,
+      filePath: args.filePath ?? args.file,
+      timeoutMs: args.timeoutMs ?? args.timeout,
+      variablesReference: args.variablesReference ?? args.ref,
+      ref: args.ref ?? args.variablesReference,
+      maxDepth: args.maxDepth ?? args.depth,
+      maxItems: args.maxItems ?? args.limit,
+      maxStringLength: args.maxStringLength ?? args.maxString,
+      objectFields: args.objectFields ?? args.expand,
+      expand: args.expand ?? args.objectFields
+    };
+  }
+
+  #variableLimits(args: DebugToolArgs): Required<import("../types/inspection.ts").VariableLimits> {
+    return this.security.variableLimits({
+      maxDepth: args.maxDepth ?? args.depth,
+      maxItems: args.maxItems ?? args.limit ?? args.count,
+      maxStringLength: args.maxStringLength ?? args.maxString,
+      redactPatterns: args.redactPatterns
+    });
+  }
+
+  #resolveSession(args: DebugToolArgs = {}): DebugSessionRecord {
+    if (args.sessionId) return this.sessions.get(args.sessionId);
+    const workspaceRoot = args.projectPath || args.workspace
+      ? resolveWorkspacePath(this.security.workspaceRoot(), String(args.projectPath ?? args.workspace))
+      : undefined;
+    const candidates = [...this.sessions.sessions.values()].filter((session) => {
+      if (session.state === SessionState.TERMINATED || session.state === SessionState.FAILED) return false;
+      if (workspaceRoot && path.resolve(session.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
+      return true;
+    });
+    if (candidates.length === 0) {
+      throw new BreakPilotError(ErrorCodes.SESSION_NOT_FOUND, "No active debug session is available.", {
+        projectPath: args.projectPath ?? args.workspace
+      });
+    }
+    const selected = this.#selectSessionCandidate(candidates);
+    if (selected) return selected;
+    throw new BreakPilotError(
+      ErrorCodes.SESSION_AMBIGUOUS,
+      "Multiple debug sessions are active. Pass sessionId to choose one.",
+      { sessions: candidates.map((session) => this.#sessionSummary(session)) }
+    );
+  }
+
+  #selectSessionCandidate(candidates = [...this.sessions.sessions.values()]): DebugSessionRecord | null {
+    const live = candidates.filter((session) => session.state !== SessionState.TERMINATED && session.state !== SessionState.FAILED);
+    if (live.length === 0) return null;
+    const paused = live.filter((session) => session.state === SessionState.PAUSED);
+    if (paused.length === 1) return paused[0]!;
+    if (live.length === 1) return live[0]!;
+    return null;
+  }
+
+  async #callStack(session: DebugSessionRecord, threadId?: number, limit = 20): Promise<AnyRecord> {
+    if (!session.provider.getCallStack) {
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support call stack inspection.", {
+        sessionId: session.sessionId,
+        providerKind: session.providerKind
+      });
+    }
+    const stack = await session.provider.getCallStack(threadId ?? session.provider.threadId, limit);
+    const frames = (stack.stackFrames ?? []).map((frame: DapStackFrame, index: number) => this.#frameSummary(frame, index));
+    return {
+      sessionId: session.sessionId,
+      threadId: stack.threadId ?? threadId ?? session.provider.threadId,
+      frames,
+      totalFrames: stack.totalFrames ?? frames.length
+    };
+  }
+
+  async #frameView(session: DebugSessionRecord, args: DebugToolArgs): Promise<{
+    sessionId: string;
+    threadId: number | null;
+    frame: AnyRecord | null;
+    variables: VariableScopeView[];
+    presentation: string;
+  }> {
+    const limits = this.#variableLimits(args);
+    const expand = args.expand ?? args.objectFields ?? "preview";
+
+    if (session.dap) {
+      const stack = await session.dap.stackTrace(args.threadId ?? session.dap.threadId, (args.frameIndex ?? 0) + 1);
+      const frame = args.frameId
+        ? stack.stackFrames.find((candidate) => candidate.id === args.frameId) ?? { id: args.frameId }
+        : stack.stackFrames[args.frameIndex ?? 0];
+      const scopes = frame?.id ? await session.dap.scopes(frame.id) : [];
+      const serializer = new VariableSerializer(session.dap, limits, { objectFields: expand });
+      const variables: VariableScopeView[] = [];
+      for (const scope of scopes) {
+        const dapVariables = await session.dap.variables(scope.variablesReference, {
+          start: 0,
+          count: limits.maxItems
+        });
+        variables.push({
+          scope: scope.name,
+          expensive: Boolean(scope.expensive),
+          items: await serializer.serializeVariableNodes(dapVariables, 0, new Set<number>(), scope.variablesReference)
+        });
+      }
+      const presentation = variables.map((scope) => `${scope.scope}\n${this.#presentNodes(scope.items)}`).join("\n");
+      return {
+        sessionId: session.sessionId,
+        threadId: stack.threadId,
+        frame: frame ? this.#frameSummary(frame, args.frameIndex ?? 0) : null,
+        variables,
+        presentation
+      };
+    }
+
+    const snapshot = await session.provider.getRuntimeSnapshot({
+      ...args,
+      profile: "focused",
+      objectFields: expand,
+      maxDepth: limits.maxDepth,
+      maxItems: limits.maxItems,
+      maxStringLength: limits.maxStringLength
+    }, limits);
+    const frameIndex = args.frameIndex ?? 0;
+    const frame = snapshot.stackFrames[frameIndex] ?? snapshot.stackFrames[0] ?? null;
+    const variables = Object.values(snapshot.variables ?? {}).map((scope) => ({
+      scope: scope.name,
+      category: scope.category,
+      rawScopes: scope.rawScopes,
+      expensive: scope.expensive,
+      items: this.#nodesFromSerializedMap(scope.variables)
+    }));
+    return {
+      sessionId: session.sessionId,
+      threadId: snapshot.threadId,
+      frame: frame ? this.#frameSummary(frame, frameIndex) : null,
+      variables,
+      presentation: variables.map((scope) => `${scope.scope}\n${this.#presentNodes(scope.items)}`).join("\n")
+    };
+  }
+
+  #frameSummary(frame: DapStackFrame, index: number): AnyRecord {
+    const source = frame.source as AnyRecord | undefined;
+    const filePath = source?.path ?? source?.sourceReference ?? null;
+    const fn = frame.name ?? "";
+    return {
+      index,
+      id: frame.id,
+      filePath,
+      line: frame.line ?? null,
+      column: frame.column ?? null,
+      function: fn,
+      presentation: `${fn}${frame.line ? `:${frame.line}` : ""}`
+    };
+  }
+
+  #positionFromFrame(frame: AnyRecord): AnyRecord {
+    return {
+      filePath: frame.filePath ?? null,
+      line: frame.line ?? null,
+      frameIndex: frame.index ?? 0
+    };
+  }
+
+  async #controlView(session: DebugSessionRecord, status: string, stopped: AnyRecord | null): Promise<AnyRecord> {
+    const frame = await this.#frameView(session, {
+      threadId: stopped?.threadId ?? session.provider.threadId ?? undefined,
+      expand: "preview",
+      depth: 1,
+      limit: 10
+    }).catch(() => null);
+    return {
+      status,
+      sessionId: session.sessionId,
+      stopped,
+      position: frame?.frame ? this.#positionFromFrame(frame.frame) : null,
+      frame: frame
+        ? {
+            summary: frame.frame?.presentation ?? null,
+            variables: frame.variables
+          }
+        : null,
+      events: this.#emptyEvents()
+    };
+  }
+
+  #emptyEvents(): AnyRecord {
+    return { breakpointErrors: [], tracepoints: [] };
+  }
+
+  #nodesFromSerializedMap(map: AnyRecord): VariableNode[] {
+    return Object.entries(map ?? {}).map(([name, value]) => {
+      const variable = value as AnyRecord;
+      if (variable.kind === "metadata") {
+        return {
+          name,
+          label: String(variable.value ?? name),
+          kind: "metadata",
+          value: { summary: String(variable.value ?? "") },
+          expandable: false,
+          truncated: Boolean(variable.truncated)
+        } as VariableNode;
+      }
+      const ref = Number(variable.variablesReference ?? 0) > 0 ? Number(variable.variablesReference) : undefined;
+      const children = variable.value && typeof variable.value === "object" && !Array.isArray(variable.value)
+        ? this.#nodesFromSerializedMap(variable.value as AnyRecord)
+        : undefined;
+      const summary = String(variable.valuePreview ?? variable.value ?? "");
+      return {
+        name: String(variable.name ?? name),
+        label: `${String(variable.name ?? name)} = ${summary}`,
+        type: String(variable.type ?? ""),
+        kind: String(variable.kind ?? "primitive") as VariableNode["kind"],
+        value: { summary, raw: ref ? null : variable.value },
+        ref,
+        expandable: Boolean(ref),
+        truncated: Boolean(variable.truncated),
+        redacted: Boolean(variable.redacted),
+        cycle: Boolean(variable.cycle),
+        children
+      };
+    });
+  }
+
+  #presentNodes(nodes: VariableNode[], indent = ""): string {
+    return nodes
+      .map((node) => {
+        const marker = node.expandable ? "+ " : "";
+        const line = `${indent}${marker}${node.label}`;
+        const children = node.children?.length ? `\n${this.#presentNodes(node.children, `${indent}  `)}` : "";
+        return `${line}${children}`;
+      })
+      .join("\n");
+  }
+
+  #findNodeByPath(nodes: VariableNode[], pathTokens: string[]): VariableNode | null {
+    let current: VariableNode | undefined;
+    let level = nodes;
+    for (const token of pathTokens) {
+      current = level.find((node) => node.name === token);
+      if (!current) return null;
+      level = current.children ?? [];
+    }
+    return current ?? null;
+  }
+
+  async #resolveNodeByPath(
+    session: DebugSessionRecord,
+    args: DebugToolArgs,
+    pathTokens: string[]
+  ): Promise<VariableNode | null> {
+    const frame = await this.#frameView(session, { ...args, expand: args.expand ?? "preview" });
+    let level = frame.variables.flatMap((scope) => scope.items);
+    let current: VariableNode | undefined;
+    for (let index = 0; index < pathTokens.length; index += 1) {
+      const token = pathTokens[index];
+      current = level.find((node) => node.name === token);
+      if (!current) return null;
+      if (index === pathTokens.length - 1) return current;
+      if ((!current.children || current.children.length === 0) && current.ref && session.dap) {
+        const limits = this.#variableLimits(args);
+        const variables = await session.dap.variables(current.ref, {
+          start: 0,
+          count: limits.maxItems
+        });
+        const serializer = new VariableSerializer(session.dap, limits, { objectFields: "preview" });
+        current.children = await serializer.serializeVariableNodes(variables, 0, new Set<number>(), current.ref);
+      }
+      level = current.children ?? [];
+    }
+    return current ?? null;
+  }
+
+  #readLine(filePath: string, line: number): string | undefined {
+    try {
+      const text = fs.readFileSync(filePath, "utf8");
+      return text.split(/\r?\n/)[line - 1]?.trim();
+    } catch {
+      return undefined;
+    }
+  }
+
   async #createSession({
     language,
     adapter,
@@ -797,8 +1427,8 @@ export class DebugSessionManager {
   #selectIdeSession(args: DebugToolArgs): IdeDebugSessionInfo | undefined {
     if (!this.ideBridge) return undefined;
     if (args.ideSessionId) return this.ideBridge.registry.findSession(args.ideSessionId, args.clientId);
-    const workspaceRoot = args.workspace
-      ? resolveWorkspacePath(this.security.workspaceRoot(), args.workspace)
+    const workspaceRoot = args.projectPath || args.workspace
+      ? resolveWorkspacePath(this.security.workspaceRoot(), String(args.projectPath ?? args.workspace))
       : this.security.workspaceRoot();
     const sessions = this.ideBridge.registry.listSessions({
       clientId: args.clientId,
@@ -817,6 +1447,92 @@ export class DebugSessionManager {
       sessions.find((session) => session.active) ??
       sessions[0]
     );
+  }
+
+  #selectIdeClient(args: DebugToolArgs, workspaceRoot: string): IdeClientInfo | undefined {
+    if (!this.ideBridge) return undefined;
+    const clients = this.ideBridge.registry.list().filter((client) => {
+      if (args.clientId && client.clientId !== args.clientId) return false;
+      if (workspaceRoot && client.workspaceRoot && path.resolve(client.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
+      return true;
+    });
+    if (clients.length > 1 && !args.clientId) {
+      throw new BreakPilotError(ErrorCodes.PROJECT_AMBIGUOUS, "Multiple IDE clients match. Pass projectPath or clientId.", {
+        clients: clients.map((client) => ({ clientId: client.clientId, workspaceRoot: client.workspaceRoot }))
+      });
+    }
+    return clients[0];
+  }
+
+  #waitForIdeDebugStart({
+    requestId,
+    clientId,
+    workspaceRoot,
+    timeoutMs
+  }: {
+    requestId: string;
+    clientId: string;
+    workspaceRoot: string;
+    timeoutMs: number;
+  }): Promise<IdeDebugSessionInfo> {
+    if (!this.ideBridge) {
+      return Promise.reject(new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available."));
+    }
+    const bridge = this.ideBridge;
+    return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        bridge.off(IdeMessageTypes.IDE_COMMAND_RESULT, commandListener);
+        bridge.off(IdeMessageTypes.IDE_SESSION_STARTED, sessionListener);
+        bridge.off(IdeMessageTypes.IDE_SESSION_PAUSED, sessionListener);
+      };
+      const resolveSession = (message: AnyRecord): boolean => {
+        if (message.clientId !== clientId) return false;
+        const session = bridge.registry.findSession(message.ideSessionId, clientId);
+        if (!session) return false;
+        if (session.workspaceRoot && path.resolve(session.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
+        cleanup();
+        resolve(session);
+        return true;
+      };
+      const commandListener = ({ message }: { message: AnyRecord }): void => {
+        if (message.requestId !== requestId) return;
+        if (message.error && Object.keys(message.error).length > 0) {
+          cleanup();
+          reject(new BreakPilotError(
+            String(message.error.code ?? ErrorCodes.TOOL_FAILED),
+            String(message.error.message ?? "IDE debug launch failed."),
+            { error: message.error, requestId }
+          ));
+          return;
+        }
+        if (message.ideSessionId && resolveSession(message)) return;
+        const existing = bridge.registry
+          .listSessions({ clientId, workspaceRoot })
+          .find((session) => Date.parse(session.startedAt) >= startedAt - 1000);
+        if (existing) {
+          cleanup();
+          resolve(existing);
+        }
+      };
+      const sessionListener = ({ message }: { message: AnyRecord }): void => {
+        if (message.requestId && message.requestId !== requestId) return;
+        resolveSession(message);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new BreakPilotError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for IDE debug session to start.", {
+          requestId,
+          clientId,
+          workspaceRoot,
+          timeoutMs
+        }));
+      }, timeoutMs);
+      bridge.on(IdeMessageTypes.IDE_COMMAND_RESULT, commandListener);
+      bridge.on(IdeMessageTypes.IDE_SESSION_STARTED, sessionListener);
+      bridge.on(IdeMessageTypes.IDE_SESSION_PAUSED, sessionListener);
+    });
   }
 
   #broadcastToWorkspace(workspaceRoot: string, message: AnyRecord): void {

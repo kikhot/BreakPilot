@@ -46,7 +46,7 @@ interface Captured {
 
 function makeRecordingContext(sink: { value: Captured | undefined }): CommandContext {
   return {
-    controlUrl: "http://127.0.0.1:27890",
+    controlUrl: "http://127.0.0.1:57987",
     t: createTranslator("en_US"),
     locale: "en_US",
     output: () => {},

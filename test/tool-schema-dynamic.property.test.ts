@@ -6,9 +6,9 @@
  *
  * Property 21: Tool schema reflects the registry dynamically.
  *   For any set of registered adapters, ToolRouter.listTools() advertises a
- *   `lang` enum for both debug_launch and debug_attach equal (as a set) to the
- *   set of registered language identifiers, and `lang` is NOT a required field
- *   for either tool. The static `toolDefinitions` source is never mutated.
+ *   `language` enum for bp_debug_start equal (as a set) to the set of registered
+ *   language identifiers, and `language` is NOT a required field. The static
+ *   `toolDefinitions` source is never mutated.
  *
  * Validates: Requirements 14.1, 14.2, 14.3
  */
@@ -82,9 +82,9 @@ function findTool(tools: { name: string; inputSchema: Record<string, unknown> }[
   return tool;
 }
 
-function langEnumOf(tool: { inputSchema: Record<string, unknown> }): unknown {
+function languageEnumOf(tool: { inputSchema: Record<string, unknown> }): unknown {
   const schema = tool.inputSchema as { properties?: Record<string, { enum?: unknown }> };
-  return schema.properties?.lang?.enum;
+  return schema.properties?.language?.enum;
 }
 
 function requiredOf(tool: { inputSchema: Record<string, unknown> }): string[] {
@@ -118,44 +118,41 @@ fc.assert(
       inputSchema: Record<string, unknown>;
     }[];
 
-    for (const toolName of ["debug_launch", "debug_attach"]) {
-      const tool = findTool(tools, toolName);
+    const toolName = "bp_debug_start";
+    const tool = findTool(tools, toolName);
 
-      // (14.1, 14.2) The lang enum, as a set, equals the registered identifiers.
-      const enumValue = langEnumOf(tool);
-      assert.ok(Array.isArray(enumValue), `${toolName}.lang.enum should be an array`);
-      assert.deepEqual(
-        asSet(enumValue as string[]),
-        expected,
-        `${toolName}.lang.enum should equal the registered identifier set`
-      );
+    // (14.1, 14.2) The language enum, as a set, equals the registered identifiers.
+    const enumValue = languageEnumOf(tool);
+    assert.ok(Array.isArray(enumValue), `${toolName}.language.enum should be an array`);
+    assert.deepEqual(
+      asSet(enumValue as string[]),
+      expected,
+      `${toolName}.language.enum should equal the registered identifier set`
+    );
 
-      // (14.3) lang is NOT a required field.
-      assert.ok(
-        !requiredOf(tool).includes("lang"),
-        `${toolName} must not list "lang" as required`
-      );
-    }
+    // (14.3) language is NOT a required field.
+    assert.ok(
+      !requiredOf(tool).includes("language"),
+      `${toolName} must not list "language" as required`
+    );
 
-    // The static toolDefinitions source must not be mutated: its lang property
+    // The static toolDefinitions source must not be mutated: its language property
     // carries no enum.
-    for (const toolName of ["debug_launch", "debug_attach"]) {
-      const staticTool = toolDefinitions.find((t) => t.name === toolName);
-      assert.ok(staticTool, `static definition for ${toolName} should exist`);
-      const staticLang = (staticTool!.inputSchema as {
-        properties?: Record<string, { enum?: unknown }>;
-      }).properties?.lang;
-      assert.equal(
-        staticLang?.enum,
-        undefined,
-        `static toolDefinitions.${toolName}.lang must have no enum (not mutated)`
-      );
-      const staticRequired = (staticTool!.inputSchema as { required?: string[] }).required ?? [];
-      assert.ok(
-        !staticRequired.includes("lang"),
-        `static toolDefinitions.${toolName} must not require "lang"`
-      );
-    }
+    const staticTool = toolDefinitions.find((t) => t.name === toolName);
+    assert.ok(staticTool, `static definition for ${toolName} should exist`);
+    const staticLanguage = (staticTool!.inputSchema as {
+      properties?: Record<string, { enum?: unknown }>;
+    }).properties?.language;
+    assert.equal(
+      staticLanguage?.enum,
+      undefined,
+      `static toolDefinitions.${toolName}.language must have no enum (not mutated)`
+    );
+    const staticRequired = (staticTool!.inputSchema as { required?: string[] }).required ?? [];
+    assert.ok(
+      !staticRequired.includes("language"),
+      `static toolDefinitions.${toolName} must not require "language"`
+    );
   }),
   { numRuns: RUNS }
 );

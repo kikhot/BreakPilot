@@ -47,7 +47,7 @@ const EN_EPILOG = [
   "",
   "Environment variables:",
   "  BREAKPILOT_CONTROL_URL  Control-plane URL used when --control-url is not set",
-  "                          (defaults to http://127.0.0.1:27890)."
+  "                          (defaults to http://127.0.0.1:57987)."
 ].join("\n");
 
 const ZH_EPILOG = [
@@ -68,7 +68,7 @@ const ZH_EPILOG = [
   "",
   "环境变量：",
   "  BREAKPILOT_CONTROL_URL  未设置 --control-url 时使用的控制平面地址",
-  "                          （默认 http://127.0.0.1:27890）。"
+  "                          （默认 http://127.0.0.1:57987）。"
 ].join("\n");
 
 const EN_CATALOG: MessageCatalog = {

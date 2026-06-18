@@ -17,15 +17,10 @@
 
 import type { Argv } from "yargs";
 
-import { LocalControlGateway } from "../../control/ControlGateway.ts";
-import {
-  bridgeContext,
-  makeInstanceId,
-  removeBridgeManifestForInstance,
-  writeBridgeManifest
-} from "../../hub/BridgeManifest.ts";
+import { DaemonControlGateway } from "../../control/ControlGateway.ts";
+import { DEFAULT_HUB_HOST, DEFAULT_HUB_PORT, startHub, type HubServerHandle } from "../../hub/HubServer.ts";
 import { startStdio } from "../../mcp/stdioServer.ts";
-import { createRuntime } from "../../runtime/createRuntime.ts";
+import { loadPolicy } from "../../security/PolicyLoader.ts";
 import type { CommandContext } from "../context.ts";
 
 /**
@@ -56,47 +51,15 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
           }),
       async (argv) => {
         const policyPath = argv.policy as string | undefined;
-        const ideBridgePort = argv["ide-bridge-port"] as number | undefined;
-        const ideBridge = argv["ide-bridge"] as boolean | undefined;
-        const context = bridgeContext(policyPath);
-        const instanceId = makeInstanceId("mcp");
-        const runtime = createRuntime({
-          policyPath,
-          enableIdeBridge: ideBridge !== false,
-          ideBridgePort: ideBridgePort ?? 0,
-          bridgeInstanceId: instanceId,
-          bridgePolicyHash: context.policyHash,
-          bridgeLifecycle: "stdio"
-        });
-        const startedAt = new Date().toISOString();
-        if (runtime.ideBridge) {
-          await runtime.ideBridge.start();
-          const status = runtime.ideBridge.status();
-          writeBridgeManifest({
-            schemaVersion: 1,
-            owner: "mcp",
-            instanceId,
-            pid: process.pid,
-            lifecycle: "stdio",
-            workspaceRoot: context.workspaceRoot,
-            policyPath: context.policyPath,
-            policyHash: context.policyHash,
-            bridgeUrl: `ws://${status.host}:${status.port}`,
-            startedAt,
-            updatedAt: new Date().toISOString()
-          });
-          process.stderr.write(
-            `breakpilot IDE bridge listening on ${status.host}:${status.port}\n`
-          );
-        }
+        const policy = loadPolicy(policyPath);
+        const hub = await ensureHub(policy.workspace.root);
+        const gateway = new DaemonControlGateway(hub.url);
         attachMcpCleanup({
           cleanup: async (reason) => {
-            await runtime.manager.cleanupAll(reason);
-            runtime.ideBridge?.stop();
-            removeBridgeManifestForInstance(context.workspaceRoot, instanceId);
+            if (hub.owned) await hub.handle?.close().catch(() => undefined);
           }
         });
-        startStdio(new LocalControlGateway(runtime.router));
+        startStdio(gateway);
       }
     );
     sub.demandCommand(1);
@@ -104,6 +67,30 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
   });
 
   return y;
+}
+
+async function ensureHub(defaultProjectPath: string): Promise<{ url: string; owned: boolean; handle?: HubServerHandle }> {
+  const url = `http://${DEFAULT_HUB_HOST}:${DEFAULT_HUB_PORT}`;
+  if (await isHealthyHub(url)) return { url, owned: false };
+  const handle = await startHub({
+    host: DEFAULT_HUB_HOST,
+    port: DEFAULT_HUB_PORT,
+    defaultProjectPath,
+    idleTimeoutMs: 0
+  });
+  process.stderr.write(`breakpilot hub listening on ${handle.url}\n`);
+  return { url: handle.url, owned: true, handle };
+}
+
+async function isHealthyHub(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${url}/status`);
+    if (!response.ok) return false;
+    const payload = await response.json() as { server?: string };
+    return payload.server === "breakpilot-hub";
+  } catch {
+    return false;
+  }
 }
 
 function attachMcpCleanup(options: { cleanup(reason: string): Promise<void> }): void {

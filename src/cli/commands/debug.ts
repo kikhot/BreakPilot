@@ -35,7 +35,7 @@ import { optionalSplitArgs, parseNumber, splitArgs } from "../flags.ts";
  * @returns The same yargs instance for chaining.
  */
 export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
-  // launch -> debug_launch
+  // launch -> bp_debug_start
   y.command(
     "launch",
     ctx.t("cmd.launch"),
@@ -53,14 +53,14 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("adapter-port", { type: "number", describe: ctx.t("opt.adapter-port") }),
     (argv) =>
       ctx.runTool(
-        "debug_launch",
+        "bp_debug_start",
         {
-          lang: argv.lang as string | undefined,
+          language: argv.lang as string | undefined,
+          mode: "launch",
           program: argv.program as string | undefined,
           module: argv.module as string | undefined,
           args: splitArgs(argv.args as string | undefined),
           cwd: argv.cwd as string | undefined,
-          mode: argv.mode as string | undefined,
           owner: argv.owner as string | undefined,
           adapterCommand: argv["adapter-command"] as string | undefined,
           adapterArgs: optionalSplitArgs(argv["adapter-args"] as string | undefined),
@@ -70,7 +70,7 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
       )
   );
 
-  // attach -> debug_attach
+  // attach -> bp_debug_start
   y.command(
     "attach",
     ctx.t("cmd.attach"),
@@ -88,12 +88,12 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("dap-port", { type: "number", describe: ctx.t("opt.dap-port") }),
     (argv) =>
       ctx.runTool(
-        "debug_attach",
+        "bp_debug_start",
         {
-          lang: argv.lang as string | undefined,
+          language: argv.lang as string | undefined,
+          mode: "attach",
           host: argv.host as string | undefined,
           port: parseNumber(argv.port as number | undefined),
-          mode: argv.mode as string | undefined,
           owner: argv.owner as string | undefined,
           adapterCommand: argv["adapter-command"] as string | undefined,
           adapterArgs: optionalSplitArgs(argv["adapter-args"] as string | undefined),
@@ -105,7 +105,7 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
       )
   );
 
-  // snapshot -> get_runtime_snapshot
+  // snapshot -> bp_debug_frame
   y.command(
     "snapshot",
     ctx.t("cmd.snapshot"),
@@ -123,24 +123,21 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("max-string-length", { type: "number", describe: ctx.t("opt.max-string-length") }),
     (argv) =>
       ctx.runTool(
-        "get_runtime_snapshot",
+        "bp_debug_frame",
         {
           sessionId: argv.session as string | undefined,
           threadId: parseNumber(argv.thread as number | undefined),
           frameId: parseNumber(argv.frame as number | undefined),
-          profile: argv.profile as string | undefined,
-          includeCategories: argv.category as string[] | undefined,
-          includeScopes: argv.scope as string[] | undefined,
-          objectFields: argv.objects as string | undefined,
-          maxDepth: parseNumber(argv.depth as number | undefined),
-          maxItems: parseNumber(argv["max-items"] as number | undefined),
-          maxStringLength: parseNumber(argv["max-string-length"] as number | undefined)
+          expand: argv.objects as string | undefined,
+          depth: parseNumber(argv.depth as number | undefined),
+          limit: parseNumber(argv["max-items"] as number | undefined),
+          maxString: parseNumber(argv["max-string-length"] as number | undefined)
         },
         Boolean(argv.pretty)
       )
   );
 
-  // inspect-variable -> inspect_variable
+  // inspect-variable -> bp_debug_value
   y.command(
     "inspect-variable",
     ctx.t("cmd.inspect-variable"),
@@ -156,16 +153,16 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("max-string-length", { type: "number", describe: ctx.t("opt.max-string-length") }),
     (argv) =>
       ctx.runTool(
-        "inspect_variable",
+        "bp_debug_value",
         {
           sessionId: argv.session as string | undefined,
-          variablesReference: parseNumber(argv.ref as number | undefined),
+          ref: parseNumber(argv.ref as number | undefined),
           start: parseNumber(argv.start as number | undefined),
           count: parseNumber(argv.count as number | undefined),
-          objectFields: (argv.objects as string | undefined) ?? "deep",
-          maxDepth: parseNumber(argv.depth as number | undefined),
-          maxItems: parseNumber(argv["max-items"] as number | undefined),
-          maxStringLength: parseNumber(argv["max-string-length"] as number | undefined)
+          expand: (argv.objects as string | undefined) ?? "deep",
+          depth: parseNumber(argv.depth as number | undefined),
+          limit: parseNumber(argv["max-items"] as number | undefined),
+          maxString: parseNumber(argv["max-string-length"] as number | undefined)
         },
         Boolean(argv.pretty)
       )
@@ -183,18 +180,18 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("timeout", { type: "number", describe: ctx.t("opt.timeout") }),
     (argv) =>
       ctx.runTool(
-        "evaluate",
+        "bp_debug_eval",
         {
           sessionId: argv.session as string | undefined,
           expression: ((argv.expression as string[] | undefined) ?? []).join(" "),
           mode: (argv.mode as string | undefined) ?? "readonly",
-          timeoutMs: parseNumber(argv.timeout as number | undefined)
+          timeout: parseNumber(argv.timeout as number | undefined)
         },
         Boolean(argv.pretty)
       )
   );
 
-  // wait -> wait_for_breakpoint
+  // wait -> bp_debug_control
   y.command(
     "wait",
     ctx.t("cmd.wait"),
@@ -204,16 +201,17 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("timeout", { type: "number", describe: ctx.t("opt.timeout") }),
     (argv) =>
       ctx.runTool(
-        "wait_for_breakpoint",
+        "bp_debug_control",
         {
           sessionId: argv.session as string | undefined,
-          timeoutMs: parseNumber(argv.timeout as number | undefined)
+          action: "wait",
+          timeout: parseNumber(argv.timeout as number | undefined)
         },
         Boolean(argv.pretty)
       )
   );
 
-  // continue -> continue_execution
+  // continue -> bp_debug_control
   y.command(
     "continue",
     ctx.t("cmd.continue"),
@@ -223,16 +221,17 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("thread", { type: "number", describe: ctx.t("opt.thread") }),
     (argv) =>
       ctx.runTool(
-        "continue_execution",
+        "bp_debug_control",
         {
           sessionId: argv.session as string | undefined,
+          action: "resume",
           threadId: parseNumber(argv.thread as number | undefined)
         },
         Boolean(argv.pretty)
       )
   );
 
-  // step-over -> step_over
+  // step-over -> bp_debug_control
   y.command(
     "step-over",
     ctx.t("cmd.step-over"),
@@ -242,16 +241,17 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("thread", { type: "number", describe: ctx.t("opt.thread") }),
     (argv) =>
       ctx.runTool(
-        "step_over",
+        "bp_debug_control",
         {
           sessionId: argv.session as string | undefined,
+          action: "stepOver",
           threadId: parseNumber(argv.thread as number | undefined)
         },
         Boolean(argv.pretty)
       )
   );
 
-  // step-into -> step_into
+  // step-into -> bp_debug_control
   y.command(
     "step-into",
     ctx.t("cmd.step-into"),
@@ -261,16 +261,17 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("thread", { type: "number", describe: ctx.t("opt.thread") }),
     (argv) =>
       ctx.runTool(
-        "step_into",
+        "bp_debug_control",
         {
           sessionId: argv.session as string | undefined,
+          action: "stepInto",
           threadId: parseNumber(argv.thread as number | undefined)
         },
         Boolean(argv.pretty)
       )
   );
 
-  // step-out -> step_out
+  // step-out -> bp_debug_control
   y.command(
     "step-out",
     ctx.t("cmd.step-out"),
@@ -280,16 +281,17 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("thread", { type: "number", describe: ctx.t("opt.thread") }),
     (argv) =>
       ctx.runTool(
-        "step_out",
+        "bp_debug_control",
         {
           sessionId: argv.session as string | undefined,
+          action: "stepOut",
           threadId: parseNumber(argv.thread as number | undefined)
         },
         Boolean(argv.pretty)
       )
   );
 
-  // disconnect -> disconnect
+  // disconnect -> bp_debug_control
   y.command(
     "disconnect",
     ctx.t("cmd.disconnect"),
@@ -299,21 +301,22 @@ export function registerDebugCommands(y: Argv, ctx: CommandContext): Argv {
         .option("terminate", { type: "boolean", describe: ctx.t("opt.terminate") }),
     (argv) =>
       ctx.runTool(
-        "disconnect",
+        "bp_debug_control",
         {
           sessionId: argv.session as string | undefined,
+          action: "disconnect",
           terminateDebuggee: Boolean(argv.terminate)
         },
         Boolean(argv.pretty)
       )
   );
 
-  // sessions -> list_sessions
+  // sessions -> bp_debug_status
   y.command(
     "sessions",
     ctx.t("cmd.sessions"),
     (b) => b,
-    (argv) => ctx.runTool("list_sessions", {}, Boolean(argv.pretty))
+    (argv) => ctx.runTool("bp_debug_status", {}, Boolean(argv.pretty))
   );
 
   return y;

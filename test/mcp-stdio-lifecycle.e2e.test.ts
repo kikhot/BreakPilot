@@ -5,17 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { BridgeManifest } from "../src/hub/BridgeManifest.ts";
-
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
 const cliEntry = path.join(repoRoot, "src", "cli.ts");
-
-interface CliResult {
-  stdout: string;
-  stderr: string;
-  code: number | null;
-}
 
 function makeWorkspace(): { root: string; policyPath: string } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "breakpilot-mcp-"));
@@ -30,14 +22,10 @@ function makeWorkspace(): { root: string; policyPath: string } {
       "  enabled: true",
       "  bridge:",
       "    host: 127.0.0.1",
-      "    port: 27891"
+      "    port: 57987"
     ].join("\n")
   );
   return { root, policyPath };
-}
-
-function bridgeFile(root: string): string {
-  return path.join(root, ".breakpilot", "bridge.json");
 }
 
 function spawnMcp(policyPath: string): ChildProcessWithoutNullStreams {
@@ -47,43 +35,27 @@ function spawnMcp(policyPath: string): ChildProcessWithoutNullStreams {
   });
 }
 
-function runCli(args: string[], timeoutMs = 10000): Promise<CliResult> {
+function waitForLine(child: ChildProcessWithoutNullStreams, timeoutMs = 10000): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--experimental-strip-types", cliEntry, ...args], {
-      cwd: repoRoot,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
+    let buffer = "";
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`CLI did not terminate within ${timeoutMs}ms for args: ${args.join(" ")}`));
+      cleanup();
+      reject(new Error("Timed out waiting for MCP stdout."));
     }, timeoutMs);
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
+    const onData = (chunk: Buffer): void => {
+      buffer += chunk.toString();
+      const index = buffer.indexOf("\n");
+      if (index === -1) return;
+      const line = buffer.slice(0, index);
+      cleanup();
+      resolve(line);
+    };
+    const cleanup = (): void => {
       clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr, code });
-    });
+      child.stdout.off("data", onData);
+    };
+    child.stdout.on("data", onData);
   });
-}
-
-async function waitFor<T>(read: () => T | null | undefined, message: string, timeoutMs = 10000): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = read();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
 }
 
 async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs = 10000): Promise<number | null> {
@@ -99,72 +71,24 @@ async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs = 10
   });
 }
 
-function readManifest(root: string): BridgeManifest | null {
-  try {
-    return JSON.parse(fs.readFileSync(bridgeFile(root), "utf8")) as BridgeManifest;
-  } catch {
-    return null;
-  }
-}
+const { root, policyPath } = makeWorkspace();
+const child = spawnMcp(policyPath);
+try {
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
+  const initialize = JSON.parse(await waitForLine(child)) as { result?: { serverInfo?: { name?: string } } };
+  assert.equal(initialize.result?.serverInfo?.name, "breakpilot-debugger");
 
-async function assertBridgeStatus(manifest: BridgeManifest): Promise<void> {
-  assert.ok(manifest.bridgeUrl, "manifest should include bridgeUrl");
-  const statusUrl = manifest.bridgeUrl.replace(/^ws:/, "http:").replace(/^wss:/, "https:");
-  const response = await fetch(`${statusUrl}/status`);
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as { instanceId?: string; lifecycle?: string };
-  assert.equal(payload.instanceId, manifest.instanceId);
-  assert.equal(payload.lifecycle, "stdio");
-}
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
+  const tools = JSON.parse(await waitForLine(child)) as { result?: { tools?: { name: string }[] } };
+  assert.ok(tools.result?.tools?.some((tool) => tool.name === "bp_debug_start"));
+  assert.equal(tools.result?.tools?.some((tool) => tool.name === "debug_launch"), false);
 
-{
-  const { root, policyPath } = makeWorkspace();
-  const child = spawnMcp(policyPath);
-  try {
-    const manifest = await waitFor(() => readManifest(root), "MCP did not write bridge manifest.");
-    assert.equal(manifest.owner, "mcp");
-    assert.equal(manifest.lifecycle, "stdio");
-    assert.equal(manifest.workspaceRoot, root);
-    assert.equal(manifest.controlUrl, undefined);
-    assert.equal(manifest.controlToken, undefined);
-    await assertBridgeStatus(manifest);
+  assert.equal(fs.existsSync(path.join(root, ".breakpilot", "bridge.json")), false);
 
-    const status = await runCli(["daemon", "status", "--policy", policyPath]);
-    assert.equal(status.code, 1);
-    assert.match(status.stdout, /stdio MCP instance/);
-
-    child.stdin.end();
-    await waitForExit(child);
-    await waitFor(() => (!fs.existsSync(bridgeFile(root)) ? true : null), "MCP did not remove bridge manifest.");
-  } finally {
-    child.kill("SIGKILL");
-  }
-}
-
-{
-  const { root, policyPath } = makeWorkspace();
-  const first = spawnMcp(policyPath);
-  let second: ChildProcessWithoutNullStreams | null = null;
-  try {
-    const firstManifest = await waitFor(() => readManifest(root), "First MCP did not write bridge manifest.");
-    second = spawnMcp(policyPath);
-    const secondManifest = await waitFor(() => {
-      const manifest = readManifest(root);
-      return manifest && manifest.instanceId !== firstManifest.instanceId ? manifest : null;
-    }, "Second MCP did not replace bridge manifest.");
-
-    first.stdin.end();
-    await waitForExit(first);
-    const afterFirstExit = await waitFor(() => readManifest(root), "Old MCP removed new bridge manifest.");
-    assert.equal(afterFirstExit.instanceId, secondManifest.instanceId);
-
-    second.stdin.end();
-    await waitForExit(second);
-    await waitFor(() => (!fs.existsSync(bridgeFile(root)) ? true : null), "Second MCP did not remove bridge manifest.");
-  } finally {
-    first.kill("SIGKILL");
-    second?.kill("SIGKILL");
-  }
+  child.stdin.end();
+  await waitForExit(child);
+} finally {
+  child.kill("SIGKILL");
 }
 
 console.log("mcp stdio lifecycle e2e ok");

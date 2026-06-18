@@ -141,6 +141,31 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     });
   }
 
+  async listThreads(): Promise<AnyRecord[]> {
+    const snapshot = await this.getRuntimeSnapshot({ profile: "focused" }, {
+      maxDepth: 0,
+      maxItems: 1,
+      maxStringLength: 200,
+      redactPatterns: []
+    });
+    const threadId = snapshot.threadId ?? this.threadId;
+    return threadId ? [{ id: threadId, name: String(threadId), state: this.#sessionInfo()?.state ?? "unknown", isCurrent: true }] : [];
+  }
+
+  async getCallStack(threadId: number | null = this.threadId, limit = 20): Promise<AnyRecord> {
+    const snapshot = await this.getRuntimeSnapshot({ threadId, levels: limit, profile: "focused" }, {
+      maxDepth: 0,
+      maxItems: 1,
+      maxStringLength: 200,
+      redactPatterns: []
+    });
+    return {
+      threadId: snapshot.threadId ?? threadId,
+      stackFrames: snapshot.stackFrames.slice(0, limit),
+      totalFrames: snapshot.stackFrames.length
+    };
+  }
+
   async getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot> {
     // IDE snapshots can expose application data, so they go through the same
     // consent path as evaluate even though they do not resume or mutate runtime.
@@ -204,6 +229,14 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       variablesReference: args.variablesReference,
       snapshot
     };
+  }
+
+  async setVariable(args: AnyRecord): Promise<AnyRecord> {
+    throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "IDE variable mutation is not supported by the current BreakPilot IDE bridge.", {
+      providerKind: this.kind,
+      path: args.path,
+      ref: args.ref
+    });
   }
 
   async evaluate(expression: string, options: AnyRecord = {}): Promise<AnyRecord> {

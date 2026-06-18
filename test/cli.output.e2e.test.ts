@@ -118,12 +118,12 @@ function runCli(args: string[], timeoutMs = 15000): Promise<CliResult> {
   assert.ok(Array.isArray(parsed.tools), "`tools` output should have a tools array");
   const names = parsed.tools!.map((tool) => tool.name);
   assert.ok(
-    names.includes("debug_attach"),
-    "`tools` output should include the debug_attach tool"
+    names.includes("bp_debug_start"),
+    "`tools` output should include the bp_debug_start tool"
   );
   assert.ok(
-    names.includes("set_breakpoint"),
-    "`tools` output should include the set_breakpoint tool"
+    names.includes("bp_debug_set_breakpoint"),
+    "`tools` output should include the bp_debug_set_breakpoint tool"
   );
 
   // Pretty output is multi-line and indented.

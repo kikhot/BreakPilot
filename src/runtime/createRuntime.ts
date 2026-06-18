@@ -8,8 +8,10 @@ import type { BreakPilotPolicy } from "../types/policy.ts";
 
 export interface RuntimeOptions {
   policyPath?: string;
+  workspaceRoot?: string;
   enableIdeBridge?: boolean;
   ideBridgePort?: number | string;
+  ideBridge?: IdeBridgeServer | null;
   bridgeInstanceId?: string;
   bridgePolicyHash?: string;
   bridgeLifecycle?: string;
@@ -23,11 +25,13 @@ export interface RuntimeContext {
 }
 
 export function createRuntime(options: RuntimeOptions = {}): RuntimeContext {
-  const policy = loadPolicy(options.policyPath);
+  const policy = loadPolicy(options.policyPath, options.workspaceRoot
+    ? { ...process.env, BREAKPILOT_WORKSPACE: options.workspaceRoot }
+    : process.env);
   const audit = new AuditLogger(policy);
-  let ideBridge: IdeBridgeServer | null = null;
+  let ideBridge: IdeBridgeServer | null = options.ideBridge ?? null;
   const bridgePort = options.ideBridgePort ?? policy.ide?.bridge?.port;
-  if (options.enableIdeBridge && policy.ide?.enabled) {
+  if (!ideBridge && options.enableIdeBridge && policy.ide?.enabled) {
     ideBridge = new IdeBridgeServer({
       host: policy.ide.bridge.host,
       port: bridgePort,

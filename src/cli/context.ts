@@ -12,12 +12,11 @@
  */
 
 import type { AnyRecord } from "../types/json.ts";
-import { bridgeContext, manifestForControlUrl, readBridgeManifest } from "../hub/BridgeManifest.ts";
 import { postTool } from "./controlClient.ts";
 import type { Locale } from "./i18n.ts";
 import { output } from "./main.ts";
 
-const DEFAULT_CONTROL_URL = "http://127.0.0.1:27890";
+const DEFAULT_CONTROL_URL = "http://127.0.0.1:57987";
 
 export interface CommandContext {
   /** Control-plane URL resolved by {@link resolveControlUrl}. */
@@ -60,7 +59,7 @@ export function daemonUnreachableError(
   return {
     ok: false,
     error: {
-      message: `Cannot reach breakpilot daemon at ${controlUrl}. Start it with: breakpilot serve --http-port 27890 --ide-bridge-port 27891`,
+      message: `Cannot reach breakpilot hub at ${controlUrl}. Start it with: breakpilot serve`,
       cause
     }
   };
@@ -70,7 +69,7 @@ export function daemonUnreachableError(
  * Resolve the control-plane URL (R6).
  *
  * Precedence: `--control-url` flag (argv-derived) > `BREAKPILOT_CONTROL_URL`
- * environment variable > the default `http://127.0.0.1:27890`.
+ * environment variable > the default `http://127.0.0.1:57987`.
  */
 export function resolveControlUrl(
   controlUrlFlag: string | undefined,
@@ -99,39 +98,16 @@ export function createContext(options: CreateContextOptions): CommandContext {
   const { controlUrl, t, locale, policyPath, controlUrlExplicit } = options;
 
   const runTool = async (toolName: string, args: AnyRecord, pretty: boolean): Promise<void> => {
-    const target = resolveControlTarget(controlUrl, policyPath, Boolean(controlUrlExplicit));
     try {
-      const result = await postTool(target.controlUrl, toolName, args, target.controlToken);
+      const result = await postTool(controlUrl, toolName, args);
       output(result, pretty);
       if (result.ok === false) process.exitCode = 1;
     } catch (error) {
       const typedError = error as Error;
-      output(daemonUnreachableError(target.controlUrl, typedError.message), true);
+      output(daemonUnreachableError(controlUrl, typedError.message), true);
       process.exitCode = 1;
     }
   };
 
   return { controlUrl, t, locale, output, runTool, policyPath, controlUrlExplicit };
-}
-
-function resolveControlTarget(
-  controlUrl: string,
-  policyPath: string | undefined,
-  explicit: boolean
-): { controlUrl: string; controlToken?: string } {
-  if (explicit) {
-    const manifest = manifestForControlUrl(controlUrl, policyPath);
-    return { controlUrl, controlToken: manifest?.controlToken };
-  }
-  try {
-    const context = bridgeContext(policyPath);
-    const manifest = readBridgeManifest(context.workspaceRoot);
-    if (manifest?.owner === "daemon" && manifest.controlUrl) {
-      return { controlUrl: manifest.controlUrl, controlToken: manifest.controlToken };
-    }
-  } catch {
-    // Fall back to the configured/default control URL.
-  }
-  const manifest = manifestForControlUrl(controlUrl, policyPath);
-  return { controlUrl, controlToken: manifest?.controlToken };
 }

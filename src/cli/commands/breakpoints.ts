@@ -37,7 +37,7 @@ import { parseNumber } from "../flags.ts";
  */
 export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
   y.command(["breakpoint", "bp"], ctx.t("cmd.breakpoint"), (sub) => {
-    // set -> set_breakpoint
+    // set -> bp_debug_set_breakpoint
     sub.command(
       "set",
       ctx.t("cmd.breakpoint set"),
@@ -51,13 +51,13 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
           .option("hit-condition", { type: "string", describe: ctx.t("opt.hit-condition") })
           .option("log-message", { type: "string", describe: ctx.t("opt.log-message") })
           .option("require-verified", { type: "boolean", describe: ctx.t("opt.require-verified") })
-          .demandOption(["session", "file", "line"]),
+          .demandOption(["file", "line"]),
       (argv) =>
         ctx.runTool(
-          "set_breakpoint",
+          "bp_debug_set_breakpoint",
           {
             sessionId: argv.session as string | undefined,
-            file: argv.file as string | undefined,
+            filePath: argv.file as string | undefined,
             line: parseNumber(argv.line as number | undefined),
             column: parseNumber(argv.column as number | undefined),
             condition: argv.condition as string | undefined,
@@ -69,35 +69,42 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
         )
     );
 
-    // remove -> remove_breakpoint
+    // remove -> bp_debug_remove_breakpoint
     sub.command(
       "remove",
       ctx.t("cmd.breakpoint remove"),
       (b) =>
         b
           .option("session", { type: "string", describe: ctx.t("opt.session") })
-          .option("id", { type: "string", describe: ctx.t("opt.id") }),
+          .option("id", { type: "string", describe: ctx.t("opt.id") })
+          .option("file", { type: "string", describe: ctx.t("opt.file") })
+          .option("line", { type: "number", describe: ctx.t("opt.line") }),
       (argv) =>
         ctx.runTool(
-          "remove_breakpoint",
+          "bp_debug_remove_breakpoint",
           {
             sessionId: argv.session as string | undefined,
-            breakpointId: argv.id as string | undefined
+            breakpointId: argv.id as string | undefined,
+            filePath: argv.file as string | undefined,
+            line: parseNumber(argv.line as number | undefined)
           },
           Boolean(argv.pretty)
         )
     );
 
-    // list -> list_breakpoints
+    // list -> bp_debug_list_breakpoints
     sub.command(
       "list",
       ctx.t("cmd.breakpoint list"),
-      (b) => b.option("session", { type: "string", describe: ctx.t("opt.session") }),
+      (b) => b
+        .option("session", { type: "string", describe: ctx.t("opt.session") })
+        .option("file", { type: "string", describe: ctx.t("opt.file") }),
       (argv) =>
         ctx.runTool(
-          "list_breakpoints",
+          "bp_debug_list_breakpoints",
           {
-            sessionId: argv.session as string | undefined
+            sessionId: argv.session as string | undefined,
+            filePath: argv.file as string | undefined
           },
           Boolean(argv.pretty)
         )

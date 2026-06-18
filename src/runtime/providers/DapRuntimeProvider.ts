@@ -46,6 +46,14 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     return this.dap.waitForBreakpoint(timeoutMs);
   }
 
+  async listThreads(): Promise<AnyRecord[]> {
+    return this.dap.threads();
+  }
+
+  async getCallStack(threadId: number | null = this.dap.threadId, limit = 20): Promise<AnyRecord> {
+    return this.dap.stackTrace(threadId, limit);
+  }
+
   async getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot> {
     return new RuntimeSnapshotBuilder(this.dap, limits).build(args);
   }
@@ -76,6 +84,16 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     };
   }
 
+  async setVariable(args: AnyRecord): Promise<AnyRecord> {
+    const parentRef = Number(args.parentRef ?? 0);
+    const name = String(args.name ?? "");
+    const value = String(args.newValue ?? "");
+    if (!parentRef || !name) {
+      throw new Error("DAP setVariable requires parentRef and name.");
+    }
+    return this.dap.setVariable(parentRef, name, value);
+  }
+
   async evaluate(expression: string, options: AnyRecord = {}): Promise<AnyRecord> {
     let frameId = options.frameId;
     if (!frameId) {
@@ -87,6 +105,10 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
       context: options.context ?? "watch",
       timeoutMs: options.timeoutMs
     });
+  }
+
+  async pause(threadId: number | null = this.dap.threadId): Promise<AnyRecord> {
+    return this.dap.pause(threadId);
   }
 
   async continue(threadId: number | null = this.dap.threadId): Promise<AnyRecord> {

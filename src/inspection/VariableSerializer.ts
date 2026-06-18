@@ -2,6 +2,7 @@ import type {
   ObjectFieldsMode,
   SerializedVariable,
   SerializedVariableMap,
+  VariableNode,
   VariableKind,
   VariableLimits
 } from "../types/inspection.ts";
@@ -25,6 +26,10 @@ function truncateString(value: unknown, maxStringLength: number): unknown {
   if (typeof value !== "string") return value;
   if (value.length <= maxStringLength) return value;
   return `${value.slice(0, maxStringLength)}...`;
+}
+
+function variableSummary(variable: DapVariable, maxStringLength: number): string {
+  return String(truncateString(String(variable.value ?? ""), maxStringLength));
 }
 
 export class VariableSerializer {
@@ -62,6 +67,88 @@ export class VariableSerializer {
       };
     }
     return output;
+  }
+
+  async serializeVariableNodes(
+    variables: DapVariable[],
+    depth = 0,
+    seen = new Set<number>(),
+    parentRef?: number
+  ): Promise<VariableNode[]> {
+    const limited = variables.slice(0, this.limits.maxItems);
+    const nodes: VariableNode[] = [];
+    for (const variable of limited) {
+      nodes.push(await this.serializeVariableNode(variable, depth, seen, parentRef));
+    }
+    if (variables.length > limited.length) {
+      nodes.push({
+        name: "__truncated__",
+        label: `Showing ${limited.length} of ${variables.length} variables.`,
+        kind: "metadata",
+        value: { summary: `Showing ${limited.length} of ${variables.length} variables.` },
+        expandable: false,
+        truncated: true
+      });
+    }
+    return nodes;
+  }
+
+  async serializeVariableNode(
+    variable: DapVariable,
+    depth = 0,
+    seen = new Set<number>(),
+    parentRef?: number
+  ): Promise<VariableNode> {
+    const redacted = this.redactor.shouldRedact(variable.name);
+    const kind = inferKind(variable);
+    const ref = variable.variablesReference && variable.variablesReference > 0 ? variable.variablesReference : undefined;
+    const summary = redacted ? "[REDACTED]" : variableSummary(variable, this.limits.maxStringLength);
+    const node: VariableNode = {
+      name: variable.name,
+      label: `${variable.name} = ${summary}`,
+      type: variable.type ?? "",
+      kind,
+      value: {
+        summary,
+        raw: ref || redacted ? null : truncateString(variable.value ?? "", this.limits.maxStringLength)
+      },
+      ref,
+      parentRef,
+      expandable: Boolean(ref),
+      truncated: false,
+      redacted
+    };
+
+    if (redacted || !ref) return node;
+
+    if (this.objectFields === "none" || this.objectFields === "preview") {
+      node.truncated = true;
+      return node;
+    }
+
+    const maxDepth = this.objectFields === "shallow" ? 1 : this.limits.maxDepth;
+    if (depth >= maxDepth) {
+      node.truncated = true;
+      node.children = [];
+      return node;
+    }
+
+    if (seen.has(ref)) {
+      node.truncated = true;
+      node.cycle = true;
+      node.value = { summary: "[Circular]", raw: null };
+      node.children = [];
+      return node;
+    }
+
+    seen.add(ref);
+    const children = await this.session.variables(ref, {
+      start: 0,
+      count: this.limits.maxItems
+    });
+    node.children = await this.serializeVariableNodes(children, depth + 1, seen, ref);
+    seen.delete(ref);
+    return node;
   }
 
   async serializeVariable(

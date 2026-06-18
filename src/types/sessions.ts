@@ -21,9 +21,13 @@ export interface RuntimeDebugProvider {
   setBreakpoints(filePath: string, breakpoints: BreakpointRecord[]): Promise<DapBreakpoint[]>;
   removeBreakpoint?(breakpoint: BreakpointRecord): Promise<AnyRecord>;
   waitForBreakpoint(timeoutMs?: number): Promise<StoppedEvent>;
+  listThreads?(): Promise<AnyRecord[]>;
+  getCallStack?(threadId?: number | null, limit?: number): Promise<AnyRecord>;
   getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot>;
   inspectVariable?(args: AnyRecord, limits: Required<VariableLimits>): Promise<InspectVariableResult | AnyRecord>;
+  setVariable?(args: AnyRecord): Promise<AnyRecord>;
   evaluate(expression: string, options?: AnyRecord): Promise<AnyRecord>;
+  pause?(threadId?: number | null): Promise<AnyRecord>;
   continue(threadId?: number | null): Promise<AnyRecord>;
   step(kind: RuntimeStepKind, threadId?: number | null): Promise<AnyRecord>;
   disconnect(options?: { terminateDebuggee?: boolean; restart?: boolean }): Promise<AnyRecord>;

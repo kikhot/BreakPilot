@@ -45,6 +45,34 @@ export interface SerializedVariable {
   presentationError?: string;
 }
 
+export interface VariableValueView {
+  summary: string;
+  raw?: unknown;
+}
+
+export interface VariableNode {
+  name: string;
+  label: string;
+  type?: string;
+  kind: VariableKind;
+  value: VariableValueView;
+  ref?: number;
+  parentRef?: number;
+  expandable: boolean;
+  truncated: boolean;
+  redacted?: boolean;
+  cycle?: boolean;
+  children?: VariableNode[];
+}
+
+export interface VariableScopeView {
+  scope: string;
+  category?: ScopeCategory;
+  rawScopes?: string[];
+  expensive?: boolean;
+  items: VariableNode[];
+}
+
 export type SerializedVariableMap = Record<string, SerializedVariable | {
   kind: "metadata";
   value: string;

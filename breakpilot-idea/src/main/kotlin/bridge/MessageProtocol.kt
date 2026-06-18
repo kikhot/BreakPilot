@@ -15,6 +15,8 @@ data class BridgeMessage(
     val title: String? = null,
     val expressionPreview: String? = null,
     val sessionName: String? = null,
+    val runConfigName: String? = null,
+    val filePath: String? = null,
     val file: String? = null,
     val line: Int? = null,
     val rememberScopes: List<String> = emptyList(),
@@ -73,6 +75,7 @@ object MessageTypes {
     const val AgentRemoveBreakpoint = "agent_remove_breakpoint"
     const val AgentClearBreakpoints = "agent_clear_breakpoints"
     const val AgentRequestVariables = "agent_request_variables"
+    const val AgentStartDebug = "agent_start_debug"
     const val AgentContinue = "agent_continue"
     const val AgentStepOver = "agent_step_over"
     const val AgentStepInto = "agent_step_into"

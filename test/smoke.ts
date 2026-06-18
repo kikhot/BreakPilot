@@ -29,25 +29,22 @@ assert.ok(policy.workspace.root.endsWith("BreakPilot"));
 assert.equal(policy.evaluate.defaultMode, "readonly");
 
 const runtime = createRuntime({ policyPath: "breakpilot.yaml", enableIdeBridge: false });
-assert.ok(toolDefinitions.some((tool) => tool.name === "debug_launch"));
-assert.ok(runtime.router.listTools().some((tool) => tool.name === "get_runtime_snapshot"));
-assert.ok(runtime.router.listTools().some((tool) => tool.name === "inspect_variable"));
-assert.ok(runtime.router.listTools().some((tool) => tool.name === "list_ide_sessions"));
-assert.ok(runtime.router.listTools().some((tool) => tool.name === "adopt_ide_session"));
-assert.ok(runtime.router.listTools().some((tool) => tool.name === "get_active_breakpoint_context"));
+assert.ok(toolDefinitions.some((tool) => tool.name === "bp_debug_start"));
+assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_frame"));
+assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_value"));
+assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_threads"));
+assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_call_stack"));
+assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_context"));
+assert.equal(runtime.router.listTools().some((tool) => tool.name === "debug_launch"), false);
 
-const snapshotTool = toolDefinitions.find((tool) => tool.name === "get_runtime_snapshot");
-assert.equal(snapshotTool?.inputSchema.properties.profile.default, "focused");
-assert.ok(snapshotTool?.inputSchema.properties.includeCategories);
-assert.ok(snapshotTool?.inputSchema.properties.objectFields);
+const frameTool = toolDefinitions.find((tool) => tool.name === "bp_debug_frame");
+assert.equal(frameTool?.inputSchema.properties.expand.default, "preview");
+assert.ok(frameTool?.inputSchema.properties.depth);
+assert.ok(frameTool?.inputSchema.properties.limit);
 
-const sessions = await runtime.router.callTool("list_sessions", {});
+const sessions = await runtime.router.callTool("bp_debug_status", {});
 assert.equal(sessions.ok, true);
 assert.deepEqual((sessions.data as AnyRecord).sessions, []);
-
-const ideSessions = await runtime.router.callTool("list_ide_sessions", {});
-assert.equal(ideSessions.ok, true);
-assert.deepEqual((ideSessions.data as AnyRecord).sessions, []);
 
 const registry = new IdeClientRegistry();
 registry.add({} as Socket, {

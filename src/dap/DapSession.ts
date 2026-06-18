@@ -272,6 +272,14 @@ export class DapSession extends EventEmitter {
     return response.variables ?? [];
   }
 
+  async setVariable(variablesReference: number, name: string, value: string): Promise<AnyRecord> {
+    return this.client.request("setVariable", {
+      variablesReference,
+      name,
+      value
+    });
+  }
+
   async evaluate(expression: string, options: AnyRecord = {}): Promise<AnyRecord> {
     return this.client.request(
       "evaluate",
@@ -283,6 +291,10 @@ export class DapSession extends EventEmitter {
       },
       options.timeoutMs ?? 1000
     );
+  }
+
+  async pause(threadId: number | null = this.threadId): Promise<AnyRecord> {
+    return this.client.request("pause", threadId ? { threadId } : {});
   }
 
   async continue(threadId: number | null = this.threadId): Promise<AnyRecord> {

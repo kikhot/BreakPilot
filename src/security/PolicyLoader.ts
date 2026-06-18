@@ -18,7 +18,7 @@ const DEFAULT_POLICY: BreakPilotPolicy = {
     preferredMode: "hybrid",
     bridge: {
       host: "127.0.0.1",
-      port: 27891
+      port: 57987
     },
     requireUserConfirmation: {
       continueAfterBreakpoint: true,
