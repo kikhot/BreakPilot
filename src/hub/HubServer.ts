@@ -8,20 +8,27 @@ import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
 import type { ToolDefinition, ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
 import { fail, ok } from "../utils/errors.ts";
-import { stableJson } from "../utils/json.ts";
 import { McpSessionRegistry, type McpSessionRecord } from "./McpSessionRegistry.ts";
 import { ProjectRuntimeRegistry } from "./ProjectRuntimeRegistry.ts";
 
 export const DEFAULT_HUB_HOST = "127.0.0.1";
 export const DEFAULT_HUB_PORT = 57987;
 export const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
-export const MCP_PROTOCOL_VERSION = "2025-03-26";
+export const MCP_PROTOCOL_VERSION = "2025-11-25";
 
 interface JsonRpcMessage {
   jsonrpc?: "2.0";
   id?: string | number | null;
   method?: string;
   params?: AnyRecord;
+}
+
+function toolCallResult(result: ToolResponse): AnyRecord {
+  return {
+    content: [{ type: "text", text: result.ok === false ? result.error?.message ?? "error" : "ok" }],
+    structuredContent: result,
+    isError: result.ok === false
+  };
 }
 
 export interface HubServerOptions {
@@ -123,20 +130,6 @@ export class BreakPilotHub {
 
   async callTool(name: string, args: AnyRecord = {}, mcpSession?: McpSessionRecord): Promise<ToolResponse> {
     try {
-      if (name === "bp_debug_status") {
-        const runtime = this.projects.resolveRuntime(args, mcpSession?.projectPath);
-        const result = await runtime.router.callTool(name, args);
-        if (result.ok && result.data && typeof result.data === "object") {
-          return {
-            ...result,
-            data: {
-              ...(result.data as AnyRecord),
-              hub: this.status()
-            }
-          };
-        }
-        return result;
-      }
       const runtime = this.projects.resolveRuntime(args, mcpSession?.projectPath);
       const routedArgs = args.projectPath ? args : { ...args, projectPath: runtime.policy.workspace.root };
       return await runtime.router.callTool(name, routedArgs);
@@ -307,10 +300,7 @@ export class BreakPilotHub {
     if (message.method === "tools/call") {
       const { name, arguments: args } = message.params ?? {};
       const result = await this.callTool(String(name), (args as AnyRecord | undefined) ?? {}, session);
-      return {
-        content: [{ type: "text", text: stableJson(result, true) }],
-        isError: result.ok === false
-      };
+      return toolCallResult(result);
     }
     if (message.method === "ping") return {};
     throw new Error(`Unsupported JSON-RPC method: ${String(message.method)}`);

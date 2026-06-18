@@ -10,6 +10,7 @@ import com.intellij.util.Alarm
 import com.intellij.xdebugger.XDebugSession
 import com.intellij.xdebugger.evaluation.XDebuggerEvaluator
 import com.intellij.xdebugger.frame.XCompositeNode
+import com.intellij.xdebugger.frame.XExecutionStack
 import com.intellij.xdebugger.frame.XFullValueEvaluator
 import com.intellij.xdebugger.frame.XStackFrame
 import com.intellij.xdebugger.frame.XValue
@@ -63,16 +64,29 @@ class VariableReader(
         options: Map<String, Any?> = emptyMap(),
         callback: (Map<String, Any?>) -> Unit
     ) {
-        val frame = session.currentStackFrame
-        if (frame == null) {
-            callback(baseSnapshot(session, emptyList(), emptyMap(), options))
-            return
-        }
         val maxItems = numberOption(options, "maxItems", 20)
         val maxDepth = numberOption(options, "maxDepth", 1)
         val maxStringLength = numberOption(options, "maxStringLength", 2000)
-        readFrameVariables(frame, maxItems, maxDepth, maxStringLength) { variables ->
-            callback(baseSnapshot(session, listOf(frameMap(frame)), variables, options))
+        val levels = numberOption(options, "levels", 20)
+        readStackSnapshot(session, options, levels) { stack ->
+            val frame = stack.selectedFrame
+            if (frame == null) {
+                callback(baseSnapshot(session, stack.threads, emptyList(), emptyMap(), options, stack.threadId, true))
+                return@readStackSnapshot
+            }
+            readFrameVariables(frame, maxItems, maxDepth, maxStringLength) { variables ->
+                callback(
+                    baseSnapshot(
+                        session,
+                        stack.threads,
+                        stack.frames.map { frameMap(it) },
+                        variables,
+                        options,
+                        stack.threadId,
+                        stack.partial
+                    )
+                )
+            }
         }
     }
 
@@ -107,18 +121,23 @@ class VariableReader(
 
     private fun baseSnapshot(
         session: XDebugSession,
+        threads: List<Map<String, Any?>>,
         stackFrames: List<Map<String, Any?>>,
         variables: Map<String, Any?>,
-        options: Map<String, Any?>
+        options: Map<String, Any?>,
+        threadId: Int?,
+        partial: Boolean
     ): Map<String, Any?> {
         return mapOf(
             "source" to "ide",
             "ide" to "idea",
             "language" to "idea",
-            "threadId" to 0,
+            "threadId" to (threadId ?: 0),
             "frameId" to (stackFrames.firstOrNull()?.get("id")),
             "profile" to (options["profile"] ?: "focused"),
+            "threads" to threads,
             "stackFrames" to stackFrames,
+            "partial" to partial,
             "variables" to mapOf(
                 "locals" to mapOf(
                     "name" to "locals",
@@ -136,6 +155,109 @@ class VariableReader(
                 "maxStringLength" to numberOption(options, "maxStringLength", 2000)
             )
         )
+    }
+
+    private fun readStackSnapshot(
+        session: XDebugSession,
+        options: Map<String, Any?>,
+        levels: Int,
+        callback: (StackSnapshotData) -> Unit
+    ) {
+        val context = session.suspendContext
+        val stacks = context?.executionStacks?.toList() ?: emptyList()
+        val activeStack = context?.activeExecutionStack ?: stacks.firstOrNull()
+        val requestedThreadId = nullableNumberOption(options, "threadId")
+        if (stacks.isEmpty()) {
+            val frame = session.currentStackFrame
+            val frames = if (frame == null) emptyList() else listOf(frame)
+            callback(
+                StackSnapshotData(
+                    threadId = 0,
+                    threads = if (frame == null) emptyList() else listOf(
+                        mapOf(
+                            "id" to 0,
+                            "name" to "current",
+                            "state" to "paused",
+                            "isCurrent" to true,
+                            "frameCount" to frames.size,
+                            "partial" to true
+                        )
+                    ),
+                    frames = frames,
+                    selectedFrame = frames.getOrNull(numberOption(options, "frameIndex", 0)),
+                    partial = true
+                )
+            )
+            return
+        }
+
+        val selectedStack = stacks.firstOrNull { stackThreadId(it) == requestedThreadId } ?: activeStack ?: stacks.first()
+        val snapshots = mutableListOf<StackSnapshot>()
+        var remaining = stacks.size
+        fun maybeDone() {
+            if (remaining != 0) return
+            val selected = snapshots.firstOrNull { it.threadId == stackThreadId(selectedStack) } ?: snapshots.first()
+            val frameIndex = numberOption(options, "frameIndex", 0)
+            val requestedFrameId = nullableNumberOption(options, "frameId")
+            val selectedFrame = selected.frames.firstOrNull { System.identityHashCode(it) == requestedFrameId }
+                ?: selected.frames.getOrNull(frameIndex)
+                ?: selected.frames.firstOrNull()
+            callback(
+                StackSnapshotData(
+                    threadId = selected.threadId,
+                    threads = snapshots.sortedByDescending { it.isCurrent }.map { snapshot ->
+                        mapOf(
+                            "id" to snapshot.threadId,
+                            "name" to snapshot.name,
+                            "state" to "paused",
+                            "isCurrent" to snapshot.isCurrent,
+                            "frameCount" to snapshot.frames.size,
+                            "partial" to snapshot.partial
+                        )
+                    },
+                    frames = selected.frames,
+                    selectedFrame = selectedFrame,
+                    partial = selected.partial
+                )
+            )
+        }
+
+        stacks.forEach { stack ->
+            val isCurrent = stack === activeStack
+            val frameLimit = if (stack === selectedStack) levels else 1
+            readStackFrames(stack, frameLimit) { frames, partial ->
+                snapshots += StackSnapshot(
+                    threadId = stackThreadId(stack),
+                    name = stack.displayName ?: stack.javaClass.simpleName,
+                    isCurrent = isCurrent,
+                    frames = frames,
+                    partial = partial
+                )
+                remaining -= 1
+                maybeDone()
+            }
+        }
+    }
+
+    private fun readStackFrames(
+        stack: XExecutionStack,
+        maxFrames: Int,
+        callback: (List<XStackFrame>, Boolean) -> Unit
+    ) {
+        val container = CollectingStackFrameContainer(maxFrames) { frames, partial ->
+            callback(if (frames.isEmpty()) stack.topFrame?.let { listOf(it) } ?: emptyList() else frames, partial)
+        }
+        presentationAlarm.addRequest(
+            {
+                container.finishUnavailable()
+            },
+            1000
+        )
+        try {
+            stack.computeStackFrames(0, container)
+        } catch (error: Throwable) {
+            callback(stack.topFrame?.let { listOf(it) } ?: emptyList(), true)
+        }
     }
 
     private fun readFrameVariables(
@@ -274,7 +396,34 @@ class VariableReader(
             else -> fallback
         }
     }
+
+    private fun nullableNumberOption(options: Map<String, Any?>, key: String): Int? {
+        val value = options[key] ?: return null
+        return when (value) {
+            is Number -> value.toInt()
+            is String -> value.toIntOrNull()
+            else -> null
+        }
+    }
+
+    private fun stackThreadId(stack: XExecutionStack): Int = System.identityHashCode(stack)
 }
+
+private data class StackSnapshot(
+    val threadId: Int,
+    val name: String,
+    val isCurrent: Boolean,
+    val frames: List<XStackFrame>,
+    val partial: Boolean
+)
+
+private data class StackSnapshotData(
+    val threadId: Int,
+    val threads: List<Map<String, Any?>>,
+    val frames: List<XStackFrame>,
+    val selectedFrame: XStackFrame?,
+    val partial: Boolean
+)
 
 private data class PresentationData(
     val valuePreview: String,
@@ -426,6 +575,40 @@ private class CollectingCompositeNode(
         finished = true
         ApplicationManager.getApplication().invokeLater {
             done(children)
+        }
+    }
+}
+
+private class CollectingStackFrameContainer(
+    private val maxFrames: Int,
+    private val done: (List<XStackFrame>, Boolean) -> Unit
+) : XExecutionStack.XStackFrameContainer {
+    private val frames = mutableListOf<XStackFrame>()
+    private var finished = false
+
+    override fun addStackFrames(stackFrames: List<XStackFrame>, last: Boolean) {
+        val count = minOf(stackFrames.size, maxFrames - frames.size)
+        for (index in 0 until count) {
+            frames += stackFrames[index]
+        }
+        if (last || frames.size >= maxFrames) finish(partial = !last)
+    }
+
+    override fun errorOccurred(errorMessage: String) {
+        finish(partial = true)
+    }
+
+    override fun isObsolete(): Boolean = finished
+
+    fun finishUnavailable() {
+        finish(partial = true)
+    }
+
+    private fun finish(partial: Boolean) {
+        if (finished) return
+        finished = true
+        ApplicationManager.getApplication().invokeLater {
+            done(frames, partial)
         }
     }
 }

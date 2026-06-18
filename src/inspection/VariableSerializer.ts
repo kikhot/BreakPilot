@@ -73,19 +73,21 @@ export class VariableSerializer {
     variables: DapVariable[],
     depth = 0,
     seen = new Set<number>(),
-    parentRef?: number
+    parentRef?: number,
+    parentPath: string[] = []
   ): Promise<VariableNode[]> {
     const limited = variables.slice(0, this.limits.maxItems);
     const nodes: VariableNode[] = [];
     for (const variable of limited) {
-      nodes.push(await this.serializeVariableNode(variable, depth, seen, parentRef));
+      nodes.push(await this.serializeVariableNode(variable, depth, seen, parentRef, parentPath));
     }
     if (variables.length > limited.length) {
       nodes.push({
         name: "__truncated__",
         label: `Showing ${limited.length} of ${variables.length} variables.`,
         kind: "metadata",
-        value: { summary: `Showing ${limited.length} of ${variables.length} variables.` },
+        summary: `Showing ${limited.length} of ${variables.length} variables.`,
+        path: [...parentPath, "__truncated__"],
         expandable: false,
         truncated: true
       });
@@ -97,27 +99,29 @@ export class VariableSerializer {
     variable: DapVariable,
     depth = 0,
     seen = new Set<number>(),
-    parentRef?: number
+    parentRef?: number,
+    parentPath: string[] = []
   ): Promise<VariableNode> {
     const redacted = this.redactor.shouldRedact(variable.name);
     const kind = inferKind(variable);
     const ref = variable.variablesReference && variable.variablesReference > 0 ? variable.variablesReference : undefined;
     const summary = redacted ? "[REDACTED]" : variableSummary(variable, this.limits.maxStringLength);
+    const path = [...parentPath, variable.name];
+    const raw = ref || redacted ? undefined : truncateString(variable.value ?? "", this.limits.maxStringLength);
     const node: VariableNode = {
       name: variable.name,
       label: `${variable.name} = ${summary}`,
       type: variable.type ?? "",
       kind,
-      value: {
-        summary,
-        raw: ref || redacted ? null : truncateString(variable.value ?? "", this.limits.maxStringLength)
-      },
+      summary,
       ref,
       parentRef,
+      path,
       expandable: Boolean(ref),
       truncated: false,
       redacted
     };
+    if (raw !== undefined) node.raw = raw;
 
     if (redacted || !ref) return node;
 
@@ -136,7 +140,8 @@ export class VariableSerializer {
     if (seen.has(ref)) {
       node.truncated = true;
       node.cycle = true;
-      node.value = { summary: "[Circular]", raw: null };
+      node.summary = "[Circular]";
+      node.raw = undefined;
       node.children = [];
       return node;
     }
@@ -146,7 +151,7 @@ export class VariableSerializer {
       start: 0,
       count: this.limits.maxItems
     });
-    node.children = await this.serializeVariableNodes(children, depth + 1, seen, ref);
+    node.children = await this.serializeVariableNodes(children, depth + 1, seen, ref, path);
     seen.delete(ref);
     return node;
   }

@@ -1,12 +1,26 @@
 import type { ControlGateway } from "../control/ControlGateway.ts";
 import type { AnyRecord } from "../types/json.ts";
-import { stableJson } from "../utils/json.ts";
+
+const MCP_PROTOCOL_VERSION = "2025-11-25";
 
 interface JsonRpcMessage {
   jsonrpc?: "2.0";
   id?: string | number | null;
   method: string;
   params?: AnyRecord;
+}
+
+function toolCallResult(result: AnyRecord): AnyRecord {
+  return {
+    content: [
+      {
+        type: "text",
+        text: result.ok === false ? String((result.error as AnyRecord | undefined)?.message ?? "error") : "ok"
+      }
+    ],
+    structuredContent: result,
+    isError: result.ok === false
+  };
 }
 
 function writeJsonRpc(id: JsonRpcMessage["id"], result?: unknown, error?: AnyRecord): void {
@@ -22,7 +36,7 @@ function writeJsonRpc(id: JsonRpcMessage["id"], result?: unknown, error?: AnyRec
 async function handleJsonRpc(gateway: ControlGateway, message: JsonRpcMessage): Promise<AnyRecord> {
   if (message.method === "initialize") {
     return {
-      protocolVersion: "2025-03-26",
+      protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {
         tools: {}
       },
@@ -38,15 +52,7 @@ async function handleJsonRpc(gateway: ControlGateway, message: JsonRpcMessage): 
   if (message.method === "tools/call") {
     const { name, arguments: args } = message.params ?? {};
     const result = await gateway.callTool(name, args ?? {});
-    return {
-      content: [
-        {
-          type: "text",
-          text: stableJson(result, true)
-        }
-      ],
-      isError: result.ok === false
-    };
+    return toolCallResult(result as AnyRecord);
   }
   if (message.method === "ping") return {};
   throw new Error(`Unsupported JSON-RPC method: ${message.method}`);

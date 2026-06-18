@@ -111,13 +111,13 @@ export class SecurityPolicy {
         "await ",
         ";"
       ];
-      const hasCall = /\b[a-zA-Z_$][\w$]*\s*\(/.test(text);
+      const callCheck = readonlyCallCheck(text);
       const hasUnsafeToken = unsafeTokens.some((token) => text.includes(token));
-      if (hasCall || hasUnsafeToken) {
+      if (!callCheck.allowed || hasUnsafeToken) {
         throw new BreakPilotError(
           ErrorCodes.EVALUATE_BLOCKED_BY_POLICY,
           "Readonly evaluate only allows field, property, and index inspection.",
-          { expression: text, mode }
+          { expression: text, mode, suggestedExpression: callCheck.suggestedExpression }
         );
       }
     }
@@ -133,4 +133,46 @@ export class SecurityPolicy {
       redactPatterns: overrides.redactPatterns ?? this.policy.variables.redactPatterns ?? []
     };
   }
+}
+
+function readonlyCallCheck(expression: string): { allowed: boolean; suggestedExpression?: string } {
+  const suggestedExpression = expression.replace(/\.([a-zA-Z_$][\w$]*)\s*\(\s*\)/g, ".$1");
+  const callMatches = [...expression.matchAll(/([.]?)([a-zA-Z_$][\w$]*)\s*\(([^()]*)\)/g)];
+  if (callMatches.length === 0) return { allowed: true };
+  const blockedMemberNames = new Set([
+    "add",
+    "append",
+    "clear",
+    "close",
+    "connect",
+    "continue",
+    "delete",
+    "disconnect",
+    "execute",
+    "notify",
+    "open",
+    "put",
+    "read",
+    "remove",
+    "resume",
+    "run",
+    "save",
+    "send",
+    "set",
+    "sleep",
+    "start",
+    "stop",
+    "update",
+    "wait",
+    "write"
+  ]);
+  const allowed = callMatches.every((match) => {
+    const dot = match[1];
+    const name = match[2] ?? "";
+    const args = match[3] ?? "";
+    if (dot !== ".") return false;
+    if (args.trim() !== "") return false;
+    return !blockedMemberNames.has(name);
+  });
+  return { allowed, suggestedExpression: suggestedExpression === expression ? undefined : suggestedExpression };
 }

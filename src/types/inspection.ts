@@ -45,17 +45,14 @@ export interface SerializedVariable {
   presentationError?: string;
 }
 
-export interface VariableValueView {
-  summary: string;
-  raw?: unknown;
-}
-
 export interface VariableNode {
   name: string;
   label: string;
   type?: string;
   kind: VariableKind;
-  value: VariableValueView;
+  summary: string;
+  raw?: unknown;
+  path?: string[];
   ref?: number;
   parentRef?: number;
   expandable: boolean;
@@ -94,6 +91,8 @@ export interface RuntimeSnapshot {
   profile?: SnapshotProfile;
   threadId: number | null;
   frameId: number | null;
+  threads?: AnyRecord[];
+  partial?: boolean;
   stackFrames: DapStackFrame[];
   variables: Record<string, {
     name: string;

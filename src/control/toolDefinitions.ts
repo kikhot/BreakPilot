@@ -12,6 +12,27 @@ const projectPath = {
 
 const timeout = { type: "number", description: "Timeout in milliseconds." } as const;
 
+const toolResponseOutputSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ok: { type: "boolean" },
+    sessionId: { type: "string" },
+    data: { type: "object" },
+    warnings: { type: "array", items: { type: "string" } },
+    auditId: { type: "string" },
+    error: {
+      type: "object",
+      properties: {
+        code: { type: "string" },
+        message: { type: "string" },
+        details: { type: "object" }
+      }
+    }
+  },
+  required: ["ok", "auditId"]
+} as const;
+
 export const toolDefinitions: ToolDefinition[] = [
   {
     name: "bp_debug_start",
@@ -40,12 +61,14 @@ export const toolDefinitions: ToolDefinition[] = [
         dapPort: { type: "number" },
         dap: { type: "object" }
       }
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_status",
-    description: "Return debugger status, active sessions, IDE sessions, and supported languages.",
-    inputSchema: { type: "object", properties: { projectPath } }
+    description: "Return compact debugger status, live sessions, and IDE bridge summary.",
+    inputSchema: { type: "object", properties: { projectPath } },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_control",
@@ -61,15 +84,22 @@ export const toolDefinitions: ToolDefinition[] = [
         },
         threadId: { type: "number" },
         timeout,
-        terminateDebuggee: { type: "boolean", default: false }
+        terminateDebuggee: { type: "boolean", default: false },
+        includeFrame: { type: "boolean", default: false },
+        expand: { type: "string", enum: ["none", "preview", "shallow", "deep"], default: "preview" },
+        depth: { type: "number", default: 1 },
+        limit: { type: "number", default: 10 },
+        maxString: { type: "number", default: 2000 }
       },
       required: ["action"]
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_threads",
     description: "List runtime threads for a debug session.",
-    inputSchema: { type: "object", properties: { projectPath, sessionId, limit: { type: "number", default: 50 } } }
+    inputSchema: { type: "object", properties: { projectPath, sessionId, limit: { type: "number", default: 50 } } },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_call_stack",
@@ -77,7 +107,8 @@ export const toolDefinitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: { projectPath, sessionId, threadId: { type: "number" }, limit: { type: "number", default: 20 } }
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_frame",
@@ -95,7 +126,8 @@ export const toolDefinitions: ToolDefinition[] = [
         limit: { type: "number", default: 20 },
         maxString: { type: "number", default: 2000 }
       }
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_value",
@@ -117,7 +149,8 @@ export const toolDefinitions: ToolDefinition[] = [
         limit: { type: "number", default: 20 },
         maxString: { type: "number", default: 2000 }
       }
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_set_value",
@@ -132,7 +165,8 @@ export const toolDefinitions: ToolDefinition[] = [
         newValue: { type: "string" }
       },
       required: ["path", "newValue"]
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_eval",
@@ -150,7 +184,8 @@ export const toolDefinitions: ToolDefinition[] = [
         timeout
       },
       required: ["expression"]
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_context",
@@ -165,7 +200,8 @@ export const toolDefinitions: ToolDefinition[] = [
         depth: { type: "number", default: 1 },
         limit: { type: "number", default: 20 }
       }
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_set_breakpoint",
@@ -184,12 +220,14 @@ export const toolDefinitions: ToolDefinition[] = [
         requireVerified: { type: "boolean", default: false }
       },
       required: ["filePath", "line"]
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_list_breakpoints",
     description: "List breakpoints for a debug session.",
-    inputSchema: { type: "object", properties: { projectPath, sessionId, filePath: { type: "string" } } }
+    inputSchema: { type: "object", properties: { projectPath, sessionId, filePath: { type: "string" } } },
+    outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_remove_breakpoint",
@@ -203,6 +241,7 @@ export const toolDefinitions: ToolDefinition[] = [
         filePath: { type: "string" },
         line: { type: "number" }
       }
-    }
+    },
+    outputSchema: toolResponseOutputSchema
   }
 ];

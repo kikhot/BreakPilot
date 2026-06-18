@@ -93,6 +93,8 @@ class BridgeClient(private val project: Project) : Disposable {
                     "consentSettings" to true,
                     "toolWindow" to true,
                     "variableSnapshot" to true,
+                    "threads" to true,
+                    "stackTrace" to true,
                     "provider" to "xdebugger"
                 )
             )

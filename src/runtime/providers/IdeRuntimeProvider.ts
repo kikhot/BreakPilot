@@ -148,8 +148,22 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       maxStringLength: 200,
       redactPatterns: []
     });
+    const threads = Array.isArray((snapshot as AnyRecord).threads)
+      ? ((snapshot as AnyRecord).threads as AnyRecord[])
+      : [];
+    if (threads.length > 0) return threads;
     const threadId = snapshot.threadId ?? this.threadId;
-    return threadId ? [{ id: threadId, name: String(threadId), state: this.#sessionInfo()?.state ?? "unknown", isCurrent: true }] : [];
+    return threadId !== null && threadId !== undefined
+      ? [{
+          id: threadId,
+          name: String(threadId),
+          state: this.#sessionInfo()?.state ?? "unknown",
+          isCurrent: true,
+          frameCount: snapshot.stackFrames?.length ?? 0,
+          partial: true,
+          capabilities: { stack: "topFrameOnly" }
+        }]
+      : [];
   }
 
   async getCallStack(threadId: number | null = this.threadId, limit = 20): Promise<AnyRecord> {
@@ -159,10 +173,14 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       maxStringLength: 200,
       redactPatterns: []
     });
+    const hasThreadSnapshot = Array.isArray((snapshot as AnyRecord).threads);
+    const partial = Boolean((snapshot as AnyRecord).partial) || (!hasThreadSnapshot && (snapshot.stackFrames?.length ?? 0) <= 1);
     return {
       threadId: snapshot.threadId ?? threadId,
       stackFrames: snapshot.stackFrames.slice(0, limit),
-      totalFrames: snapshot.stackFrames.length
+      totalFrames: snapshot.stackFrames.length,
+      partial,
+      capabilities: partial ? { stack: "topFrameOnly" } : { stack: "full" }
     };
   }
 
@@ -198,6 +216,8 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       profile: args.profile ?? snapshot.profile,
       threadId: snapshot.threadId ?? this.threadId,
       frameId: snapshot.frameId ?? null,
+      threads: snapshot.threads,
+      partial: Boolean(snapshot.partial),
       stackFrames: snapshot.stackFrames ?? [],
       variables: snapshot.variables ?? {},
       availableCategories: snapshot.availableCategories,

@@ -41,10 +41,20 @@ const frameTool = toolDefinitions.find((tool) => tool.name === "bp_debug_frame")
 assert.equal(frameTool?.inputSchema.properties.expand.default, "preview");
 assert.ok(frameTool?.inputSchema.properties.depth);
 assert.ok(frameTool?.inputSchema.properties.limit);
+assert.ok(frameTool?.outputSchema);
+assert.ok(toolDefinitions.find((tool) => tool.name === "bp_debug_status")?.outputSchema);
+assert.equal(toolDefinitions.some((tool) => tool.name === "bp_debug_diagnostics"), false);
+const statusTool = toolDefinitions.find((tool) => tool.name === "bp_debug_status");
+assert.equal("verbose" in statusTool!.inputSchema.properties, false);
+assert.equal("includeHub" in statusTool!.inputSchema.properties, false);
+assert.equal("includeLanguages" in statusTool!.inputSchema.properties, false);
+assert.equal("includeTerminated" in statusTool!.inputSchema.properties, false);
 
 const sessions = await runtime.router.callTool("bp_debug_status", {});
 assert.equal(sessions.ok, true);
 assert.deepEqual((sessions.data as AnyRecord).sessions, []);
+assert.equal("languages" in (sessions.data as AnyRecord), false);
+assert.equal("hub" in (sessions.data as AnyRecord), false);
 
 const registry = new IdeClientRegistry();
 registry.add({} as Socket, {

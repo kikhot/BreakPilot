@@ -4,6 +4,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: AnyRecord;
+  outputSchema?: AnyRecord;
 }
 
 export interface ToolResponse<TData = unknown> {

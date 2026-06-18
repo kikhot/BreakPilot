@@ -14,7 +14,8 @@ try {
   assert.equal(init.status, 200);
   const sessionId = init.headers.get("mcp-session-id");
   assert.ok(sessionId, "stream initialize should return mcp-session-id");
-  const initBody = await init.json() as { result?: { serverInfo?: { name?: string } } };
+  const initBody = await init.json() as { result?: { protocolVersion?: string; serverInfo?: { name?: string } } };
+  assert.equal(initBody.result?.protocolVersion, "2025-11-25");
   assert.equal(initBody.result?.serverInfo?.name, "breakpilot-debugger");
 
   const list = await fetch(`${handle.url}/stream`, {
@@ -29,6 +30,31 @@ try {
   const listBody = await list.json() as { result?: { tools?: { name: string }[] } };
   assert.ok(listBody.result?.tools?.some((tool) => tool.name === "bp_debug_start"));
   assert.equal(listBody.result?.tools?.some((tool) => tool.name === "debug_launch"), false);
+
+  const call = await fetch(`${handle.url}/stream`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-session-id": sessionId
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "bp_debug_status", arguments: {} }
+    })
+  });
+  assert.equal(call.status, 200);
+  const callBody = await call.json() as {
+    result?: {
+      content?: { type: string; text: string }[];
+      structuredContent?: { ok?: boolean };
+      isError?: boolean;
+    };
+  };
+  assert.equal(callBody.result?.structuredContent?.ok, true);
+  assert.equal(callBody.result?.content?.[0]?.text, "ok");
+  assert.equal(callBody.result?.isError, false);
 
   const sse = await fetch(`${handle.url}/sse`);
   assert.equal(sse.status, 200);

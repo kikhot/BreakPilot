@@ -75,13 +75,31 @@ const { root, policyPath } = makeWorkspace();
 const child = spawnMcp(policyPath);
 try {
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
-  const initialize = JSON.parse(await waitForLine(child)) as { result?: { serverInfo?: { name?: string } } };
+  const initialize = JSON.parse(await waitForLine(child)) as { result?: { protocolVersion?: string; serverInfo?: { name?: string } } };
+  assert.equal(initialize.result?.protocolVersion, "2025-11-25");
   assert.equal(initialize.result?.serverInfo?.name, "breakpilot-debugger");
 
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
   const tools = JSON.parse(await waitForLine(child)) as { result?: { tools?: { name: string }[] } };
   assert.ok(tools.result?.tools?.some((tool) => tool.name === "bp_debug_start"));
   assert.equal(tools.result?.tools?.some((tool) => tool.name === "debug_launch"), false);
+
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "bp_debug_status", arguments: { projectPath: root } }
+  })}\n`);
+  const call = JSON.parse(await waitForLine(child)) as {
+    result?: {
+      content?: { type: string; text: string }[];
+      structuredContent?: { ok?: boolean };
+      isError?: boolean;
+    };
+  };
+  assert.equal(call.result?.structuredContent?.ok, true);
+  assert.equal(call.result?.content?.[0]?.text, "ok");
+  assert.equal(call.result?.isError, false);
 
   assert.equal(fs.existsSync(path.join(root, ".breakpilot", "bridge.json")), false);
 

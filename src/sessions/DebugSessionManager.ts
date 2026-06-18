@@ -57,6 +57,7 @@ type DebugToolArgs = AnyRecord & {
   timeout?: number;
   terminateDebuggee?: boolean;
   restart?: boolean;
+  includeFrame?: boolean;
   clientId?: string;
   ideSessionId?: string;
   env?: NodeJS.ProcessEnv | AnyRecord;
@@ -187,22 +188,45 @@ export class DebugSessionManager {
 
   async bpDebugStatus(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const auditId = this.audit.record("bp_debug_status_requested", { projectPath: args.projectPath });
-    const sessions = this.sessions.list();
+    const sessions = this.#sessionStatusList(args);
     const active = this.#selectSessionCandidate();
-    const languages = await new CapabilityReporter(this.adapters, this.audit).report();
-    return ok(null, {
-      activeSessionId: active?.sessionId ?? null,
+    const ide = this.#ideStatusView(args);
+    const data: AnyRecord = {
+      activeSessionId: active && sessions.some((session) => session.sessionId === active.sessionId) ? active.sessionId : null,
       sessions,
-      ide: this.ideBridge?.status() ?? { enabled: false, clients: [] },
-      languages
-    }, auditId);
+      ide,
+      capabilities: {
+        ideBridge: Boolean(ide.enabled),
+        ideConnected: Boolean(ide.connected),
+        threads: Boolean((ide.capabilities as AnyRecord | undefined)?.threads),
+        stackTrace: Boolean((ide.capabilities as AnyRecord | undefined)?.stackTrace)
+      }
+    };
+    return ok(null, data, auditId);
   }
 
   async bpDebugControl(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
-    const session = this.#resolveSession(normalized);
     const action = normalized.action;
-    const auditId = this.audit.record("bp_debug_control_requested", { sessionId: session.sessionId, action });
+    const auditId = this.audit.record("bp_debug_control_requested", { sessionId: normalized.sessionId, action });
+    let session: DebugSessionRecord;
+    try {
+      session = this.#resolveSession(normalized);
+    } catch (error) {
+      const payload = error instanceof BreakPilotError ? error : null;
+      if (
+        (action === "disconnect" || action === "stop") &&
+        payload?.code === ErrorCodes.SESSION_NOT_FOUND
+      ) {
+        return ok(normalized.sessionId, {
+          status: "stopped",
+          sessionId: normalized.sessionId ?? null,
+          alreadyStopped: true,
+          events: this.#emptyEvents()
+        }, auditId, ["Debug session was already absent."]);
+      }
+      throw error;
+    }
 
     if (action === "pause") {
       if (!session.provider.pause) {
@@ -214,7 +238,7 @@ export class DebugSessionManager {
       await session.provider.pause(normalized.threadId ?? session.provider.threadId);
       const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 5000).catch(() => null);
       session.state = SessionState.PAUSED;
-      return ok(session.sessionId, await this.#controlView(session, "paused", stopped), auditId);
+      return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
     }
 
     if (action === "wait") {
@@ -226,7 +250,7 @@ export class DebugSessionManager {
         throw error;
       });
       session.state = SessionState.PAUSED;
-      return ok(session.sessionId, await this.#controlView(session, "paused", stopped), auditId);
+      return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
     }
 
     if (action === "resume") {
@@ -242,7 +266,7 @@ export class DebugSessionManager {
       await session.provider.step(kind, normalized.threadId ?? session.provider.threadId);
       const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 10000).catch(() => null);
       session.state = SessionState.PAUSED;
-      return ok(session.sessionId, await this.#controlView(session, "paused", stopped), auditId);
+      return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
     }
 
     if (action === "disconnect" || action === "stop") {
@@ -318,7 +342,14 @@ export class DebugSessionManager {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_value requires either ref or path.", {});
     }
 
-    const found = await this.#resolveNodeByPath(session, { ...normalized, expand: "deep" }, normalized.path);
+    const found = await this.#resolveNodeByPath(session, {
+      ...normalized,
+      expand: "deep",
+      maxDepth: Math.max(
+        Number(normalized.maxDepth ?? normalized.depth ?? 0),
+        normalized.path.length
+      )
+    }, normalized.path);
     if (!found) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Variable path was not found in the selected frame.", {
         path: normalized.path
@@ -360,7 +391,7 @@ export class DebugSessionManager {
       parentRef: node.parentRef,
       name: node.name
     });
-    return ok(session.sessionId, { sessionId: session.sessionId, path: normalized.path, oldValue: node.value, result }, auditId);
+    return ok(session.sessionId, { sessionId: session.sessionId, path: normalized.path, oldValue: node.raw ?? node.summary, result }, auditId);
   }
 
   async bpDebugEval(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -999,6 +1030,57 @@ export class DebugSessionManager {
     return null;
   }
 
+  #statusWorkspaceRoot(args: DebugToolArgs = {}): string {
+    return args.projectPath || args.workspace
+      ? resolveWorkspacePath(this.security.workspaceRoot(), String(args.projectPath ?? args.workspace))
+      : this.security.workspaceRoot();
+  }
+
+  #sessionStatusList(args: DebugToolArgs = {}): SessionSummary[] {
+    const workspaceRoot = this.#statusWorkspaceRoot(args);
+    return this.sessions.list().filter((session) => {
+      if (path.resolve(session.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
+      if (session.state === SessionState.TERMINATED || session.state === SessionState.FAILED) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  #ideStatusView(args: DebugToolArgs = {}): AnyRecord {
+    if (!this.ideBridge) return { enabled: false, connected: false, clients: 0, sessions: [] };
+    const workspaceRoot = this.#statusWorkspaceRoot(args);
+    const clients = this.ideBridge.registry.list().filter((client) => {
+      if (client.workspaceRoot && path.resolve(client.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
+      return true;
+    });
+    const sessions = this.ideBridge.registry.listSessions({ workspaceRoot }).filter((session) => {
+      return session.state !== SessionState.TERMINATED && session.state !== SessionState.FAILED;
+    });
+    const capabilities = clients.reduce<AnyRecord>((merged, client) => {
+      for (const [key, value] of Object.entries(client.capabilities ?? {})) {
+        if (value === true || merged[key] === undefined) merged[key] = value;
+      }
+      return merged;
+    }, {});
+    return {
+      enabled: true,
+      connected: clients.length > 0,
+      clients: clients.length,
+      sessions: sessions.map((session) => ({
+        ideSessionId: session.ideSessionId,
+        clientId: session.clientId,
+        name: session.name,
+        state: session.state,
+        active: Boolean(session.active),
+        threadId: session.threadId ?? null,
+        topFrame: session.topFrame,
+        capabilities: session.capabilities
+      })),
+      capabilities
+    };
+  }
+
   async #callStack(session: DebugSessionRecord, threadId?: number, limit = 20): Promise<AnyRecord> {
     if (!session.provider.getCallStack) {
       throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support call stack inspection.", {
@@ -1012,7 +1094,9 @@ export class DebugSessionManager {
       sessionId: session.sessionId,
       threadId: stack.threadId ?? threadId ?? session.provider.threadId,
       frames,
-      totalFrames: stack.totalFrames ?? frames.length
+      totalFrames: stack.totalFrames ?? frames.length,
+      partial: Boolean(stack.partial),
+      capabilities: stack.capabilities
     };
   }
 
@@ -1104,18 +1188,26 @@ export class DebugSessionManager {
     };
   }
 
-  async #controlView(session: DebugSessionRecord, status: string, stopped: AnyRecord | null): Promise<AnyRecord> {
-    const frame = await this.#frameView(session, {
-      threadId: stopped?.threadId ?? session.provider.threadId ?? undefined,
-      expand: "preview",
-      depth: 1,
-      limit: 10
-    }).catch(() => null);
+  async #controlView(
+    session: DebugSessionRecord,
+    status: string,
+    stopped: AnyRecord | null,
+    args: DebugToolArgs = {}
+  ): Promise<AnyRecord> {
+    const frame = args.includeFrame
+      ? await this.#frameView(session, {
+          ...args,
+          threadId: this.#numberOrUndefined(stopped?.threadId ?? session.provider.threadId ?? args.threadId),
+          expand: args.expand ?? "preview",
+          depth: args.depth ?? 1,
+          limit: args.limit ?? 10
+        }).catch(() => null)
+      : null;
     return {
       status,
       sessionId: session.sessionId,
       stopped,
-      position: frame?.frame ? this.#positionFromFrame(frame.frame) : null,
+      position: frame?.frame ? this.#positionFromFrame(frame.frame) : this.#positionFromStopped(stopped),
       frame: frame
         ? {
             summary: frame.frame?.presentation ?? null,
@@ -1126,41 +1218,63 @@ export class DebugSessionManager {
     };
   }
 
+  #positionFromStopped(stopped: AnyRecord | null): AnyRecord | null {
+    const topFrame = (stopped?.topFrame ?? stopped?.stopped?.topFrame) as AnyRecord | undefined;
+    if (!topFrame || Object.keys(topFrame).length === 0) return null;
+    const source = topFrame.source as AnyRecord | undefined;
+    return {
+      filePath: source?.path ?? topFrame.filePath ?? null,
+      line: topFrame.line ?? null,
+      frameIndex: 0
+    };
+  }
+
   #emptyEvents(): AnyRecord {
     return { breakpointErrors: [], tracepoints: [] };
   }
 
-  #nodesFromSerializedMap(map: AnyRecord): VariableNode[] {
+  #numberOrUndefined(value: unknown): number | undefined {
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  }
+
+  #nodesFromSerializedMap(map: AnyRecord, parentPath: string[] = []): VariableNode[] {
     return Object.entries(map ?? {}).map(([name, value]) => {
       const variable = value as AnyRecord;
       if (variable.kind === "metadata") {
+        const summary = String(variable.value ?? "");
         return {
           name,
           label: String(variable.value ?? name),
           kind: "metadata",
-          value: { summary: String(variable.value ?? "") },
+          summary,
+          path: [...parentPath, name],
           expandable: false,
           truncated: Boolean(variable.truncated)
         } as VariableNode;
       }
       const ref = Number(variable.variablesReference ?? 0) > 0 ? Number(variable.variablesReference) : undefined;
+      const nodeName = String(variable.name ?? name);
       const children = variable.value && typeof variable.value === "object" && !Array.isArray(variable.value)
-        ? this.#nodesFromSerializedMap(variable.value as AnyRecord)
+        ? this.#nodesFromSerializedMap(variable.value as AnyRecord, [...parentPath, nodeName])
         : undefined;
       const summary = String(variable.valuePreview ?? variable.value ?? "");
-      return {
-        name: String(variable.name ?? name),
-        label: `${String(variable.name ?? name)} = ${summary}`,
+      const raw = ref || children ? undefined : variable.value;
+      const node: VariableNode = {
+        name: nodeName,
+        label: `${nodeName} = ${summary}`,
         type: String(variable.type ?? ""),
         kind: String(variable.kind ?? "primitive") as VariableNode["kind"],
-        value: { summary, raw: ref ? null : variable.value },
+        summary,
         ref,
+        path: [...parentPath, nodeName],
         expandable: Boolean(ref),
         truncated: Boolean(variable.truncated),
         redacted: Boolean(variable.redacted),
         cycle: Boolean(variable.cycle),
         children
       };
+      if (raw !== undefined) node.raw = raw;
+      return node;
     });
   }
 
