@@ -28,9 +28,11 @@ The stdio adapter accepts newline-delimited JSON-RPC:
 | `tools/call` | Calls a tool with `{ "name": "...", "arguments": {} }`. |
 | `ping` | Health check. |
 
-Tool results are text content containing JSON. Successful control-plane
-responses use `{ "ok": true, "sessionId": "...", "data": {}, "warnings": [] }`;
-failures use `{ "ok": false, "error": { "code": "...", "message": "...", "details": {} } }`.
+Tool results expose structured data through `structuredContent`. The `content`
+text is only a short human-readable status and is not a data channel.
+Successful control-plane responses use
+`{ "ok": true, "sessionId": "...", "data": {}, "warnings": [] }`; failures use
+`{ "ok": false, "error": { "code": "...", "message": "...", "details": {} } }`.
 
 ## Common Parameters
 
@@ -88,7 +90,7 @@ returns a structured capability error instead of silently falling back.
 | Tool | Purpose |
 |---|---|
 | `bp_debug_start` | Launch, attach, or adopt a debug session. |
-| `bp_debug_status` | Report sessions, active session, IDE status, and supported languages. |
+| `bp_debug_status` | Report active session, live sessions, compact IDE status, and compact capabilities. |
 | `bp_debug_control` | Pause, resume, wait, step, disconnect, stop, or drain events. |
 | `bp_debug_threads` | List runtime threads. |
 | `bp_debug_call_stack` | Return the call stack for a thread. |
@@ -128,12 +130,21 @@ Arguments:
   "sessionId": "optional",
   "action": "pause | resume | wait | stepOver | stepInto | stepOut | stop | disconnect | drainEvents",
   "threadId": 1,
-  "timeout": 30000
+  "timeout": 30000,
+  "includeFrame": false
 }
 ```
 
 For `wait` and step actions, BreakPilot returns current `status`, `position`,
-and a lightweight `frame` summary when available.
+and event tails by default. Pass `includeFrame: true` to include top-frame
+variables, controlled by `expand`, `depth`, `limit`, and `maxString`.
+
+### `bp_debug_status`
+
+Status is a compact agent view: active BreakPilot sessions for the current
+project, a short IDE bridge summary, and compact debugger capabilities. It does
+not return hub diagnostics, language availability details, terminated sessions,
+or full IDE client records.
 
 ### `bp_debug_threads` and `bp_debug_call_stack`
 
@@ -164,7 +175,8 @@ overwrite each other:
   "label": "analysis = NameAnalysis(...)",
   "type": "HelloController$NameAnalysis",
   "kind": "object",
-  "value": { "summary": "NameAnalysis[...]", "raw": null },
+  "summary": "NameAnalysis[...]",
+  "path": ["analysis"],
   "ref": 7072,
   "expandable": true,
   "truncated": false,

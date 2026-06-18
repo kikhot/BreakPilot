@@ -27,7 +27,8 @@ stdio adapter 接收按行分隔的 JSON-RPC：
 | `tools/call` | 通过 `{ "name": "...", "arguments": {} }` 调用工具。 |
 | `ping` | 健康检查。 |
 
-成功响应仍使用统一 control-plane envelope：
+工具结果的结构化数据只通过 `structuredContent` 暴露。`content` 文本只是简短
+人类可读状态，不作为数据通道。成功响应使用统一 control-plane envelope：
 `{ "ok": true, "sessionId": "...", "data": {}, "warnings": [] }`。
 失败响应使用 `{ "ok": false, "error": { "code": "...", "message": "...", "details": {} } }`。
 
@@ -84,7 +85,7 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 | 工具 | 用途 |
 |---|---|
 | `bp_debug_start` | 启动、附加或采纳调试会话。 |
-| `bp_debug_status` | 查看 sessions、active session、IDE 状态和语言能力。 |
+| `bp_debug_status` | 查看 active session、live sessions、简短 IDE 状态和简短 capabilities。 |
 | `bp_debug_control` | pause、resume、wait、step、disconnect、stop、drainEvents。 |
 | `bp_debug_threads` | 查看线程列表。 |
 | `bp_debug_call_stack` | 查看指定线程调用链。 |
@@ -121,11 +122,18 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
   "sessionId": "optional",
   "action": "pause | resume | wait | stepOver | stepInto | stepOut | stop | disconnect | drainEvents",
   "threadId": 1,
-  "timeout": 30000
+  "timeout": 30000,
+  "includeFrame": false
 }
 ```
 
-`wait` 和 step 类动作会尽量返回当前 `status`、`position` 和轻量 `frame` 摘要。
+`wait` 和 step 类动作默认只返回 `status`、`position` 和事件尾部。需要变量时传
+`includeFrame: true`，变量体积由 `expand`、`depth`、`limit` 和 `maxString` 控制。
+
+### `bp_debug_status`
+
+默认 status 是紧凑 agent 视图：当前项目 live sessions 和简短 IDE bridge 状态。
+它不返回 hub 诊断、语言能力明细、已结束 sessions 或完整 IDE client 记录。
 
 ### `bp_debug_threads` / `bp_debug_call_stack`
 
@@ -155,7 +163,8 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
   "label": "analysis = NameAnalysis(...)",
   "type": "HelloController$NameAnalysis",
   "kind": "object",
-  "value": { "summary": "NameAnalysis[...]", "raw": null },
+  "summary": "NameAnalysis[...]",
+  "path": ["analysis"],
   "ref": 7072,
   "expandable": true,
   "truncated": false,
