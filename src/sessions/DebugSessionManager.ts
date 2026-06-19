@@ -308,7 +308,8 @@ export class DebugSessionManager {
       filePath: normalized.filePath,
       line: normalized.line
     });
-    if (!normalized.filePath || !normalized.line) {
+    const line = normalized.line;
+    if (!normalized.filePath || !Number.isInteger(line) || line === undefined || line < 1) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_run_to_line requires filePath and line.", {});
     }
     return {
@@ -318,7 +319,7 @@ export class DebugSessionManager {
         details: {
           phase: "contract",
           filePath: normalized.filePath,
-          line: normalized.line
+          line
         }
       }
     };
@@ -335,15 +336,15 @@ export class DebugSessionManager {
     }
     const offset = args.offset ?? 0;
     const limit = args.limit ?? 50;
-    const threads = await session.provider.listThreads({ offset, limit });
+    const threads = await session.provider.listThreads();
     const limited = threads.slice(offset, offset + limit).map((thread) => this.#threadView(thread));
-    return ok(session.sessionId, { threads: limited, totalCount: threads.length }, auditId);
+    return ok(session.sessionId, { threads: limited, offset, totalCount: threads.length }, auditId);
   }
 
   async bpDebugCallStack(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const session = this.#resolveSession(args);
     const auditId = this.audit.record("bp_debug_call_stack_requested", { sessionId: session.sessionId });
-    const stack = await this.#callStack(session, args.threadId, args.limit ?? 20);
+    const stack = await this.#callStack(session, args.threadId, args.limit ?? 20, args.offset ?? 0);
     return ok(session.sessionId, stack, auditId);
   }
 
@@ -478,6 +479,24 @@ export class DebugSessionManager {
 
   async bpDebugSetBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
+    if (normalized.breakpointId) {
+      this.audit.record("bp_debug_set_breakpoint_update_requested", {
+        sessionId: normalized.sessionId,
+        breakpointId: normalized.breakpointId,
+        filePath: normalized.filePath,
+        line: normalized.line
+      });
+      return {
+        error: {
+          code: ErrorCodes.UNSUPPORTED_CAPABILITY,
+          message: "bp_debug_set_breakpoint update/relocate is registered, but not implemented in Phase 1.",
+          details: {
+            phase: "contract",
+            breakpointId: normalized.breakpointId
+          }
+        }
+      };
+    }
     const session = this.#resolveBreakpointSession(normalized);
     if (!session) return this.#setProjectBreakpoint(normalized);
     const auditId = this.audit.record("bp_debug_set_breakpoint_requested", { sessionId: session.sessionId });
@@ -496,6 +515,7 @@ export class DebugSessionManager {
       const file = this.security.assertWorkspacePath(normalized.filePath);
       breakpoints = breakpoints.filter((bp) => path.resolve(bp.file) === path.resolve(file));
     }
+    breakpoints = this.#filterBreakpointRecords(breakpoints, normalized);
     return ok(session.sessionId, { breakpoints: breakpoints.map((breakpoint) => this.#breakpointView(breakpoint)), totalCount: breakpoints.length }, auditId);
   }
 
@@ -895,9 +915,10 @@ export class DebugSessionManager {
       ide,
       file
     });
+    const filtered = this.#filterBreakpointRecords(breakpoints, args);
     return ok(null, {
-      breakpoints: breakpoints.map((breakpoint) => this.#projectBreakpointView(breakpoint)),
-      totalCount: breakpoints.length
+      breakpoints: filtered.map((breakpoint) => this.#projectBreakpointView(breakpoint)),
+      totalCount: filtered.length
     }, auditId);
   }
 
@@ -1102,18 +1123,21 @@ export class DebugSessionManager {
     };
   }
 
-  async #callStack(session: DebugSessionRecord, threadId?: ThreadId, limit = 20): Promise<AnyRecord> {
+  async #callStack(session: DebugSessionRecord, threadId?: ThreadId, limit = 20, offset = 0): Promise<AnyRecord> {
     if (!session.provider.getCallStack) {
       throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support call stack inspection.", {
         sessionId: session.sessionId,
         providerKind: session.providerKind
       });
     }
-    const stack = await session.provider.getCallStack(threadId ?? session.provider.threadId, limit);
-    const frames = (stack.stackFrames ?? []).map((frame: DapStackFrame, index: number) => this.#frameSummary(frame, index));
+    const stack = await session.provider.getCallStack(threadId ?? session.provider.threadId, offset + limit);
+    const frames = (stack.stackFrames ?? [])
+      .slice(offset, offset + limit)
+      .map((frame: DapStackFrame, index: number) => this.#frameSummary(frame, index + offset));
     return {
       threadId: stack.threadId ?? threadId ?? session.provider.threadId,
       frames,
+      offset,
       totalFrames: stack.totalFrames ?? frames.length,
       ...(stack.partial ? { partial: true } : {})
     };
@@ -1204,7 +1228,7 @@ export class DebugSessionManager {
     const frame = args.includeFrame
       ? await this.#frameView(session, {
           ...args,
-          threadId: this.#numberOrUndefined(stopped?.threadId ?? session.provider.threadId ?? args.threadId),
+          threadId: stopped?.threadId ?? session.provider.threadId ?? args.threadId,
           expand: args.expand ?? "preview",
           depth: args.depth ?? 1,
           limit: args.limit ?? 10
@@ -1234,6 +1258,17 @@ export class DebugSessionManager {
 
   #emptyEvents(): AnyRecord {
     return { breakpointErrors: [], tracepoints: [] };
+  }
+
+  #filterBreakpointRecords<TBreakpoint extends BreakpointRecord | ProjectBreakpointRecord>(
+    breakpoints: TBreakpoint[],
+    args: DebugToolArgs
+  ): TBreakpoint[] {
+    return breakpoints.filter((breakpoint) => {
+      if (args.owner && args.owner !== "all" && breakpoint.owner !== args.owner) return false;
+      if (args.includeDisabled === false && breakpoint.enabled === false) return false;
+      return true;
+    });
   }
 
   #numberOrUndefined(value: unknown): number | undefined {

@@ -57,13 +57,11 @@ export class DaemonControlGateway implements ControlGateway {
       return JSON.parse(text) as ToolResponse;
     } catch {
       return {
-        ok: false,
         error: {
           code: "DAEMON_PARSE_FAILED",
           message: text || `Daemon returned HTTP ${response.status}`,
           details: { status: response.status }
-        },
-        auditId: "daemon"
+        }
       };
     }
   }
@@ -90,7 +88,7 @@ export class DaemonControlGateway implements ControlGateway {
       body: JSON.stringify(payload)
     });
     const parsed = (await response.json()) as AnyRecord;
-    if (!response.ok || parsed.ok === false) {
+    if (!response.ok || parsed.error) {
       throw new Error(String((parsed.error as AnyRecord | undefined)?.message ?? `Client lease ${action} failed.`));
     }
     return parsed;

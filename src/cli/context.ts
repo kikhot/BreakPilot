@@ -55,9 +55,8 @@ export interface CreateContextOptions {
 export function daemonUnreachableError(
   controlUrl: string,
   cause: string
-): { ok: false; error: { message: string; cause: string } } {
+): { error: { message: string; cause: string } } {
   return {
-    ok: false,
     error: {
       message: `Cannot reach breakpilot hub at ${controlUrl}. Start it with: breakpilot serve`,
       cause
@@ -90,7 +89,7 @@ export function resolveControlUrl(
  * URL. `runTool`:
  * - calls the control plane via `postTool`,
  * - prints the JSON result through `output()`,
- * - sets `process.exitCode = 1` when the tool returns `ok: false` (R5.7),
+ * - sets `process.exitCode = 1` when the tool returns an `error` field,
  * - on transport failure, prints a daemon-unreachable hint JSON (including the
  *   start command and the original error cause) and sets exit code 1 (R5.8).
  */
@@ -101,7 +100,7 @@ export function createContext(options: CreateContextOptions): CommandContext {
     try {
       const result = await postTool(controlUrl, toolName, args);
       output(result, pretty);
-      if (result.ok === false) process.exitCode = 1;
+      if (result.error) process.exitCode = 1;
     } catch (error) {
       const typedError = error as Error;
       output(daemonUnreachableError(controlUrl, typedError.message), true);

@@ -19,7 +19,7 @@ export async function postTool(
   try {
     return JSON.parse(text) as ToolResponse;
   } catch {
-    return { ok: false, error: { code: "CLI_PARSE_FAILED", message: text, details: {} }, auditId: "cli" };
+    return { error: { code: "CLI_PARSE_FAILED", message: text } };
   }
 }
 

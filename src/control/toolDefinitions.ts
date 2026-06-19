@@ -139,7 +139,7 @@ export const toolDefinitions: ToolDefinition[] = [
         projectPath,
         sessionId,
         filePath: { type: "string" },
-        line: { type: "number" },
+        line: { type: "number", minimum: 1 },
         threadId,
         timeout,
         includeFrame: { type: "boolean", default: false },
@@ -304,7 +304,10 @@ export const toolDefinitions: ToolDefinition[] = [
         requireVerified: { type: "boolean", default: false },
         detail
       },
-      required: ["filePath", "line"]
+      anyOf: [
+        { required: ["filePath", "line"] },
+        { required: ["breakpointId"] }
+      ]
     },
     outputSchema: toolResponseOutputSchema
   },
