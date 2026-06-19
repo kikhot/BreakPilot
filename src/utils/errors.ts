@@ -27,6 +27,7 @@ export const ErrorCodes = Object.freeze({
   IDE_BRIDGE_DISCONNECTED: "IDE_BRIDGE_DISCONNECTED",
   POLICY_VIOLATION: "POLICY_VIOLATION",
   UNSUPPORTED_LANGUAGE: "UNSUPPORTED_LANGUAGE",
+  UNSUPPORTED_CAPABILITY: "UNSUPPORTED_CAPABILITY",
   INVALID_LANGUAGE_IDENTIFIER: "INVALID_LANGUAGE_IDENTIFIER",
   DUPLICATE_LANGUAGE: "DUPLICATE_LANGUAGE",
   INVALID_ARGUMENT: "INVALID_ARGUMENT",
@@ -50,37 +51,35 @@ export class BreakPilotError extends Error {
 export function toErrorPayload(error: unknown): {
   code: string;
   message: string;
-  details: AnyRecord;
+  details?: AnyRecord;
 } {
   if (error instanceof BreakPilotError) {
-    return {
+    const payload: { code: string; message: string; details?: AnyRecord } = {
       code: error.code,
-      message: error.message,
-      details: error.details
+      message: error.message
     };
+    if (Object.keys(error.details).length > 0) payload.details = error.details;
+    return payload;
   }
   return {
     code: ErrorCodes.TOOL_FAILED,
-    message: error instanceof Error ? error.message : String(error),
-    details: {}
+    message: error instanceof Error ? error.message : String(error)
   };
 }
 
 export function ok<TData extends AnyRecord>(
-  sessionId: string | null | undefined,
+  _sessionId: string | null | undefined,
   data: TData,
-  auditId: string,
+  _auditId: string,
   warnings: string[] = []
 ): ToolResponse<TData> {
-  const response: ToolResponse<TData> = { ok: true, data, warnings, auditId };
-  if (sessionId) response.sessionId = sessionId;
+  const response: ToolResponse<TData> = { ...data };
+  if (warnings.length > 0) response.warnings = warnings;
   return response;
 }
 
-export function fail(error: unknown, auditId: string): ToolResponse {
+export function fail(error: unknown, _auditId: string): ToolResponse {
   return {
-    ok: false,
-    error: toErrorPayload(error),
-    auditId
+    error: toErrorPayload(error)
   };
 }

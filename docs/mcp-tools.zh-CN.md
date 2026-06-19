@@ -3,8 +3,8 @@
 语言：[English](mcp-tools.md) | 中文
 
 BreakPilot 通过 `breakpilot-debugger` MCP server 暴露 Agent Runtime Debugger。
-新的公开 agent-facing 工具统一使用 `bp_debug_` 前缀。旧的 DAP 风格工具名
-在迁移期可作为内部兼容 handler 保留，但不再通过 `tools/list` 暴露。
+公开 agent-facing 工具统一使用 `bp_debug_` 前缀。旧的 DAP 风格工具名已从
+MCP 路由中删除。
 
 启动 MCP：
 
@@ -28,9 +28,10 @@ stdio adapter 接收按行分隔的 JSON-RPC：
 | `ping` | 健康检查。 |
 
 工具结果的结构化数据只通过 `structuredContent` 暴露。`content` 文本只是简短
-人类可读状态，不作为数据通道。成功响应使用统一 control-plane envelope：
-`{ "ok": true, "sessionId": "...", "data": {}, "warnings": [] }`。
-失败响应使用 `{ "ok": false, "error": { "code": "...", "message": "...", "details": {} } }`。
+人类可读状态，不作为数据通道。成功响应直接返回工具的业务字段，不再包
+`ok`、`data`、`auditId` 或空 `warnings`。失败响应返回
+`{ "error": { "code": "...", "message": "...", "details": {} } }`。
+`warnings` 仅在存在非致命告警时出现。
 
 ## 通用参数
 
@@ -85,8 +86,9 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 | 工具 | 用途 |
 |---|---|
 | `bp_debug_start` | 启动、附加或采纳调试会话。 |
-| `bp_debug_status` | 查看 active session、live sessions、简短 IDE 状态和简短 capabilities。 |
+| `bp_debug_status` | 查看 active session、live sessions 和简短 IDE 状态。 |
 | `bp_debug_control` | pause、resume、wait、step、disconnect、stop、drainEvents。 |
+| `bp_debug_run_to_line` | 运行到指定源码行。 |
 | `bp_debug_threads` | 查看线程列表。 |
 | `bp_debug_call_stack` | 查看指定线程调用链。 |
 | `bp_debug_frame` | 查看指定栈帧变量。 |
@@ -127,23 +129,37 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 }
 ```
 
-`wait` 和 step 类动作默认只返回 `status`、`position` 和事件尾部。需要变量时传
+`wait` 和 step 类动作默认只返回 `status`、`reason` 和 `position`。需要变量时传
 `includeFrame: true`，变量体积由 `expand`、`depth`、`limit` 和 `maxString` 控制。
+
+### `bp_debug_run_to_line`
+
+将当前调试会话运行到指定源码行。
+
+```json
+{
+  "filePath": "src/App.java",
+  "line": 42,
+  "timeout": 30000,
+  "includeFrame": true
+}
+```
+
+Phase 1 只公开契约。真正运行能力会在后续阶段通过 IDE bridge 原生命令或临时断点 fallback 实现。
 
 ### `bp_debug_status`
 
 默认 status 是紧凑 agent 视图：当前项目 live sessions 和简短 IDE bridge 状态。
-它不返回 hub 诊断、语言能力明细、已结束 sessions 或完整 IDE client 记录。
+它不返回 hub 诊断、语言能力明细、已结束 sessions、capabilities 或完整 IDE client 记录。
 
 ### `bp_debug_threads` / `bp_debug_call_stack`
 
 `bp_debug_threads` 返回 provider 线程列表。`bp_debug_call_stack` 接收可选
-`threadId` 和 `limit`，返回 frame 的 `index`、`id`、`filePath`、`line`、
-`function`、`presentation`。
+`threadId` 和 `limit`，返回 frame 的 `index`、`id`、`filePath`、`line` 和 `function`。
 
 ### `bp_debug_frame`
 
-返回 frame 元数据、分组变量和可读 `presentation`。
+返回 frame 元数据和分组变量。
 
 ```json
 {
@@ -160,15 +176,10 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 ```json
 {
   "name": "analysis",
-  "label": "analysis = NameAnalysis(...)",
+  "value": "NameAnalysis(...)",
   "type": "HelloController$NameAnalysis",
-  "kind": "object",
-  "summary": "NameAnalysis[...]",
   "path": ["analysis"],
-  "ref": 7072,
-  "expandable": true,
-  "truncated": false,
-  "children": []
+  "ref": 7072
 }
 ```
 
@@ -195,7 +206,7 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 {"filePath":"src/App.java","line":42,"condition":"count > 3"}
 ```
 
-返回中包含 resolved breakpoint record；源文件可读时包含 `lineText`。
+返回中包含 `breakpointId`、`filePath`、`line`、`verified`；源文件可读时包含 `lineText`。
 
 删除断点可以按 id：
 

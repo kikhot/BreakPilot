@@ -4,8 +4,7 @@ Language: English | [中文](mcp-tools.zh-CN.md)
 
 BreakPilot exposes the Agent Runtime Debugger through the `breakpilot-debugger`
 MCP server. The public agent-facing tools use the `bp_debug_` prefix. Legacy
-DAP-shaped names are kept internally during migration but are no longer
-advertised by `tools/list`.
+DAP-shaped tool names have been removed from MCP routing.
 
 Start MCP with:
 
@@ -30,9 +29,10 @@ The stdio adapter accepts newline-delimited JSON-RPC:
 
 Tool results expose structured data through `structuredContent`. The `content`
 text is only a short human-readable status and is not a data channel.
-Successful control-plane responses use
-`{ "ok": true, "sessionId": "...", "data": {}, "warnings": [] }`; failures use
-`{ "ok": false, "error": { "code": "...", "message": "...", "details": {} } }`.
+Successful responses return the tool's business fields directly; BreakPilot no
+longer wraps them in `ok`, `data`, `auditId`, or empty `warnings`. Failures use
+`{ "error": { "code": "...", "message": "...", "details": {} } }`. `warnings`
+is present only when non-fatal warnings exist.
 
 ## Common Parameters
 
@@ -90,8 +90,9 @@ returns a structured capability error instead of silently falling back.
 | Tool | Purpose |
 |---|---|
 | `bp_debug_start` | Launch, attach, or adopt a debug session. |
-| `bp_debug_status` | Report active session, live sessions, compact IDE status, and compact capabilities. |
+| `bp_debug_status` | Report active session, live sessions, and compact IDE status. |
 | `bp_debug_control` | Pause, resume, wait, step, disconnect, stop, or drain events. |
+| `bp_debug_run_to_line` | Run the selected debug session to a source line. |
 | `bp_debug_threads` | List runtime threads. |
 | `bp_debug_call_stack` | Return the call stack for a thread. |
 | `bp_debug_frame` | Return structured variables for a frame. |
@@ -135,26 +136,42 @@ Arguments:
 }
 ```
 
-For `wait` and step actions, BreakPilot returns current `status`, `position`,
-and event tails by default. Pass `includeFrame: true` to include top-frame
+For `wait` and step actions, BreakPilot returns current `status`, `reason`,
+and `position` by default. Pass `includeFrame: true` to include top-frame
 variables, controlled by `expand`, `depth`, `limit`, and `maxString`.
+
+### `bp_debug_run_to_line`
+
+Runs the selected session to a source line.
+
+```json
+{
+  "filePath": "src/App.java",
+  "line": 42,
+  "timeout": 30000,
+  "includeFrame": true
+}
+```
+
+Phase 1 advertises the contract. Runtime support is implemented by later phases
+through native IDE bridge support or a temporary-breakpoint fallback.
 
 ### `bp_debug_status`
 
 Status is a compact agent view: active BreakPilot sessions for the current
-project, a short IDE bridge summary, and compact debugger capabilities. It does
+project and a short IDE bridge summary. It does
 not return hub diagnostics, language availability details, terminated sessions,
-or full IDE client records.
+capabilities, or full IDE client records.
 
 ### `bp_debug_threads` and `bp_debug_call_stack`
 
 `bp_debug_threads` returns the provider thread list. `bp_debug_call_stack`
 accepts optional `threadId` and `limit`, and returns frames with `index`, `id`,
-`filePath`, `line`, `function`, and `presentation`.
+`filePath`, `line`, and `function`.
 
 ### `bp_debug_frame`
 
-Returns frame metadata, grouped variables, and a readable `presentation`.
+Returns frame metadata and grouped variables.
 
 ```json
 {
@@ -172,15 +189,10 @@ overwrite each other:
 ```json
 {
   "name": "analysis",
-  "label": "analysis = NameAnalysis(...)",
+  "value": "NameAnalysis(...)",
   "type": "HelloController$NameAnalysis",
-  "kind": "object",
-  "summary": "NameAnalysis[...]",
   "path": ["analysis"],
-  "ref": 7072,
-  "expandable": true,
-  "truncated": false,
-  "children": []
+  "ref": 7072
 }
 ```
 
@@ -208,8 +220,8 @@ Set arguments:
 {"filePath":"src/App.java","line":42,"condition":"count > 3"}
 ```
 
-Set results include the resolved breakpoint record and `lineText` when the
-source file is readable.
+Set results include `breakpointId`, `filePath`, `line`, `verified`, and
+`lineText` when the source file is readable.
 
 Remove accepts either:
 

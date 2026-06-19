@@ -16,6 +16,7 @@ export class ToolRouter {
       ["bp_debug_start", (args: AnyRecord) => this.manager.bpDebugStart(args)],
       ["bp_debug_status", (args: AnyRecord) => this.manager.bpDebugStatus(args)],
       ["bp_debug_control", (args: AnyRecord) => this.manager.bpDebugControl(args)],
+      ["bp_debug_run_to_line", (args: AnyRecord) => this.manager.bpDebugRunToLine(args)],
       ["bp_debug_threads", (args: AnyRecord) => this.manager.bpDebugThreads(args)],
       ["bp_debug_call_stack", (args: AnyRecord) => this.manager.bpDebugCallStack(args)],
       ["bp_debug_frame", (args: AnyRecord) => this.manager.bpDebugFrame(args)],
@@ -25,27 +26,7 @@ export class ToolRouter {
       ["bp_debug_context", (args: AnyRecord) => this.manager.bpDebugContext(args)],
       ["bp_debug_set_breakpoint", (args: AnyRecord) => this.manager.bpDebugSetBreakpoint(args)],
       ["bp_debug_list_breakpoints", (args: AnyRecord) => this.manager.bpDebugListBreakpoints(args)],
-      ["bp_debug_remove_breakpoint", (args: AnyRecord) => this.manager.bpDebugRemoveBreakpoint(args)],
-      ["debug_launch", (args: AnyRecord) => this.manager.debugLaunch(args)],
-      ["debug_attach", (args: AnyRecord) => this.manager.debugAttach(args)],
-      ["set_breakpoint", (args: AnyRecord) => this.manager.setBreakpoint(args)],
-      ["wait_for_breakpoint", (args: AnyRecord) => this.manager.waitForBreakpoint(args)],
-      ["get_runtime_snapshot", (args: AnyRecord) => this.manager.getRuntimeSnapshot(args)],
-      ["inspect_variable", (args: AnyRecord) => this.manager.inspectVariable(args)],
-      ["evaluate", (args: AnyRecord) => this.manager.evaluate(args)],
-      ["continue_execution", (args: AnyRecord) => this.manager.continueExecution(args)],
-      ["remove_breakpoint", (args: AnyRecord) => this.manager.removeBreakpoint(args)],
-      ["list_sessions", () => this.manager.listSessions()],
-      ["list_supported_languages", () => this.manager.listSupportedLanguages()],
-      ["list_breakpoints", (args: AnyRecord) => this.manager.listBreakpoints(args)],
-      ["step_over", (args: AnyRecord) => this.manager.step(args, "over")],
-      ["step_into", (args: AnyRecord) => this.manager.step(args, "into")],
-      ["step_out", (args: AnyRecord) => this.manager.step(args, "out")],
-      ["disconnect", (args: AnyRecord) => this.manager.disconnect(args)],
-      ["ide_status", () => this.manager.ideStatus()],
-      ["list_ide_sessions", (args: AnyRecord) => this.manager.listIdeSessions(args)],
-      ["adopt_ide_session", (args: AnyRecord) => this.manager.adoptIdeSession(args)],
-      ["get_active_breakpoint_context", (args: AnyRecord) => this.manager.getActiveBreakpointContext(args)]
+      ["bp_debug_remove_breakpoint", (args: AnyRecord) => this.manager.bpDebugRemoveBreakpoint(args)]
     ]);
   }
 

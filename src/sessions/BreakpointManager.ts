@@ -1,13 +1,29 @@
 import path from "node:path";
 import type { DapBreakpoint } from "../types/dap.ts";
-import type { BreakpointInput, BreakpointRecord } from "../types/sessions.ts";
+import type { BreakpointInput, BreakpointRecord, ProjectBreakpointRecord } from "../types/sessions.ts";
 import { makeBreakpointId } from "../utils/ids.ts";
+
+export type ProjectBreakpointInput = BreakpointInput & {
+  workspaceRoot: string;
+  clientId: string;
+  ide: string;
+  ideSessionId?: string;
+};
+
+export type ProjectBreakpointFilter = {
+  workspaceRoot?: string;
+  clientId?: string;
+  ide?: string;
+  file?: string;
+};
 
 export class BreakpointManager {
   bySession: Map<string, Map<string, BreakpointRecord>>;
+  byProject: Map<string, Map<string, ProjectBreakpointRecord>>;
 
   constructor() {
     this.bySession = new Map();
+    this.byProject = new Map();
   }
 
   add(sessionId: string, breakpoint: BreakpointInput): BreakpointRecord {
@@ -21,6 +37,11 @@ export class BreakpointManager {
       condition: breakpoint.condition,
       hitCondition: breakpoint.hitCondition,
       logMessage: breakpoint.logMessage,
+      enabled: breakpoint.enabled ?? true,
+      temporary: breakpoint.temporary ?? false,
+      suspendPolicy: breakpoint.suspendPolicy,
+      isLogMessage: breakpoint.isLogMessage,
+      isLogStack: breakpoint.isLogStack,
       owner: breakpoint.owner ?? "agent",
       verified: false,
       adapterBreakpointId: undefined,
@@ -63,5 +84,85 @@ export class BreakpointManager {
 
   listForSource(sessionId: string, file: string): BreakpointRecord[] {
     return this.list(sessionId).filter((bp) => path.resolve(bp.file) === path.resolve(file));
+  }
+
+  addProject(breakpoint: ProjectBreakpointInput): ProjectBreakpointRecord {
+    const record: ProjectBreakpointRecord = {
+      id: breakpoint.id ?? makeBreakpointId(),
+      workspaceRoot: path.resolve(breakpoint.workspaceRoot),
+      clientId: breakpoint.clientId,
+      ide: breakpoint.ide,
+      ideSessionId: breakpoint.ideSessionId,
+      file: path.resolve(breakpoint.file),
+      line: Number(breakpoint.line),
+      column: breakpoint.column ? Number(breakpoint.column) : undefined,
+      condition: breakpoint.condition,
+      hitCondition: breakpoint.hitCondition,
+      logMessage: breakpoint.logMessage,
+      enabled: breakpoint.enabled ?? true,
+      temporary: breakpoint.temporary ?? false,
+      suspendPolicy: breakpoint.suspendPolicy,
+      isLogMessage: breakpoint.isLogMessage,
+      isLogStack: breakpoint.isLogStack,
+      owner: breakpoint.owner ?? "agent",
+      verified: false,
+      adapterBreakpointId: undefined,
+      createdAt: new Date().toISOString()
+    };
+    const key = this.#projectKey(record.workspaceRoot, record.clientId);
+    if (!this.byProject.has(key)) this.byProject.set(key, new Map());
+    const projectBreakpoints = this.byProject.get(key);
+    if (!projectBreakpoints) throw new Error(`Project breakpoint bucket was not initialized for ${key}`);
+    projectBreakpoints.set(record.id, record);
+    return record;
+  }
+
+  updateProject(
+    breakpointId: string,
+    patch: Partial<Pick<ProjectBreakpointRecord, "verified" | "message" | "adapterBreakpointId" | "ideBreakpointId" | "line" | "column">>
+  ): ProjectBreakpointRecord | undefined {
+    const breakpoint = this.findProject(breakpointId);
+    if (!breakpoint) return undefined;
+    Object.assign(breakpoint, patch);
+    return breakpoint;
+  }
+
+  findProject(breakpointId: string): ProjectBreakpointRecord | undefined {
+    for (const breakpoints of this.byProject.values()) {
+      const breakpoint = breakpoints.get(breakpointId);
+      if (breakpoint) return breakpoint;
+    }
+    return undefined;
+  }
+
+  removeProject(breakpointId: string): boolean {
+    for (const breakpoints of this.byProject.values()) {
+      if (breakpoints.delete(breakpointId)) return true;
+    }
+    return false;
+  }
+
+  clearProjectForClient(clientId: string): void {
+    for (const key of [...this.byProject.keys()]) {
+      if (key.endsWith(`\0${clientId}`)) this.byProject.delete(key);
+    }
+  }
+
+  listProject(filter: ProjectBreakpointFilter = {}): ProjectBreakpointRecord[] {
+    const workspaceRoot = filter.workspaceRoot ? path.resolve(filter.workspaceRoot) : undefined;
+    const file = filter.file ? path.resolve(filter.file) : undefined;
+    return [...this.byProject.values()]
+      .flatMap((breakpoints) => [...breakpoints.values()])
+      .filter((breakpoint) => {
+        if (workspaceRoot && path.resolve(breakpoint.workspaceRoot) !== workspaceRoot) return false;
+        if (filter.clientId && breakpoint.clientId !== filter.clientId) return false;
+        if (filter.ide && breakpoint.ide !== filter.ide) return false;
+        if (file && path.resolve(breakpoint.file) !== file) return false;
+        return true;
+      });
+  }
+
+  #projectKey(workspaceRoot: string, clientId: string): string {
+    return `${path.resolve(workspaceRoot)}\0${clientId}`;
   }
 }

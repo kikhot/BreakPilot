@@ -34,6 +34,7 @@ assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_fram
 assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_value"));
 assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_threads"));
 assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_call_stack"));
+assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_run_to_line"));
 assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_context"));
 assert.equal(runtime.router.listTools().some((tool) => tool.name === "debug_launch"), false);
 
@@ -51,10 +52,11 @@ assert.equal("includeLanguages" in statusTool!.inputSchema.properties, false);
 assert.equal("includeTerminated" in statusTool!.inputSchema.properties, false);
 
 const sessions = await runtime.router.callTool("bp_debug_status", {});
-assert.equal(sessions.ok, true);
-assert.deepEqual((sessions.data as AnyRecord).sessions, []);
-assert.equal("languages" in (sessions.data as AnyRecord), false);
-assert.equal("hub" in (sessions.data as AnyRecord), false);
+assert.equal("ok" in sessions, false);
+assert.equal("data" in sessions, false);
+assert.deepEqual(sessions.sessions, []);
+assert.equal("languages" in sessions, false);
+assert.equal("hub" in sessions, false);
 
 const registry = new IdeClientRegistry();
 registry.add({} as Socket, {
@@ -76,19 +78,19 @@ registry.upsertSession(
 assert.equal(registry.listSessions()[0]?.ideSessionId, "idea_test");
 assert.equal(registry.findSession("idea_test")?.state, "paused");
 
-const badEval = await runtime.router.callTool("evaluate", {
+const badEval = await runtime.router.callTool("bp_debug_eval", {
   sessionId: "missing",
   expression: "doSomething()",
   mode: "readonly"
 });
-assert.equal(badEval.ok, false);
+assert.ok(badEval.error);
 
-const blockedAttach = await runtime.router.callTool("debug_attach", {
-  lang: "python",
+const blockedAttach = await runtime.router.callTool("bp_debug_start", {
+  language: "python",
+  mode: "attach",
   host: "example.com",
   port: 5678
 });
-assert.equal(blockedAttach.ok, false);
 assert.equal(blockedAttach.error?.code, "DEBUG_PORT_NOT_ALLOWED");
 
 const fakeSession = {

@@ -10,17 +10,47 @@ const projectPath = {
   description: "Optional project/workspace path used to route the call in a multi-project hub."
 } as const;
 
+const clientId = {
+  type: "string",
+  description: "Optional IDE client id."
+} as const;
+
+const ide = {
+  type: "string",
+  enum: ["vscode", "idea"],
+  description: "Optional IDE type used to route project-level IDE breakpoint calls."
+} as const;
+
 const timeout = { type: "number", description: "Timeout in milliseconds." } as const;
+
+const threadId = {
+  oneOf: [{ type: "number" }, { type: "string" }],
+  description: "Optional runtime thread id. IDE providers may expose opaque string ids."
+} as const;
+
+const detail = {
+  type: "string",
+  enum: ["compact", "diagnostic"],
+  default: "compact",
+  description: "Response detail level. Default compact returns only agent-relevant fields."
+} as const;
+
+const owner = {
+  type: "string",
+  enum: ["agent", "user", "all"],
+  description: "Breakpoint owner filter. Defaults are tool-specific."
+} as const;
+
+const suspendPolicy = {
+  type: "string",
+  enum: ["ALL", "THREAD", "NONE"],
+  description: "Debugger suspend policy for breakpoint hits."
+} as const;
 
 const toolResponseOutputSchema = {
   type: "object",
-  additionalProperties: false,
+  additionalProperties: true,
   properties: {
-    ok: { type: "boolean" },
-    sessionId: { type: "string" },
-    data: { type: "object" },
-    warnings: { type: "array", items: { type: "string" } },
-    auditId: { type: "string" },
     error: {
       type: "object",
       properties: {
@@ -28,9 +58,13 @@ const toolResponseOutputSchema = {
         message: { type: "string" },
         details: { type: "object" }
       }
+    },
+    warnings: {
+      type: "array",
+      items: { type: "string" },
+      description: "Present only when non-fatal warnings exist."
     }
-  },
-  required: ["ok", "auditId"]
+  }
 } as const;
 
 export const toolDefinitions: ToolDefinition[] = [
@@ -53,7 +87,7 @@ export const toolDefinitions: ToolDefinition[] = [
         env: { type: "object" },
         host: { type: "string", default: "127.0.0.1" },
         port: { type: "number" },
-        clientId: { type: "string" },
+        clientId,
         ideSessionId: { type: "string" },
         adapterCommand: { type: "string" },
         adapterArgs: { type: "array", items: { type: "string" } },
@@ -82,10 +116,11 @@ export const toolDefinitions: ToolDefinition[] = [
           type: "string",
           enum: ["pause", "resume", "wait", "stepOver", "stepInto", "stepOut", "stop", "disconnect", "drainEvents"]
         },
-        threadId: { type: "number" },
+        threadId,
         timeout,
         terminateDebuggee: { type: "boolean", default: false },
         includeFrame: { type: "boolean", default: false },
+        detail,
         expand: { type: "string", enum: ["none", "preview", "shallow", "deep"], default: "preview" },
         depth: { type: "number", default: 1 },
         limit: { type: "number", default: 10 },
@@ -96,9 +131,37 @@ export const toolDefinitions: ToolDefinition[] = [
     outputSchema: toolResponseOutputSchema
   },
   {
+    name: "bp_debug_run_to_line",
+    description: "Run the selected debug session to a source line.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectPath,
+        sessionId,
+        filePath: { type: "string" },
+        line: { type: "number" },
+        threadId,
+        timeout,
+        includeFrame: { type: "boolean", default: false },
+        detail
+      },
+      required: ["filePath", "line"]
+    },
+    outputSchema: toolResponseOutputSchema
+  },
+  {
     name: "bp_debug_threads",
     description: "List runtime threads for a debug session.",
-    inputSchema: { type: "object", properties: { projectPath, sessionId, limit: { type: "number", default: 50 } } },
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectPath,
+        sessionId,
+        offset: { type: "number", default: 0 },
+        limit: { type: "number", default: 50 },
+        detail
+      }
+    },
     outputSchema: toolResponseOutputSchema
   },
   {
@@ -106,7 +169,14 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Return the call stack for the active or selected thread.",
     inputSchema: {
       type: "object",
-      properties: { projectPath, sessionId, threadId: { type: "number" }, limit: { type: "number", default: 20 } }
+      properties: {
+        projectPath,
+        sessionId,
+        threadId,
+        offset: { type: "number", default: 0 },
+        limit: { type: "number", default: 20 },
+        detail
+      }
     },
     outputSchema: toolResponseOutputSchema
   },
@@ -118,9 +188,10 @@ export const toolDefinitions: ToolDefinition[] = [
       properties: {
         projectPath,
         sessionId,
-        threadId: { type: "number" },
+        threadId,
         frameId: { type: "number" },
         frameIndex: { type: "number", default: 0 },
+        detail,
         expand: { type: "string", enum: ["none", "preview", "shallow", "deep"], default: "preview" },
         depth: { type: "number", default: 1 },
         limit: { type: "number", default: 20 },
@@ -137,7 +208,7 @@ export const toolDefinitions: ToolDefinition[] = [
       properties: {
         projectPath,
         sessionId,
-        threadId: { type: "number" },
+        threadId,
         frameId: { type: "number" },
         frameIndex: { type: "number", default: 0 },
         path: { type: "array", items: { type: "string" } },
@@ -147,6 +218,7 @@ export const toolDefinitions: ToolDefinition[] = [
         expand: { type: "string", enum: ["none", "preview", "shallow", "deep"], default: "deep" },
         depth: { type: "number", default: 1 },
         limit: { type: "number", default: 20 },
+        detail,
         maxString: { type: "number", default: 2000 }
       }
     },
@@ -162,7 +234,8 @@ export const toolDefinitions: ToolDefinition[] = [
         sessionId,
         frameIndex: { type: "number", default: 0 },
         path: { type: "array", items: { type: "string" } },
-        newValue: { type: "string" }
+        newValue: { type: "string" },
+        detail
       },
       required: ["path", "newValue"]
     },
@@ -178,10 +251,11 @@ export const toolDefinitions: ToolDefinition[] = [
         sessionId,
         expression: { type: "string" },
         mode: { type: "string", enum: ["readonly", "guarded", "unsafe"], default: "readonly" },
-        threadId: { type: "number" },
+        threadId,
         frameId: { type: "number" },
         frameIndex: { type: "number", default: 0 },
-        timeout
+        timeout,
+        detail
       },
       required: ["expression"]
     },
@@ -198,26 +272,37 @@ export const toolDefinitions: ToolDefinition[] = [
         timeout,
         expand: { type: "string", enum: ["none", "preview", "shallow", "deep"], default: "preview" },
         depth: { type: "number", default: 1 },
-        limit: { type: "number", default: 20 }
+        limit: { type: "number", default: 20 },
+        detail
       }
     },
     outputSchema: toolResponseOutputSchema
   },
   {
     name: "bp_debug_set_breakpoint",
-    description: "Set an agent-owned source breakpoint.",
+    description: "Set an agent-owned source breakpoint. Without sessionId, BreakPilot can route to a project-level IDE client.",
     inputSchema: {
       type: "object",
       properties: {
         projectPath,
         sessionId,
+        clientId,
+        ide,
+        breakpointId: { type: "string" },
         filePath: { type: "string" },
         line: { type: "number" },
         column: { type: "number" },
         condition: { type: "string" },
         hitCondition: { type: "string" },
         logMessage: { type: "string" },
-        requireVerified: { type: "boolean", default: false }
+        enabled: { type: "boolean", default: true },
+        temporary: { type: "boolean", default: false },
+        suspendPolicy,
+        isLogMessage: { type: "boolean", default: false },
+        isLogStack: { type: "boolean", default: false },
+        owner: { type: "string", enum: ["agent", "user"], default: "agent" },
+        requireVerified: { type: "boolean", default: false },
+        detail
       },
       required: ["filePath", "line"]
     },
@@ -225,21 +310,36 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "bp_debug_list_breakpoints",
-    description: "List breakpoints for a debug session.",
-    inputSchema: { type: "object", properties: { projectPath, sessionId, filePath: { type: "string" } } },
-    outputSchema: toolResponseOutputSchema
-  },
-  {
-    name: "bp_debug_remove_breakpoint",
-    description: "Remove a breakpoint by breakpointId or filePath + line.",
+    description: "List breakpoints for a debug session or project-level IDE client.",
     inputSchema: {
       type: "object",
       properties: {
         projectPath,
         sessionId,
+        clientId,
+        ide,
+        filePath: { type: "string" },
+        owner,
+        includeDisabled: { type: "boolean", default: true },
+        detail
+      }
+    },
+    outputSchema: toolResponseOutputSchema
+  },
+  {
+    name: "bp_debug_remove_breakpoint",
+    description: "Remove a breakpoint by breakpointId or filePath + line from a debug session or project-level IDE client.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectPath,
+        sessionId,
+        clientId,
+        ide,
         breakpointId: { type: "string" },
         filePath: { type: "string" },
-        line: { type: "number" }
+        line: { type: "number" },
+        owner
       }
     },
     outputSchema: toolResponseOutputSchema

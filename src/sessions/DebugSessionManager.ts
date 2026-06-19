@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { AdapterRegistry } from "../debug-adapters/AdapterRegistry.ts";
-import { CapabilityReporter } from "../control/CapabilityReporter.ts";
 import type { LanguageAdapter } from "../debug-adapters/LanguageAdapter.ts";
 import type { AdapterContext } from "../debug-adapters/types.ts";
 import { DapClient } from "../dap/DapClient.ts";
@@ -11,18 +10,22 @@ import { AuditLogger } from "../audit/AuditLogger.ts";
 import type { ToolResponse } from "../types/control.ts";
 import type { DebugLanguage, DebugMode, SessionOwnerValue } from "../types/debug.ts";
 import type { DapStackFrame, StoppedEvent } from "../types/dap.ts";
-import type { IdeClientInfo, IdeDebugSessionInfo } from "../types/ide.ts";
-import type { RuntimeSnapshot, VariableNode, VariableScopeView } from "../types/inspection.ts";
+import type { BridgeMessage, IdeClientInfo, IdeDebugSessionInfo } from "../types/ide.ts";
+import type { VariableNode, VariableScopeView } from "../types/inspection.ts";
 import type { AnyRecord } from "../types/json.ts";
 import type { BreakPilotPolicy, EvaluateMode } from "../types/policy.ts";
 import type {
+  BreakpointRecord,
   DebugSessionRecord,
-  SessionSummary
+  DetailLevel,
+  ProjectBreakpointRecord,
+  SessionSummary,
+  ThreadId
 } from "../types/sessions.ts";
 import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
 import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
 import { BreakPilotError, ErrorCodes, ok } from "../utils/errors.ts";
-import { makeSessionId } from "../utils/ids.ts";
+import { makeId, makeSessionId } from "../utils/ids.ts";
 import { resolveWorkspacePath } from "../utils/path.ts";
 import { BreakpointManager } from "./BreakpointManager.ts";
 import { LanguageResolver } from "./LanguageResolver.ts";
@@ -52,13 +55,22 @@ type DebugToolArgs = AnyRecord & {
   requireVerified?: boolean;
   expression?: string;
   frameId?: number;
-  threadId?: number;
+  threadId?: ThreadId;
   timeoutMs?: number;
   timeout?: number;
   terminateDebuggee?: boolean;
   restart?: boolean;
   includeFrame?: boolean;
+  offset?: number;
+  detail?: DetailLevel;
+  enabled?: boolean;
+  temporary?: boolean;
+  suspendPolicy?: "ALL" | "THREAD" | "NONE";
+  isLogMessage?: boolean;
+  isLogStack?: boolean;
+  includeDisabled?: boolean;
   clientId?: string;
+  ide?: string;
   ideSessionId?: string;
   env?: NodeJS.ProcessEnv | AnyRecord;
   maxDepth?: number;
@@ -87,6 +99,12 @@ interface CreateSessionInput {
   owner: SessionOwnerValue;
   adapterArgs?: AnyRecord;
 }
+
+type ProjectIdeTarget = {
+  workspaceRoot: string;
+  client: IdeClientInfo;
+  session?: IdeDebugSessionInfo;
+};
 
 export class DebugSessionManager {
   policy: BreakPilotPolicy;
@@ -123,19 +141,22 @@ export class DebugSessionManager {
     }
 
     if (normalized.mode === "ide" || normalized.ideSessionId) {
-      const response = await this.adoptIdeSession(normalized);
-      return ok(response.sessionId, { session: response.data, startMode: "ide" }, auditId, response.warnings);
+      const adopted = await this.#adoptIdeSession(normalized);
+      return ok(adopted.session.sessionId, {
+        ...this.#sessionSummary(adopted.session),
+        startMode: "ide"
+      }, auditId, adopted.warnings);
     }
 
     const mode = normalized.mode === "attach" || normalized.host || normalized.port ? "attach" : "launch";
-    const response = mode === "attach"
-      ? await this.debugAttach({ ...normalized, mode: "headless" })
-      : await this.debugLaunch({
+    const session = mode === "attach"
+      ? await this.#attachDapSession({ ...normalized, mode: "headless" })
+      : await this.#launchDapSession({
           ...normalized,
           mode: "headless",
           program: normalized.program ?? normalized.filePath
         });
-    return ok(response.sessionId, { session: response.data, startMode: mode }, auditId, response.warnings);
+    return ok(session.sessionId, { ...this.#sessionSummary(session), startMode: mode }, auditId);
   }
 
   async #startIdeDebug(args: DebugToolArgs, auditId: string): Promise<ToolResponse> {
@@ -176,14 +197,17 @@ export class DebugSessionManager {
       });
     }
     const ideSession = await started;
-    const response = await this.adoptIdeSession({
+    const adopted = await this.#adoptIdeSession({
       ...args,
       clientId: ideSession.clientId,
       ideSessionId: ideSession.ideSessionId,
       projectPath: workspaceRoot,
       mode: "ide"
     });
-    return ok(response.sessionId, { session: response.data, startMode: "ide", ideLaunch: ideSession }, auditId, response.warnings);
+    return ok(adopted.session.sessionId, {
+      ...this.#sessionSummary(adopted.session),
+      startMode: "ide"
+    }, auditId, adopted.warnings);
   }
 
   async bpDebugStatus(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -194,13 +218,8 @@ export class DebugSessionManager {
     const data: AnyRecord = {
       activeSessionId: active && sessions.some((session) => session.sessionId === active.sessionId) ? active.sessionId : null,
       sessions,
-      ide,
-      capabilities: {
-        ideBridge: Boolean(ide.enabled),
-        ideConnected: Boolean(ide.connected),
-        threads: Boolean((ide.capabilities as AnyRecord | undefined)?.threads),
-        stackTrace: Boolean((ide.capabilities as AnyRecord | undefined)?.stackTrace)
-      }
+      ideConnected: Boolean(ide.connected),
+      ideSessions: ide.sessions ?? []
     };
     return ok(null, data, auditId);
   }
@@ -220,9 +239,7 @@ export class DebugSessionManager {
       ) {
         return ok(normalized.sessionId, {
           status: "stopped",
-          sessionId: normalized.sessionId ?? null,
-          alreadyStopped: true,
-          events: this.#emptyEvents()
+          alreadyStopped: true
         }, auditId, ["Debug session was already absent."]);
       }
       throw error;
@@ -255,9 +272,9 @@ export class DebugSessionManager {
 
     if (action === "resume") {
       if (session.providerKind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, "resume");
-      const result = await session.provider.continue(normalized.threadId ?? session.provider.threadId);
+      await session.provider.continue(normalized.threadId ?? session.provider.threadId);
       session.state = SessionState.RUNNING;
-      return ok(session.sessionId, { status: "running", sessionId: session.sessionId, result, events: this.#emptyEvents() }, auditId);
+      return ok(session.sessionId, { status: "running" }, auditId);
     }
 
     if (action === "stepOver" || action === "stepInto" || action === "stepOut") {
@@ -270,18 +287,41 @@ export class DebugSessionManager {
     }
 
     if (action === "disconnect" || action === "stop") {
-      const result = await this.#cleanupSession(session, {
+      await this.#cleanupSession(session, {
         reason: action,
         terminateDebuggee: action === "stop" || Boolean(normalized.terminateDebuggee)
       });
-      return ok(session.sessionId, { status: "stopped", sessionId: session.sessionId, result, events: this.#emptyEvents() }, auditId);
+      return ok(session.sessionId, { status: "stopped" }, auditId);
     }
 
     if (action === "drainEvents") {
-      return ok(session.sessionId, { status: session.state, sessionId: session.sessionId, events: this.#emptyEvents() }, auditId);
+      return ok(session.sessionId, { status: session.state, events: this.#emptyEvents() }, auditId);
     }
 
     throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, `Unsupported debug control action: ${String(action)}`, { action });
+  }
+
+  async bpDebugRunToLine(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    this.audit.record("bp_debug_run_to_line_requested", {
+      sessionId: normalized.sessionId,
+      filePath: normalized.filePath,
+      line: normalized.line
+    });
+    if (!normalized.filePath || !normalized.line) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_run_to_line requires filePath and line.", {});
+    }
+    return {
+      error: {
+        code: ErrorCodes.UNSUPPORTED_CAPABILITY,
+        message: "bp_debug_run_to_line contract is registered, but the runtime implementation is not available in Phase 1.",
+        details: {
+          phase: "contract",
+          filePath: normalized.filePath,
+          line: normalized.line
+        }
+      }
+    };
   }
 
   async bpDebugThreads(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -293,9 +333,11 @@ export class DebugSessionManager {
         providerKind: session.providerKind
       });
     }
-    const threads = await session.provider.listThreads();
-    const limited = threads.slice(0, args.limit ?? 50);
-    return ok(session.sessionId, { sessionId: session.sessionId, threads: limited, totalCount: threads.length }, auditId);
+    const offset = args.offset ?? 0;
+    const limit = args.limit ?? 50;
+    const threads = await session.provider.listThreads({ offset, limit });
+    const limited = threads.slice(offset, offset + limit).map((thread) => this.#threadView(thread));
+    return ok(session.sessionId, { threads: limited, totalCount: threads.length }, auditId);
   }
 
   async bpDebugCallStack(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -328,14 +370,12 @@ export class DebugSessionManager {
         const serializer = new VariableSerializer(session.dap, limits, { objectFields: normalized.expand ?? "deep" });
         const items = await serializer.serializeVariableNodes(variables);
         return ok(session.sessionId, {
-          sessionId: session.sessionId,
           ref: normalized.ref,
-          items,
-          presentation: this.#presentNodes(items)
+          items: items.map((item) => this.#compactNode(item))
         }, auditId);
       }
       const result = await session.provider.inspectVariable?.({ variablesReference: normalized.ref, ...normalized }, limits);
-      return ok(session.sessionId, { sessionId: session.sessionId, ref: normalized.ref, result }, auditId);
+      return ok(session.sessionId, { ref: normalized.ref, result }, auditId);
     }
 
     if (!normalized.path || normalized.path.length === 0) {
@@ -355,7 +395,7 @@ export class DebugSessionManager {
         path: normalized.path
       });
     }
-    return ok(session.sessionId, { sessionId: session.sessionId, path: normalized.path, value: found, presentation: found.label }, auditId);
+    return ok(session.sessionId, this.#compactNode(found), auditId);
   }
 
   async bpDebugSetValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -391,7 +431,7 @@ export class DebugSessionManager {
       parentRef: node.parentRef,
       name: node.name
     });
-    return ok(session.sessionId, { sessionId: session.sessionId, path: normalized.path, oldValue: node.raw ?? node.summary, result }, auditId);
+    return ok(session.sessionId, { path: normalized.path, oldValue: node.raw ?? node.summary, result }, auditId);
   }
 
   async bpDebugEval(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -403,7 +443,7 @@ export class DebugSessionManager {
     this.security.assertEvaluate(normalized.expression, mode, { ideConfirmationAvailable: session.providerKind === "ide" });
     let frameId = normalized.frameId;
     if (!frameId && normalized.frameIndex !== undefined && session.dap) {
-      const stack = await session.dap.stackTrace(normalized.threadId ?? session.dap.threadId, (normalized.frameIndex ?? 0) + 1);
+      const stack = await session.dap.stackTrace(this.#dapThreadId(normalized.threadId, session.dap.threadId), (normalized.frameIndex ?? 0) + 1);
       frameId = stack.stackFrames[normalized.frameIndex ?? 0]?.id;
     }
     const result = await session.provider.evaluate(normalized.expression, {
@@ -413,7 +453,7 @@ export class DebugSessionManager {
       context: normalized.context ?? "watch",
       timeoutMs: normalized.timeout ?? this.policy.evaluate.timeoutMs
     });
-    return ok(session.sessionId, { sessionId: session.sessionId, expression: normalized.expression, mode, result }, auditId);
+    return ok(session.sessionId, this.#evalView(normalized.expression, result), auditId);
   }
 
   async bpDebugContext(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -429,39 +469,40 @@ export class DebugSessionManager {
     const stack = await this.#callStack(session, normalized.threadId, normalized.limit ?? 20).catch(() => null);
     const frame = await this.#frameView(session, normalized).catch(() => null);
     return ok(session.sessionId, {
-      sessionId: session.sessionId,
       status: session.state,
-      stopped,
       position: frame?.frame ? this.#positionFromFrame(frame.frame) : null,
-      stack,
-      frame
+      frames: stack?.frames ?? [],
+      variables: frame?.variables ?? []
     }, auditId);
   }
 
   async bpDebugSetBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
-    const session = this.#resolveSession(normalized);
-    const response = await this.setBreakpoint({ ...normalized, sessionId: session.sessionId, file: normalized.filePath });
-    const breakpoint = (response.data as AnyRecord)?.breakpoint as AnyRecord | undefined;
-    const lineText = breakpoint?.file && breakpoint?.line ? this.#readLine(String(breakpoint.file), Number(breakpoint.line)) : undefined;
-    return ok(session.sessionId, { ...(response.data as AnyRecord), lineText }, response.auditId, response.warnings);
+    const session = this.#resolveBreakpointSession(normalized);
+    if (!session) return this.#setProjectBreakpoint(normalized);
+    const auditId = this.audit.record("bp_debug_set_breakpoint_requested", { sessionId: session.sessionId });
+    const response = await this.#setSessionBreakpoint(session, { ...normalized, file: normalized.filePath });
+    const lineText = response.filePath && response.line ? this.#readLine(String(response.filePath), Number(response.line)) : undefined;
+    return ok(session.sessionId, { ...response, lineText }, auditId);
   }
 
   async bpDebugListBreakpoints(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
-    const session = this.#resolveSession(normalized);
+    const session = this.#resolveBreakpointSession(normalized);
+    if (!session) return this.#listProjectBreakpoints(normalized);
     const auditId = this.audit.record("bp_debug_list_breakpoints_requested", { sessionId: session.sessionId });
     let breakpoints = this.breakpoints.list(session.sessionId);
     if (normalized.filePath) {
       const file = this.security.assertWorkspacePath(normalized.filePath);
       breakpoints = breakpoints.filter((bp) => path.resolve(bp.file) === path.resolve(file));
     }
-    return ok(session.sessionId, { sessionId: session.sessionId, breakpoints, totalCount: breakpoints.length }, auditId);
+    return ok(session.sessionId, { breakpoints: breakpoints.map((breakpoint) => this.#breakpointView(breakpoint)), totalCount: breakpoints.length }, auditId);
   }
 
   async bpDebugRemoveBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
-    const session = this.#resolveSession(normalized);
+    const session = this.#resolveBreakpointSession(normalized);
+    if (!session) return this.#removeProjectBreakpoint(normalized);
     const auditId = this.audit.record("bp_debug_remove_breakpoint_requested", { sessionId: session.sessionId });
     let breakpointId = normalized.breakpointId;
     if (!breakpointId && normalized.filePath && normalized.line) {
@@ -473,12 +514,12 @@ export class DebugSessionManager {
     if (!breakpointId) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Pass breakpointId or filePath + line to remove a breakpoint.", {});
     }
-    const response = await this.removeBreakpoint({ sessionId: session.sessionId, breakpointId });
-    return ok(session.sessionId, { ...(response.data as AnyRecord), breakpointId }, auditId, response.warnings);
+    const response = await this.#removeSessionBreakpoint(session, breakpointId);
+    return ok(session.sessionId, { ...response, breakpointId }, auditId);
   }
 
-  async debugLaunch(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    const auditId = this.audit.record("debug_launch_requested", { args: this.#safeArgs(args) });
+  async #launchDapSession(args: DebugToolArgs = {}): Promise<DebugSessionRecord> {
+    this.audit.record("bp_debug_launch_session_requested", { args: this.#safeArgs(args) });
     this.security.assertNotProduction(args);
     const { language, adapter } = this.languageResolver.resolve({
       lang: args.lang,
@@ -513,8 +554,8 @@ export class DebugSessionManager {
         })
       );
       session.state = SessionState.RUNNING;
-      this.audit.record("debug_launch_succeeded", { sessionId: session.sessionId, language });
-      return ok(session.sessionId, this.#sessionSummary(session), auditId);
+      this.audit.record("bp_debug_launch_session_succeeded", { sessionId: session.sessionId, language });
+      return session;
     } catch (error) {
       const typedError = error as Error & { details?: AnyRecord };
       session.state = SessionState.FAILED;
@@ -525,8 +566,8 @@ export class DebugSessionManager {
     }
   }
 
-  async debugAttach(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    const auditId = this.audit.record("debug_attach_requested", { args: this.#safeArgs(args) });
+  async #attachDapSession(args: DebugToolArgs = {}): Promise<DebugSessionRecord> {
+    this.audit.record("bp_debug_attach_session_requested", { args: this.#safeArgs(args) });
     const host = args.host ?? "127.0.0.1";
     const port = Number(args.port ?? (args.lang === "node" ? 9229 : 5678));
     this.security.assertHostPort(host, port, "attach");
@@ -593,8 +634,8 @@ export class DebugSessionManager {
         })
       );
       session.state = SessionState.RUNNING;
-      this.audit.record("debug_attach_succeeded", { sessionId: session.sessionId, language, host, port });
-      return ok(session.sessionId, this.#sessionSummary(session), auditId);
+      this.audit.record("bp_debug_attach_session_succeeded", { sessionId: session.sessionId, language, host, port });
+      return session;
     } catch (error) {
       const typedError = error as Error & { details?: AnyRecord };
       session.state = SessionState.FAILED;
@@ -605,16 +646,15 @@ export class DebugSessionManager {
     }
   }
 
-  async setBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    if (!args.sessionId || !args.file || !args.line) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId, file, and line are required.");
+  async #setSessionBreakpoint(session: DebugSessionRecord, args: DebugToolArgs = {}): Promise<AnyRecord> {
+    if (!args.file || !args.line) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "filePath and line are required.");
     }
-    const session = this.sessions.get(args.sessionId);
     if (session.providerKind !== "ide") {
       this.coordinator.assertCanControl(session, SessionOwner.MCP, "set breakpoint");
     }
     const file = this.security.assertWorkspacePath(args.file);
-    const auditId = this.audit.record("set_breakpoint_requested", {
+    this.audit.record("bp_debug_session_set_breakpoint_requested", {
       sessionId: session.sessionId,
       file,
       line: args.line
@@ -626,6 +666,11 @@ export class DebugSessionManager {
       condition: args.condition,
       hitCondition: args.hitCondition,
       logMessage: args.logMessage,
+      enabled: args.enabled ?? true,
+      temporary: args.temporary ?? false,
+      suspendPolicy: args.suspendPolicy,
+      isLogMessage: args.isLogMessage,
+      isLogStack: args.isLogStack,
       owner: args.owner ?? "agent"
     });
     const sourceBreakpoints = this.breakpoints.listForSource(session.sessionId, file);
@@ -651,21 +696,23 @@ export class DebugSessionManager {
       );
     }
 
-    this.audit.record("set_breakpoint_finished", {
+    this.audit.record("bp_debug_session_set_breakpoint_finished", {
       sessionId: session.sessionId,
       breakpoint: selected
     });
-    return ok(session.sessionId, { breakpoint: selected, breakpoints: updated }, auditId);
+    return this.#breakpointView(selected);
   }
 
-  async removeBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    if (!args.sessionId || !args.breakpointId) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId and breakpointId are required.");
+  async #removeSessionBreakpoint(session: DebugSessionRecord, breakpointId: string): Promise<AnyRecord> {
+    if (!breakpointId) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "breakpointId is required.");
     }
-    const session = this.sessions.get(args.sessionId);
-    const auditId = this.audit.record("remove_breakpoint_requested", args);
-    const breakpoint = this.breakpoints.list(session.sessionId).find((bp) => bp.id === args.breakpointId);
-    const removed = this.breakpoints.remove(session.sessionId, args.breakpointId);
+    this.audit.record("bp_debug_session_remove_breakpoint_requested", {
+      sessionId: session.sessionId,
+      breakpointId
+    });
+    const breakpoint = this.breakpoints.list(session.sessionId).find((bp) => bp.id === breakpointId);
+    const removed = this.breakpoints.remove(session.sessionId, breakpointId);
     if (breakpoint) {
       const remaining = this.breakpoints.listForSource(session.sessionId, breakpoint.file);
       if (session.provider.removeBreakpoint) {
@@ -677,161 +724,13 @@ export class DebugSessionManager {
         this.#broadcastToWorkspace(session.workspaceRoot, {
           type: "agent_remove_breakpoint",
           sessionId: session.sessionId,
-          breakpointId: args.breakpointId,
+          breakpointId,
           file: breakpoint.file,
           line: breakpoint.line
         });
       }
     }
-    return ok(session.sessionId, { removed }, auditId);
-  }
-
-  async waitForBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    if (!args.sessionId) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
-    }
-    const session = this.sessions.get(args.sessionId);
-    const auditId = this.audit.record("wait_for_breakpoint_requested", {
-      sessionId: session.sessionId,
-      timeoutMs: args.timeoutMs
-    });
-    const stopped = await session.provider.waitForBreakpoint(args.timeoutMs ?? 30000).catch(async (error) => {
-      if (error instanceof BreakPilotError && error.code === ErrorCodes.BREAKPOINT_TIMEOUT) {
-        const recovered = await this.#recoverBreakpointHit(session);
-        if (recovered) return recovered;
-      }
-      throw error;
-    });
-    session.state = SessionState.PAUSED;
-    if (session.providerKind === "dap") {
-      this.#broadcastToWorkspace(session.workspaceRoot, {
-        type: "ide_breakpoint_hit",
-        sessionId: session.sessionId,
-        stopped
-      });
-    }
-    return ok(session.sessionId, { stopped }, auditId);
-  }
-
-  async getRuntimeSnapshot(args: DebugToolArgs = {}): Promise<ToolResponse<RuntimeSnapshot>> {
-    if (!args.sessionId) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
-    }
-    const session = this.sessions.get(args.sessionId);
-    const auditId = this.audit.record("get_runtime_snapshot_requested", {
-      sessionId: session.sessionId,
-      limits: args.limits
-    });
-    const limits = this.security.variableLimits(args);
-    const snapshot = await session.provider.getRuntimeSnapshot(args, limits);
-    this.audit.record("get_runtime_snapshot_finished", {
-      sessionId: session.sessionId,
-      frameId: snapshot.frameId
-    });
-    return ok(session.sessionId, snapshot, auditId);
-  }
-
-  async inspectVariable(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    if (!args.sessionId || !args.variablesReference) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId and variablesReference are required.");
-    }
-    const session = this.sessions.get(args.sessionId);
-    const auditId = this.audit.record("inspect_variable_requested", {
-      sessionId: session.sessionId,
-      variablesReference: args.variablesReference,
-      start: args.start,
-      count: args.count
-    });
-    const limits = this.security.variableLimits({
-      ...args,
-      maxItems: args.count ?? args.maxItems
-    });
-    if (!session.provider.inspectVariable) {
-      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support variable inspection.", {
-        sessionId: session.sessionId,
-        providerKind: session.providerKind
-      });
-    }
-    const result = await session.provider.inspectVariable(args, limits);
-    return ok(session.sessionId, result, auditId);
-  }
-
-  async evaluate(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    if (!args.sessionId || !args.expression) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId and expression are required.");
-    }
-    const session = this.sessions.get(args.sessionId);
-    const mode = args.mode ?? this.policy.evaluate.defaultMode ?? "readonly";
-    const auditId = this.audit.record("evaluate_requested", {
-      sessionId: session.sessionId,
-      expression: args.expression,
-      mode
-    });
-    this.security.assertEvaluate(args.expression, mode, {
-      ideConfirmationAvailable: session.providerKind === "ide"
-    });
-    const result = await session.provider.evaluate(args.expression, {
-      mode,
-      frameId: args.frameId,
-      threadId: args.threadId,
-      context: args.context ?? "watch",
-      timeoutMs: args.timeoutMs ?? this.policy.evaluate.timeoutMs
-    });
-    return ok(session.sessionId, { result, mode }, auditId);
-  }
-
-  async continueExecution(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    if (!args.sessionId) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
-    }
-    const session = this.sessions.get(args.sessionId);
-    const auditId = this.audit.record("continue_requested", { sessionId: session.sessionId });
-    if (session.providerKind !== "ide") {
-      this.coordinator.assertCanControl(session, SessionOwner.MCP, "continue");
-    }
-    this.coordinator.beginExecution(session, "continue");
-    try {
-      const result = await session.provider.continue(args.threadId ?? session.provider.threadId);
-      session.state = SessionState.RUNNING;
-      return ok(session.sessionId, { result }, auditId);
-    } finally {
-      this.coordinator.endExecution(session);
-    }
-  }
-
-  async step(args: DebugToolArgs = {}, kind: "over" | "into" | "out" = "over"): Promise<ToolResponse> {
-    if (!args.sessionId) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
-    }
-    const session = this.sessions.get(args.sessionId);
-    const auditId = this.audit.record(`step_${kind}_requested`, { sessionId: session.sessionId });
-    if (session.providerKind !== "ide") {
-      this.coordinator.assertCanControl(session, SessionOwner.MCP, `step ${kind}`);
-    }
-    this.coordinator.beginExecution(session, `step:${kind}`);
-    try {
-      const threadId = args.threadId ?? session.provider.threadId;
-      const result = await session.provider.step(kind, threadId);
-      session.state = SessionState.RUNNING;
-      return ok(session.sessionId, { result }, auditId);
-    } finally {
-      this.coordinator.endExecution(session);
-    }
-  }
-
-  async disconnect(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    if (!args.sessionId) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
-    }
-    const session = this.sessions.get(args.sessionId);
-    const auditId = this.audit.record("disconnect_requested", { sessionId: session.sessionId });
-    const result = await this.#cleanupSession(session, {
-      reason: "disconnect",
-      terminateDebuggee: Boolean(args.terminateDebuggee),
-      restart: Boolean(args.restart)
-    });
-    const warnings = result.acknowledged === false ? [result.message ?? "Debug adapter did not acknowledge disconnect."] : [];
-    return ok(session.sessionId, { disconnected: true, result }, auditId, warnings);
+    return { removed };
   }
 
   async cleanupAll(reason = "shutdown"): Promise<void> {
@@ -839,25 +738,11 @@ export class DebugSessionManager {
     await Promise.allSettled(sessions.map((session) => this.#cleanupSession(session, { reason })));
   }
 
-  listIdeSessions(args: DebugToolArgs = {}): ToolResponse {
-    const auditId = this.audit.record("list_ide_sessions_requested", {
-      workspaceRoot: args.workspace
-    });
-    const workspaceRoot = args.workspace
-      ? resolveWorkspacePath(this.security.workspaceRoot(), args.workspace)
-      : undefined;
-    const sessions = this.ideBridge?.registry.listSessions({
-      clientId: args.clientId,
-      workspaceRoot
-    }) ?? [];
-    return ok(null, { sessions }, auditId);
-  }
-
-  async adoptIdeSession(args: DebugToolArgs = {}): Promise<ToolResponse> {
+  async #adoptIdeSession(args: DebugToolArgs = {}): Promise<{ session: DebugSessionRecord; warnings: string[] }> {
     if (!this.ideBridge) {
       throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.");
     }
-    const auditId = this.audit.record("adopt_ide_session_requested", {
+    this.audit.record("bp_debug_ide_adopt_requested", {
       clientId: args.clientId,
       ideSessionId: args.ideSessionId
     });
@@ -876,7 +761,7 @@ export class DebugSessionManager {
       (session) => session.ideSessionId === ideSession.ideSessionId && session.ideClientId === ideSession.clientId
     );
     if (existing) {
-      return ok(existing.sessionId, this.#sessionSummary(existing), auditId, ["IDE session was already adopted."]);
+      return { session: existing, warnings: ["IDE session was already adopted."] };
     }
 
     const sessionId = makeSessionId();
@@ -902,72 +787,162 @@ export class DebugSessionManager {
       ideSessionId: ideSession.ideSessionId
     };
     this.sessions.add(record);
-    this.audit.record("adopt_ide_session_succeeded", {
+    this.audit.record("bp_debug_ide_adopt_succeeded", {
       sessionId,
       clientId: ideSession.clientId,
       ideSessionId: ideSession.ideSessionId
     });
-    return ok(sessionId, this.#sessionSummary(record), auditId);
+    return { session: record, warnings: [] };
   }
 
-  async getActiveBreakpointContext(args: DebugToolArgs = {}): Promise<ToolResponse> {
-    const adopted = args.sessionId ? this.sessions.get(args.sessionId) : await this.#adoptActiveIdeSession(args);
-    const auditId = this.audit.record("get_active_breakpoint_context_requested", {
-      sessionId: adopted.sessionId,
-      ideSessionId: adopted.ideSessionId
-    });
-    const stopped = await adopted.provider.waitForBreakpoint(args.timeoutMs ?? 1000).catch(() => null);
-    const limits = this.security.variableLimits({
-      ...args,
-      maxDepth: args.maxDepth ?? 1,
-      maxItems: args.maxItems ?? 10
-    });
-    const snapshot = await adopted.provider.getRuntimeSnapshot(
-      {
-        ...args,
-        sessionId: adopted.sessionId,
-        profile: args.profile ?? "focused",
-        objectFields: args.objectFields ?? "preview"
-      },
-      limits
-    );
-    const topFrame = snapshot.stackFrames[args.frameIndex ?? 0] ?? snapshot.stackFrames[0] ?? null;
-    return ok(
-      adopted.sessionId,
-      {
-        stopped,
-        topFrame,
-        snapshot,
-        ideSessionId: adopted.ideSessionId,
-        providerKind: adopted.providerKind
-      },
-      auditId
-    );
-  }
-
-  listSessions(): ToolResponse {
-    const auditId = this.audit.record("list_sessions_requested");
-    return ok(null, { sessions: this.sessions.list() }, auditId);
-  }
-
-  async listSupportedLanguages(): Promise<ToolResponse> {
-    const auditId = this.audit.record("list_supported_languages_requested");
-    const reporter = new CapabilityReporter(this.adapters, this.audit);
-    const languages = await reporter.report();
-    return ok(null, { languages }, auditId);
-  }
-
-  listBreakpoints(args: DebugToolArgs = {}): ToolResponse {
-    if (!args.sessionId) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "sessionId is required.");
+  async #setProjectBreakpoint(args: DebugToolArgs): Promise<ToolResponse> {
+    if (!args.filePath || !args.line) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "filePath and line are required.");
     }
-    const auditId = this.audit.record("list_breakpoints_requested", args);
-    return ok(args.sessionId, { breakpoints: this.breakpoints.list(args.sessionId) }, auditId);
+    const workspaceRoot = this.#statusWorkspaceRoot(args);
+    const file = this.security.assertWorkspacePath(args.filePath);
+    const target = this.#selectProjectIdeTarget(args, workspaceRoot);
+    const auditId = this.audit.record("bp_debug_project_set_breakpoint_requested", {
+      workspaceRoot,
+      clientId: target.client.clientId,
+      ide: target.client.ide,
+      file,
+      line: args.line
+    });
+    const breakpoint = this.breakpoints.addProject({
+      workspaceRoot,
+      clientId: target.client.clientId,
+      ide: target.client.ide,
+      ideSessionId: target.session?.ideSessionId,
+      file,
+      line: args.line,
+      column: args.column,
+      condition: args.condition,
+      hitCondition: args.hitCondition,
+      logMessage: args.logMessage,
+      enabled: args.enabled ?? true,
+      temporary: args.temporary ?? false,
+      suspendPolicy: args.suspendPolicy,
+      isLogMessage: args.isLogMessage,
+      isLogStack: args.isLogStack,
+      owner: args.owner ?? "agent"
+    });
+    const requestId = makeId("ide_req");
+    try {
+      const response = await this.#sendIdeClientRequest(
+        target.client.clientId,
+        {
+          type: IdeMessageTypes.AGENT_SET_BREAKPOINT,
+          requestId,
+          workspaceRoot,
+          ideSessionId: target.session?.ideSessionId,
+          breakpoint
+        },
+        [IdeMessageTypes.IDE_BREAKPOINT_ADDED],
+        (message) => (
+          message.requestId === requestId ||
+          message.breakpointId === breakpoint.id ||
+          message.breakpoint?.id === breakpoint.id
+        )
+      );
+      if (this.#bridgeMessageError(response)) {
+        throw new BreakPilotError(
+          String(response.error?.code ?? ErrorCodes.BREAKPOINT_NOT_VERIFIED),
+          String(response.error?.message ?? "IDE failed to set breakpoint."),
+          { error: response.error, breakpoint }
+        );
+      }
+      const responseBreakpoint = response.breakpoint as AnyRecord | undefined;
+      const selected = this.breakpoints.updateProject(breakpoint.id, {
+        verified: responseBreakpoint?.verified === undefined ? true : Boolean(responseBreakpoint.verified),
+        adapterBreakpointId: responseBreakpoint?.adapterBreakpointId as number | string | undefined,
+        ideBreakpointId: typeof responseBreakpoint?.ideBreakpointId === "string" ? responseBreakpoint.ideBreakpointId : undefined,
+        message: response.error?.message ? String(response.error.message) : undefined,
+        line: typeof responseBreakpoint?.line === "number" ? responseBreakpoint.line : breakpoint.line,
+        column: typeof responseBreakpoint?.column === "number" ? responseBreakpoint.column : breakpoint.column
+      }) ?? breakpoint;
+      if (!selected.verified && args.requireVerified) {
+        throw new BreakPilotError(
+          ErrorCodes.BREAKPOINT_NOT_VERIFIED,
+          "Breakpoint was not verified by IDE.",
+          { breakpoint: selected }
+        );
+      }
+      const lineText = selected.file && selected.line ? this.#readLine(selected.file, selected.line) : undefined;
+      return ok(null, {
+        ...this.#projectBreakpointView(selected),
+        lineText
+      }, auditId);
+    } catch (error) {
+      this.breakpoints.removeProject(breakpoint.id);
+      throw error;
+    }
   }
 
-  ideStatus(): ToolResponse {
-    const auditId = this.audit.record("ide_status_requested");
-    return ok(null, this.ideBridge?.status() ?? { enabled: false, clients: [] }, auditId);
+  #listProjectBreakpoints(args: DebugToolArgs): ToolResponse {
+    const workspaceRoot = this.#statusWorkspaceRoot(args);
+    const ide = this.#normalizedIde(args.ide);
+    const file = args.filePath ? this.security.assertWorkspacePath(args.filePath) : undefined;
+    const auditId = this.audit.record("bp_debug_project_list_breakpoints_requested", {
+      workspaceRoot,
+      clientId: args.clientId,
+      ide,
+      file
+    });
+    const breakpoints = this.breakpoints.listProject({
+      workspaceRoot,
+      clientId: args.clientId,
+      ide,
+      file
+    });
+    return ok(null, {
+      breakpoints: breakpoints.map((breakpoint) => this.#projectBreakpointView(breakpoint)),
+      totalCount: breakpoints.length
+    }, auditId);
+  }
+
+  async #removeProjectBreakpoint(args: DebugToolArgs): Promise<ToolResponse> {
+    const workspaceRoot = this.#statusWorkspaceRoot(args);
+    const ide = this.#normalizedIde(args.ide);
+    const file = args.filePath ? this.security.assertWorkspacePath(args.filePath) : undefined;
+    const auditId = this.audit.record("bp_debug_project_remove_breakpoint_requested", {
+      workspaceRoot,
+      clientId: args.clientId,
+      ide,
+      breakpointId: args.breakpointId,
+      file,
+      line: args.line
+    });
+    const breakpoint = this.#findProjectBreakpointToRemove(args, workspaceRoot, ide, file);
+    if (!breakpoint) {
+      return ok(null, {
+        removed: false,
+        breakpointId: args.breakpointId
+      }, auditId);
+    }
+    this.breakpoints.removeProject(breakpoint.id);
+    const requestId = makeId("ide_req");
+    await this.#sendIdeClientRequest(
+      breakpoint.clientId,
+      {
+        type: IdeMessageTypes.AGENT_REMOVE_BREAKPOINT,
+        requestId,
+        workspaceRoot: breakpoint.workspaceRoot,
+        ideSessionId: breakpoint.ideSessionId,
+        breakpointId: breakpoint.id,
+        breakpoint
+      },
+      [IdeMessageTypes.IDE_BREAKPOINT_REMOVED],
+      (message) => (
+        message.requestId === requestId ||
+        message.breakpointId === breakpoint.id ||
+        message.breakpoint?.id === breakpoint.id
+      )
+    );
+    return ok(null, {
+      removed: true,
+      breakpointId: breakpoint.id
+    }, auditId);
   }
 
   #normalizeBpArgs(args: DebugToolArgs = {}): DebugToolArgs {
@@ -977,6 +952,7 @@ export class DebugSessionManager {
       workspace: args.workspace ?? args.projectPath,
       file: args.file ?? args.filePath,
       filePath: args.filePath ?? args.file,
+      timeout: args.timeout ?? args.timeoutMs,
       timeoutMs: args.timeoutMs ?? args.timeout,
       variablesReference: args.variablesReference ?? args.ref,
       ref: args.ref ?? args.variablesReference,
@@ -1030,6 +1006,60 @@ export class DebugSessionManager {
     return null;
   }
 
+  #resolveBreakpointSession(args: DebugToolArgs): DebugSessionRecord | null {
+    if (args.sessionId) return this.#resolveSession(args);
+    if (args.clientId || args.ide) return null;
+    try {
+      return this.#resolveSession(args);
+    } catch (error) {
+      if (
+        error instanceof BreakPilotError &&
+        (error.code === ErrorCodes.SESSION_NOT_FOUND || error.code === ErrorCodes.SESSION_AMBIGUOUS)
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  #findProjectBreakpointToRemove(
+    args: DebugToolArgs,
+    workspaceRoot: string,
+    ide: string | undefined,
+    file: string | undefined
+  ): ProjectBreakpointRecord | undefined {
+    if (!args.breakpointId && (!file || !args.line)) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Pass breakpointId or filePath + line to remove a breakpoint.", {});
+    }
+    const candidates = this.breakpoints.listProject({
+      workspaceRoot,
+      clientId: args.clientId,
+      ide,
+      file
+    });
+    if (args.breakpointId) {
+      return candidates.find((breakpoint) => breakpoint.id === args.breakpointId);
+    }
+    const matches = candidates.filter((breakpoint) => breakpoint.line === args.line);
+    if (matches.length > 1) {
+      throw new BreakPilotError(
+        ErrorCodes.PROJECT_AMBIGUOUS,
+        "Multiple project breakpoints match. Pass breakpointId, ide, or clientId to choose one.",
+        {
+          breakpoints: matches.map((breakpoint) => ({
+            breakpointId: breakpoint.id,
+            clientId: breakpoint.clientId,
+            ide: breakpoint.ide,
+            workspaceRoot: breakpoint.workspaceRoot,
+            file: breakpoint.file,
+            line: breakpoint.line
+          }))
+        }
+      );
+    }
+    return matches[0];
+  }
+
   #statusWorkspaceRoot(args: DebugToolArgs = {}): string {
     return args.projectPath || args.workspace
       ? resolveWorkspacePath(this.security.workspaceRoot(), String(args.projectPath ?? args.workspace))
@@ -1038,50 +1068,41 @@ export class DebugSessionManager {
 
   #sessionStatusList(args: DebugToolArgs = {}): SessionSummary[] {
     const workspaceRoot = this.#statusWorkspaceRoot(args);
-    return this.sessions.list().filter((session) => {
+    return [...this.sessions.sessions.values()].filter((session) => {
       if (path.resolve(session.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
       if (session.state === SessionState.TERMINATED || session.state === SessionState.FAILED) {
         return false;
       }
       return true;
-    });
+    }).map((session) => this.#sessionSummary(session));
   }
 
   #ideStatusView(args: DebugToolArgs = {}): AnyRecord {
     if (!this.ideBridge) return { enabled: false, connected: false, clients: 0, sessions: [] };
     const workspaceRoot = this.#statusWorkspaceRoot(args);
     const clients = this.ideBridge.registry.list().filter((client) => {
+      if (args.clientId && client.clientId !== args.clientId) return false;
       if (client.workspaceRoot && path.resolve(client.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
       return true;
     });
-    const sessions = this.ideBridge.registry.listSessions({ workspaceRoot }).filter((session) => {
+    const sessions = this.ideBridge.registry.listSessions({ clientId: args.clientId, workspaceRoot }).filter((session) => {
       return session.state !== SessionState.TERMINATED && session.state !== SessionState.FAILED;
     });
-    const capabilities = clients.reduce<AnyRecord>((merged, client) => {
-      for (const [key, value] of Object.entries(client.capabilities ?? {})) {
-        if (value === true || merged[key] === undefined) merged[key] = value;
-      }
-      return merged;
-    }, {});
     return {
       enabled: true,
       connected: clients.length > 0,
       clients: clients.length,
       sessions: sessions.map((session) => ({
         ideSessionId: session.ideSessionId,
-        clientId: session.clientId,
         name: session.name,
         state: session.state,
         active: Boolean(session.active),
-        threadId: session.threadId ?? null,
-        topFrame: session.topFrame,
-        capabilities: session.capabilities
-      })),
-      capabilities
+        position: this.#positionFromTopFrame(session.topFrame)
+      }))
     };
   }
 
-  async #callStack(session: DebugSessionRecord, threadId?: number, limit = 20): Promise<AnyRecord> {
+  async #callStack(session: DebugSessionRecord, threadId?: ThreadId, limit = 20): Promise<AnyRecord> {
     if (!session.provider.getCallStack) {
       throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support call stack inspection.", {
         sessionId: session.sessionId,
@@ -1091,27 +1112,19 @@ export class DebugSessionManager {
     const stack = await session.provider.getCallStack(threadId ?? session.provider.threadId, limit);
     const frames = (stack.stackFrames ?? []).map((frame: DapStackFrame, index: number) => this.#frameSummary(frame, index));
     return {
-      sessionId: session.sessionId,
       threadId: stack.threadId ?? threadId ?? session.provider.threadId,
       frames,
       totalFrames: stack.totalFrames ?? frames.length,
-      partial: Boolean(stack.partial),
-      capabilities: stack.capabilities
+      ...(stack.partial ? { partial: true } : {})
     };
   }
 
-  async #frameView(session: DebugSessionRecord, args: DebugToolArgs): Promise<{
-    sessionId: string;
-    threadId: number | null;
-    frame: AnyRecord | null;
-    variables: VariableScopeView[];
-    presentation: string;
-  }> {
+  async #frameView(session: DebugSessionRecord, args: DebugToolArgs, compact = true): Promise<AnyRecord> {
     const limits = this.#variableLimits(args);
     const expand = args.expand ?? args.objectFields ?? "preview";
 
     if (session.dap) {
-      const stack = await session.dap.stackTrace(args.threadId ?? session.dap.threadId, (args.frameIndex ?? 0) + 1);
+      const stack = await session.dap.stackTrace(this.#dapThreadId(args.threadId, session.dap.threadId), (args.frameIndex ?? 0) + 1);
       const frame = args.frameId
         ? stack.stackFrames.find((candidate) => candidate.id === args.frameId) ?? { id: args.frameId }
         : stack.stackFrames[args.frameIndex ?? 0];
@@ -1129,14 +1142,12 @@ export class DebugSessionManager {
           items: await serializer.serializeVariableNodes(dapVariables, 0, new Set<number>(), scope.variablesReference)
         });
       }
-      const presentation = variables.map((scope) => `${scope.scope}\n${this.#presentNodes(scope.items)}`).join("\n");
-      return {
-        sessionId: session.sessionId,
+      const view = {
         threadId: stack.threadId,
         frame: frame ? this.#frameSummary(frame, args.frameIndex ?? 0) : null,
-        variables,
-        presentation
+        variables
       };
+      return compact ? this.#compactFrameView(view) : view;
     }
 
     const snapshot = await session.provider.getRuntimeSnapshot({
@@ -1156,13 +1167,12 @@ export class DebugSessionManager {
       expensive: scope.expensive,
       items: this.#nodesFromSerializedMap(scope.variables)
     }));
-    return {
-      sessionId: session.sessionId,
+    const view = {
       threadId: snapshot.threadId,
       frame: frame ? this.#frameSummary(frame, frameIndex) : null,
-      variables,
-      presentation: variables.map((scope) => `${scope.scope}\n${this.#presentNodes(scope.items)}`).join("\n")
+      variables
     };
+    return compact ? this.#compactFrameView(view) : view;
   }
 
   #frameSummary(frame: DapStackFrame, index: number): AnyRecord {
@@ -1174,17 +1184,14 @@ export class DebugSessionManager {
       id: frame.id,
       filePath,
       line: frame.line ?? null,
-      column: frame.column ?? null,
-      function: fn,
-      presentation: `${fn}${frame.line ? `:${frame.line}` : ""}`
+      function: fn
     };
   }
 
   #positionFromFrame(frame: AnyRecord): AnyRecord {
     return {
       filePath: frame.filePath ?? null,
-      line: frame.line ?? null,
-      frameIndex: frame.index ?? 0
+      line: frame.line ?? null
     };
   }
 
@@ -1203,19 +1210,16 @@ export class DebugSessionManager {
           limit: args.limit ?? 10
         }).catch(() => null)
       : null;
-    return {
+    const view: AnyRecord = {
       status,
-      sessionId: session.sessionId,
-      stopped,
+      reason: stopped?.reason ?? null,
       position: frame?.frame ? this.#positionFromFrame(frame.frame) : this.#positionFromStopped(stopped),
-      frame: frame
-        ? {
-            summary: frame.frame?.presentation ?? null,
-            variables: frame.variables
-          }
-        : null,
-      events: this.#emptyEvents()
     };
+    if (frame?.frame) {
+      view.frame = frame.frame;
+      view.variables = frame.variables;
+    }
+    return view;
   }
 
   #positionFromStopped(stopped: AnyRecord | null): AnyRecord | null {
@@ -1224,8 +1228,7 @@ export class DebugSessionManager {
     const source = topFrame.source as AnyRecord | undefined;
     return {
       filePath: source?.path ?? topFrame.filePath ?? null,
-      line: topFrame.line ?? null,
-      frameIndex: 0
+      line: topFrame.line ?? null
     };
   }
 
@@ -1235,6 +1238,100 @@ export class DebugSessionManager {
 
   #numberOrUndefined(value: unknown): number | undefined {
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  }
+
+  #dapThreadId(threadId: ThreadId | null | undefined, fallback: number | null): number | null {
+    if (typeof threadId === "number" && Number.isFinite(threadId)) return threadId;
+    if (typeof threadId === "string") {
+      const parsed = Number(threadId);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return fallback;
+  }
+
+  #threadView(thread: AnyRecord): AnyRecord {
+    return {
+      id: thread.id,
+      name: thread.name,
+      state: thread.state,
+      isCurrent: Boolean(thread.isCurrent),
+      frameCount: thread.frameCount ?? 0,
+      ...(thread.partial ? { partial: true } : {})
+    };
+  }
+
+  #compactFrameView(view: { threadId: ThreadId | null; frame: AnyRecord | null; variables: AnyRecord[] }): AnyRecord {
+    return {
+      threadId: view.threadId,
+      frame: view.frame,
+      variables: view.variables.map((scope) => ({
+        scope: scope.scope,
+        ...(scope.category ? { category: scope.category } : {}),
+        items: Array.isArray(scope.items) ? scope.items.map((node: VariableNode) => this.#compactNode(node)) : []
+      }))
+    };
+  }
+
+  #compactNode(node: VariableNode): AnyRecord {
+    const compact: AnyRecord = {
+      name: node.name,
+      value: node.summary,
+      path: node.path
+    };
+    if (node.type) compact.type = node.type;
+    if (node.ref !== undefined) compact.ref = node.ref;
+    if (node.children?.length) compact.children = node.children.map((child) => this.#compactNode(child));
+    return compact;
+  }
+
+  #evalView(expression: string | undefined, result: AnyRecord): AnyRecord {
+    const value = result.value as AnyRecord | undefined;
+    if (!value) return { expression, result };
+    return {
+      expression,
+      value: value.valuePreview ?? value.value ?? result.valuePreview ?? result.value,
+      ...(value.type ? { type: value.type } : {})
+    };
+  }
+
+  #breakpointView(breakpoint: BreakpointRecord): AnyRecord {
+    return {
+      breakpointId: breakpoint.id,
+      filePath: breakpoint.file,
+      line: breakpoint.line,
+      verified: breakpoint.verified,
+      enabled: breakpoint.enabled ?? true,
+      temporary: breakpoint.temporary ?? false,
+      suspendPolicy: breakpoint.suspendPolicy,
+      isLogMessage: breakpoint.isLogMessage,
+      isLogStack: breakpoint.isLogStack,
+      ...(breakpoint.message ? { message: breakpoint.message } : {})
+    };
+  }
+
+  #projectBreakpointView(breakpoint: ProjectBreakpointRecord): AnyRecord {
+    return {
+      breakpointId: breakpoint.id,
+      filePath: breakpoint.file,
+      line: breakpoint.line,
+      verified: breakpoint.verified,
+      enabled: breakpoint.enabled ?? true,
+      temporary: breakpoint.temporary ?? false,
+      suspendPolicy: breakpoint.suspendPolicy,
+      isLogMessage: breakpoint.isLogMessage,
+      isLogStack: breakpoint.isLogStack,
+      ...(breakpoint.message ? { message: breakpoint.message } : {})
+    };
+  }
+
+  #positionFromTopFrame(topFrame: unknown): AnyRecord | null {
+    if (!topFrame || typeof topFrame !== "object") return null;
+    const frame = topFrame as AnyRecord;
+    const source = frame.source as AnyRecord | undefined;
+    const filePath = source?.path ?? frame.filePath ?? null;
+    const line = frame.line ?? null;
+    if (!filePath && !line) return null;
+    return { filePath, line };
   }
 
   #nodesFromSerializedMap(map: AnyRecord, parentPath: string[] = []): VariableNode[] {
@@ -1278,17 +1375,6 @@ export class DebugSessionManager {
     });
   }
 
-  #presentNodes(nodes: VariableNode[], indent = ""): string {
-    return nodes
-      .map((node) => {
-        const marker = node.expandable ? "+ " : "";
-        const line = `${indent}${marker}${node.label}`;
-        const children = node.children?.length ? `\n${this.#presentNodes(node.children, `${indent}  `)}` : "";
-        return `${line}${children}`;
-      })
-      .join("\n");
-  }
-
   #findNodeByPath(nodes: VariableNode[], pathTokens: string[]): VariableNode | null {
     let current: VariableNode | undefined;
     let level = nodes;
@@ -1305,8 +1391,8 @@ export class DebugSessionManager {
     args: DebugToolArgs,
     pathTokens: string[]
   ): Promise<VariableNode | null> {
-    const frame = await this.#frameView(session, { ...args, expand: args.expand ?? "preview" });
-    let level = frame.variables.flatMap((scope) => scope.items);
+    const frame = await this.#frameView(session, { ...args, expand: args.expand ?? "preview" }, false);
+    let level = (frame.variables as VariableScopeView[]).flatMap((scope: VariableScopeView) => scope.items);
     let current: VariableNode | undefined;
     for (let index = 0; index < pathTokens.length; index += 1) {
       const token = pathTokens[index];
@@ -1357,7 +1443,7 @@ export class DebugSessionManager {
     // added to the store. On validation/initialization failure this throws and
     // no partial session state is left behind (Requirements 1.7, 1.9). The
     // security gates (assertNotProduction / assertWorkspacePath / assertHostPort)
-    // have already run in debugLaunch/debugAttach before #createSession.
+    // have already run in the private launch/attach helpers before #createSession.
     await adapter.initialize(ctx);
     const transport = await adapter.createTransport(ctx);
     const client = new DapClient(transport);
@@ -1396,13 +1482,8 @@ export class DebugSessionManager {
       sessionId: session.sessionId,
       language: session.language,
       mode: session.mode,
-      owner: session.owner,
       state: session.state,
-      workspaceRoot: session.workspaceRoot,
-      providerKind: session.providerKind,
-      ideClientId: session.ideClientId,
-      ideSessionId: session.ideSessionId,
-      capabilities: session.provider.capabilities
+      ...(session.ideSessionId ? { ideSessionId: session.ideSessionId } : {})
     };
   }
 
@@ -1509,6 +1590,9 @@ export class DebugSessionManager {
       this.#updateAdoptedIdeSession(message.ideSessionId, message.clientId, SessionState.TERMINATED);
       void this.#cleanupAdoptedIdeSession(message.ideSessionId, message.clientId, "ide_session_terminated");
     });
+    this.ideBridge.on("disconnect", ({ clientId }: { clientId?: string }) => {
+      if (clientId) this.breakpoints.clearProjectForClient(clientId);
+    });
   }
 
   async #cleanupAdoptedIdeSession(
@@ -1576,6 +1660,141 @@ export class DebugSessionManager {
       });
     }
     return clients[0];
+  }
+
+  #selectProjectIdeTarget(args: DebugToolArgs, workspaceRoot: string): ProjectIdeTarget {
+    if (!this.ideBridge) {
+      throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.");
+    }
+    const ide = this.#normalizedIde(args.ide);
+    const resolvedWorkspaceRoot = path.resolve(workspaceRoot);
+    const clients = this.ideBridge.registry.list().filter((client) => {
+      if (args.clientId && client.clientId !== args.clientId) return false;
+      if (ide && client.ide !== ide) return false;
+      if (!client.workspaceRoot) return false;
+      if (path.resolve(client.workspaceRoot) !== resolvedWorkspaceRoot) return false;
+      return true;
+    });
+    if (clients.length === 0) {
+      throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "No matching IDE client is connected for this project.", {
+        workspaceRoot: resolvedWorkspaceRoot,
+        clientId: args.clientId,
+        ide
+      });
+    }
+
+    const clientIds = new Set(clients.map((client) => client.clientId));
+    const liveSessions = this.ideBridge.registry
+      .listSessions({ workspaceRoot: resolvedWorkspaceRoot })
+      .filter((session) => {
+        if (!clientIds.has(session.clientId)) return false;
+        if (session.state === SessionState.TERMINATED || session.state === SessionState.FAILED) return false;
+        return true;
+      });
+    const activeSessions = liveSessions.filter((session) => session.active === true);
+    if (activeSessions.length === 1) {
+      const activeSession = activeSessions[0]!;
+      const client = clients.find((candidate) => candidate.clientId === activeSession.clientId);
+      if (client) return { workspaceRoot: resolvedWorkspaceRoot, client, session: activeSession };
+    }
+
+    if (clients.length === 1) {
+      const client = clients[0]!;
+      return {
+        workspaceRoot: resolvedWorkspaceRoot,
+        client,
+        session: this.#selectProjectSessionForClient(liveSessions, client.clientId)
+      };
+    }
+
+    throw new BreakPilotError(
+      ErrorCodes.PROJECT_AMBIGUOUS,
+      "Multiple IDE clients match. Pass ide or clientId to choose one.",
+      {
+        workspaceRoot: resolvedWorkspaceRoot,
+        clientId: args.clientId,
+        ide,
+        clients: clients.map((client) => ({
+          clientId: client.clientId,
+          ide: client.ide,
+          workspaceRoot: client.workspaceRoot
+        })),
+        activeSessions: activeSessions.map((session) => ({
+          clientId: session.clientId,
+          ideSessionId: session.ideSessionId,
+          workspaceRoot: session.workspaceRoot,
+          state: session.state,
+          active: session.active
+        }))
+      }
+    );
+  }
+
+  #selectProjectSessionForClient(
+    sessions: IdeDebugSessionInfo[],
+    clientId: string
+  ): IdeDebugSessionInfo | undefined {
+    return (
+      sessions.find((session) => session.clientId === clientId && session.active === true) ??
+      sessions.find((session) => session.clientId === clientId)
+    );
+  }
+
+  #normalizedIde(ide: unknown): string | undefined {
+    if (ide === undefined || ide === null || ide === "") return undefined;
+    const normalized = String(ide).toLowerCase();
+    if (normalized !== "vscode" && normalized !== "idea") {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "ide must be either 'vscode' or 'idea'.", { ide });
+    }
+    return normalized;
+  }
+
+  #bridgeMessageError(message: BridgeMessage): boolean {
+    return Boolean(message.error && Object.keys(message.error).length > 0);
+  }
+
+  #sendIdeClientRequest(
+    clientId: string,
+    message: Partial<BridgeMessage>,
+    responseTypes: string[],
+    matches: (message: BridgeMessage) => boolean,
+    timeoutMs = 5000
+  ): Promise<BridgeMessage> {
+    if (!this.ideBridge) {
+      return Promise.reject(new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available."));
+    }
+    const bridge = this.ideBridge;
+    return new Promise((resolve, reject) => {
+      let timer: NodeJS.Timeout;
+      const listener = ({ clientId: eventClientId, message: response }: { clientId?: string; message: BridgeMessage }): void => {
+        const responseClientId = eventClientId ?? response.clientId;
+        if (responseClientId !== clientId) return;
+        if (!matches(response)) return;
+        cleanup();
+        resolve(response);
+      };
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        for (const type of responseTypes) bridge.off(type, listener);
+      };
+      for (const type of responseTypes) bridge.on(type, listener);
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new BreakPilotError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for IDE breakpoint acknowledgement.", {
+          clientId,
+          requestId: message.requestId,
+          timeoutMs
+        }));
+      }, timeoutMs);
+      const sent = bridge.sendToClient(clientId, message);
+      if (!sent) {
+        cleanup();
+        reject(new BreakPilotError(ErrorCodes.IDE_BRIDGE_DISCONNECTED, "IDE client is not connected.", {
+          clientId,
+          requestId: message.requestId
+        }));
+      }
+    });
   }
 
   #waitForIdeDebugStart({
@@ -1672,15 +1891,12 @@ export class DebugSessionManager {
       (session) => session.ideSessionId === ideSession.ideSessionId && session.ideClientId === ideSession.clientId
     );
     if (existing) return existing;
-    const response = await this.adoptIdeSession({
+    const adopted = await this.#adoptIdeSession({
       ...args,
       clientId: ideSession.clientId,
       ideSessionId: ideSession.ideSessionId
     });
-    if (!response.sessionId) {
-      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Failed to adopt IDE session.", { response });
-    }
-    return this.sessions.get(response.sessionId);
+    return adopted.session;
   }
 
   #safeArgs(args: DebugToolArgs): AnyRecord {

@@ -11,25 +11,62 @@ import type {
 import type { AnyRecord } from "./json.ts";
 import type { InspectVariableResult, RuntimeSnapshot, VariableLimits } from "./inspection.ts";
 
+export type ThreadId = number | string;
+
+export type DetailLevel = "compact" | "diagnostic";
+
+export interface RunToLineArgs {
+  filePath: string;
+  line: number;
+  threadId?: ThreadId | null;
+  timeoutMs?: number;
+}
+
+export interface RunToLineResult {
+  status: "paused" | "stopped" | "timeout";
+  position?: AnyRecord;
+  frame?: AnyRecord;
+  variables?: AnyRecord[];
+  temporaryBreakpointId?: string;
+  cleanedUp?: boolean;
+  message?: string;
+  warnings?: string[];
+}
+
+export interface BreakpointFilter {
+  filePath?: string;
+  owner?: "agent" | "user" | "all";
+  includeDisabled?: boolean;
+}
+
+export interface DebugEventBuffer {
+  breakpointErrors: AnyRecord[];
+  tracepoints: AnyRecord[];
+}
+
 export interface RuntimeDebugProvider {
   kind: RuntimeProviderKind;
   sessionId: string;
   language: DebugLanguage;
   workspaceRoot: string;
   capabilities: AnyRecord;
-  threadId: number | null;
+  threadId: ThreadId | null;
   setBreakpoints(filePath: string, breakpoints: BreakpointRecord[]): Promise<DapBreakpoint[]>;
   removeBreakpoint?(breakpoint: BreakpointRecord): Promise<AnyRecord>;
   waitForBreakpoint(timeoutMs?: number): Promise<StoppedEvent>;
-  listThreads?(): Promise<AnyRecord[]>;
-  getCallStack?(threadId?: number | null, limit?: number): Promise<AnyRecord>;
+  runToLine?(args: RunToLineArgs): Promise<RunToLineResult>;
+  listBreakpoints?(filter?: BreakpointFilter): Promise<BreakpointRecord[]>;
+  updateBreakpoint?(breakpoint: BreakpointRecord): Promise<BreakpointRecord>;
+  drainEvents?(): Promise<DebugEventBuffer>;
+  listThreads?(args?: { offset?: number; limit?: number }): Promise<AnyRecord[]>;
+  getCallStack?(threadId?: ThreadId | null, args?: number | { offset?: number; limit?: number }): Promise<AnyRecord>;
   getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot>;
   inspectVariable?(args: AnyRecord, limits: Required<VariableLimits>): Promise<InspectVariableResult | AnyRecord>;
   setVariable?(args: AnyRecord): Promise<AnyRecord>;
   evaluate(expression: string, options?: AnyRecord): Promise<AnyRecord>;
-  pause?(threadId?: number | null): Promise<AnyRecord>;
-  continue(threadId?: number | null): Promise<AnyRecord>;
-  step(kind: RuntimeStepKind, threadId?: number | null): Promise<AnyRecord>;
+  pause?(threadId?: ThreadId | null): Promise<AnyRecord>;
+  continue(threadId?: ThreadId | null): Promise<AnyRecord>;
+  step(kind: RuntimeStepKind, threadId?: ThreadId | null): Promise<AnyRecord>;
   disconnect(options?: { terminateDebuggee?: boolean; restart?: boolean }): Promise<AnyRecord>;
 }
 
@@ -38,17 +75,36 @@ export interface BreakpointInput {
   file: string;
   line: number;
   column?: number;
-  condition?: string;
-  hitCondition?: string;
-  logMessage?: string;
-  owner?: string;
+  condition?: string | null;
+  hitCondition?: string | null;
+  logMessage?: string | null;
+  enabled?: boolean;
+  temporary?: boolean;
+  suspendPolicy?: "ALL" | "THREAD" | "NONE";
+  isLogMessage?: boolean;
+  isLogStack?: boolean;
+  owner?: "agent" | "user" | string;
 }
 
 export interface BreakpointRecord extends BreakpointInput {
   id: string;
   sessionId: string;
   verified: boolean;
-  adapterBreakpointId?: number;
+  adapterBreakpointId?: number | string;
+  ideBreakpointId?: string;
+  message?: string;
+  createdAt: string;
+}
+
+export interface ProjectBreakpointRecord extends BreakpointInput {
+  id: string;
+  workspaceRoot: string;
+  clientId: string;
+  ide: string;
+  ideSessionId?: string;
+  verified: boolean;
+  adapterBreakpointId?: number | string;
+  ideBreakpointId?: string;
   message?: string;
   createdAt: string;
 }
@@ -57,14 +113,8 @@ export interface SessionSummary {
   sessionId: string;
   language: DebugLanguage;
   mode: DebugMode;
-  owner: SessionOwnerValue;
   state: SessionStateValue;
-  createdAt?: string;
-  workspaceRoot: string;
-  providerKind?: RuntimeProviderKind;
-  ideClientId?: string;
   ideSessionId?: string;
-  capabilities?: AnyRecord;
 }
 
 export interface DebugSessionRecord {
