@@ -5,14 +5,18 @@ import type { ToolRouter } from "../src/control/ToolRouter.ts";
 
 const router = {
   listTools: () => [{ name: "ping", description: "test", inputSchema: { type: "object", properties: {} } }],
-  callTool: async () => ({ ok: true, data: { pong: true }, warnings: [], auditId: "test" })
+  callTool: async (name: string) => (
+    name === "fail"
+      ? { error: { code: "TEST_ERROR", message: "tool failed" } }
+      : { pong: true }
+  )
 } as unknown as ToolRouter;
 
 let server;
 try {
   server = await startHttp(router, 0, "127.0.0.1", {
     controlToken: "secret",
-    status: () => ({ ok: true, server: "breakpilot", instanceId: "test" })
+    status: () => ({ server: "breakpilot", instanceId: "test" })
   });
 } catch (error) {
   if ((error as { code?: string }).code === "EPERM") {
@@ -37,6 +41,30 @@ try {
   });
   assert.equal(allowed.status, 200);
   assert.equal(((await allowed.json()) as { tools: unknown[] }).tools.length, 1);
+
+  const toolSuccess = await fetch(`${server.url}/tools/call`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer secret",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ name: "ping", arguments: {} })
+  });
+  assert.equal(toolSuccess.status, 200);
+  assert.deepEqual(await toolSuccess.json(), { pong: true });
+
+  const toolError = await fetch(`${server.url}/tools/call`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer secret",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ name: "fail", arguments: {} })
+  });
+  assert.equal(toolError.status, 400);
+  const toolErrorBody = await toolError.json() as { error?: { code?: string; message?: string } };
+  assert.equal(toolErrorBody.error?.code, "TEST_ERROR");
+  assert.equal(toolErrorBody.error?.message, "tool failed");
 } finally {
   await server.close();
 }

@@ -11,15 +11,16 @@ interface JsonRpcMessage {
 }
 
 function toolCallResult(result: AnyRecord): AnyRecord {
+  const isError = Boolean(result.error);
   return {
     content: [
       {
         type: "text",
-        text: result.ok === false ? String((result.error as AnyRecord | undefined)?.message ?? "error") : "ok"
+        text: isError ? String((result.error as AnyRecord | undefined)?.message ?? "error") : "ok"
       }
     ],
     structuredContent: result,
-    isError: result.ok === false
+    isError
   };
 }
 

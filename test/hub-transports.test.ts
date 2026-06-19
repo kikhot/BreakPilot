@@ -48,13 +48,49 @@ try {
   const callBody = await call.json() as {
     result?: {
       content?: { type: string; text: string }[];
-      structuredContent?: { ok?: boolean };
+      structuredContent?: { sessions?: unknown[] };
       isError?: boolean;
     };
   };
-  assert.equal(callBody.result?.structuredContent?.ok, true);
+  assert.deepEqual(callBody.result?.structuredContent?.sessions, []);
+  assert.equal("ok" in (callBody.result?.structuredContent ?? {}), false);
+  assert.equal("data" in (callBody.result?.structuredContent ?? {}), false);
   assert.equal(callBody.result?.content?.[0]?.text, "ok");
   assert.equal(callBody.result?.isError, false);
+
+  const httpErrorCall = await fetch(`${handle.url}/tools/call`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "bp_debug_run_to_line", arguments: { filePath: "src/Hello.java", line: 0 } })
+  });
+  assert.equal(httpErrorCall.status, 400);
+  const httpErrorBody = await httpErrorCall.json() as { error?: { message?: string } };
+  assert.match(httpErrorBody.error?.message ?? "", /requires filePath and line/);
+
+  const streamErrorCall = await fetch(`${handle.url}/stream`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-session-id": sessionId
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "bp_debug_run_to_line", arguments: { filePath: "src/Hello.java", line: 0 } }
+    })
+  });
+  assert.equal(streamErrorCall.status, 200);
+  const streamErrorBody = await streamErrorCall.json() as {
+    result?: {
+      content?: { type: string; text: string }[];
+      structuredContent?: { error?: { message?: string } };
+      isError?: boolean;
+    };
+  };
+  assert.equal(streamErrorBody.result?.isError, true);
+  assert.match(streamErrorBody.result?.content?.[0]?.text ?? "", /requires filePath and line/);
+  assert.match(streamErrorBody.result?.structuredContent?.error?.message ?? "", /requires filePath and line/);
 
   const sse = await fetch(`${handle.url}/sse`);
   assert.equal(sse.status, 200);
@@ -69,7 +105,6 @@ try {
   hub.projects.registerProject("/tmp/breakpilot-project-a");
   hub.projects.registerProject("/tmp/breakpilot-project-b");
   const ambiguous = await hub.callTool("bp_debug_context", {});
-  assert.equal(ambiguous.ok, false);
   assert.equal(ambiguous.error?.code, "PROJECT_AMBIGUOUS");
 } finally {
   await handle.close();

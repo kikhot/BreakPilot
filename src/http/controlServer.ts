@@ -52,73 +52,73 @@ export async function startHttp(
     try {
       if (req.method === "GET" && req.url === "/tools/list") {
         if (!isAuthorized(req, options.controlToken)) {
-          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          sendJson(res, 401, { error: { message: "Unauthorized" } });
           return;
         }
         sendJson(res, 200, { tools: router.listTools() });
         return;
       }
       if (req.method === "GET" && req.url === "/status") {
-        sendJson(res, 200, options.status ? await options.status() : { ok: true });
+        sendJson(res, 200, options.status ? await options.status() : {});
         return;
       }
       if (req.method === "POST" && req.url === "/tools/call") {
         if (!isAuthorized(req, options.controlToken)) {
-          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          sendJson(res, 401, { error: { message: "Unauthorized" } });
           return;
         }
         const body = await readRequestBody(req);
         const payload = JSON.parse(body || "{}");
         const result: ToolResponse = await router.callTool(payload.name, payload.arguments ?? {});
-        sendJson(res, result.ok ? 200 : 400, result);
+        sendJson(res, result.error ? 400 : 200, result);
         return;
       }
       if (req.method === "POST" && req.url === "/clients/acquire") {
         if (!isAuthorized(req, options.controlToken)) {
-          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          sendJson(res, 401, { error: { message: "Unauthorized" } });
           return;
         }
         const body = await readRequestBody(req);
         const payload = JSON.parse(body || "{}");
-        sendJson(res, 200, options.clients?.acquire(payload) ?? { ok: true, activeClients: 0 });
+        sendJson(res, 200, options.clients?.acquire(payload) ?? { activeClients: 0 });
         return;
       }
       if (req.method === "POST" && req.url === "/clients/heartbeat") {
         if (!isAuthorized(req, options.controlToken)) {
-          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          sendJson(res, 401, { error: { message: "Unauthorized" } });
           return;
         }
         const body = await readRequestBody(req);
         const payload = JSON.parse(body || "{}");
-        const result = options.clients?.heartbeat(payload) ?? { ok: true, activeClients: 0 };
-        sendJson(res, result.ok === false ? 404 : 200, result);
+        const result = options.clients?.heartbeat(payload) ?? { activeClients: 0 };
+        sendJson(res, result.error ? 404 : 200, result);
         return;
       }
       if (req.method === "POST" && req.url === "/clients/release") {
         if (!isAuthorized(req, options.controlToken)) {
-          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          sendJson(res, 401, { error: { message: "Unauthorized" } });
           return;
         }
         const body = await readRequestBody(req);
         const payload = JSON.parse(body || "{}");
-        sendJson(res, 200, options.clients?.release(payload) ?? { ok: true, activeClients: 0 });
+        sendJson(res, 200, options.clients?.release(payload) ?? { activeClients: 0 });
         return;
       }
       if (req.method === "POST" && req.url === "/shutdown") {
         if (!isAuthorized(req, options.controlToken)) {
-          sendJson(res, 401, { ok: false, error: { message: "Unauthorized" } });
+          sendJson(res, 401, { error: { message: "Unauthorized" } });
           return;
         }
-        sendJson(res, 200, { ok: true });
+        sendJson(res, 200, { shutdown: true });
         setImmediate(() => {
           void Promise.resolve(options.onShutdown?.()).finally(() => server.close());
         });
         return;
       }
-      sendJson(res, 404, { ok: false, error: { message: "Not found" } });
+      sendJson(res, 404, { error: { message: "Not found" } });
     } catch (error) {
       const typedError = error as Error;
-      sendJson(res, 500, { ok: false, error: { message: typedError.message } });
+      sendJson(res, 500, { error: { message: typedError.message } });
     }
   });
   const actualPort = await listen(server, Number(port), host);

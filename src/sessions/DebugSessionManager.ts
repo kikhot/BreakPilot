@@ -534,6 +534,10 @@ export class DebugSessionManager {
     if (!breakpointId) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Pass breakpointId or filePath + line to remove a breakpoint.", {});
     }
+    const breakpoint = this.breakpoints.list(session.sessionId).find((bp) => bp.id === breakpointId);
+    if (breakpoint && !this.#canRemoveBreakpointOwner(breakpoint, normalized.owner)) {
+      return ok(session.sessionId, this.#protectedBreakpointRemoveView(breakpoint), auditId);
+    }
     const response = await this.#removeSessionBreakpoint(session, breakpointId);
     return ok(session.sessionId, { ...response, breakpointId }, auditId);
   }
@@ -941,6 +945,9 @@ export class DebugSessionManager {
         breakpointId: args.breakpointId
       }, auditId);
     }
+    if (!this.#canRemoveBreakpointOwner(breakpoint, args.owner)) {
+      return ok(null, this.#protectedBreakpointRemoveView(breakpoint), auditId);
+    }
     this.breakpoints.removeProject(breakpoint.id);
     const requestId = makeId("ide_req");
     await this.#sendIdeClientRequest(
@@ -1269,6 +1276,24 @@ export class DebugSessionManager {
       if (args.includeDisabled === false && breakpoint.enabled === false) return false;
       return true;
     });
+  }
+
+  #canRemoveBreakpointOwner(
+    breakpoint: BreakpointRecord | ProjectBreakpointRecord,
+    owner: SessionOwnerValue | "agent" | "user" | "all" | undefined
+  ): boolean {
+    const requestedOwner = owner ?? "agent";
+    if (requestedOwner === "all") return true;
+    return breakpoint.owner === requestedOwner;
+  }
+
+  #protectedBreakpointRemoveView(breakpoint: BreakpointRecord | ProjectBreakpointRecord): AnyRecord {
+    return {
+      removed: false,
+      protected: true,
+      breakpointId: breakpoint.id,
+      message: `Breakpoint ${breakpoint.id} is owned by ${breakpoint.owner ?? "agent"} and was not removed. Pass owner:"all" to remove it.`
+    };
   }
 
   #numberOrUndefined(value: unknown): number | undefined {

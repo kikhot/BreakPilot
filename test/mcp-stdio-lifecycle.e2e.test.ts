@@ -19,10 +19,7 @@ function makeWorkspace(): { root: string; policyPath: string } {
       `  root: ${root}`,
       "  allowOutsideWorkspace: false",
       "ide:",
-      "  enabled: true",
-      "  bridge:",
-      "    host: 127.0.0.1",
-      "    port: 57987"
+      "  enabled: false"
     ].join("\n")
   );
   return { root, policyPath };
@@ -38,9 +35,10 @@ function spawnMcp(policyPath: string): ChildProcessWithoutNullStreams {
 function waitForLine(child: ChildProcessWithoutNullStreams, timeoutMs = 10000): Promise<string> {
   return new Promise((resolve, reject) => {
     let buffer = "";
+    let stderr = "";
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error("Timed out waiting for MCP stdout."));
+      reject(new Error(`Timed out waiting for MCP stdout.${stderr ? ` stderr: ${stderr}` : ""}`));
     }, timeoutMs);
     const onData = (chunk: Buffer): void => {
       buffer += chunk.toString();
@@ -50,11 +48,16 @@ function waitForLine(child: ChildProcessWithoutNullStreams, timeoutMs = 10000): 
       cleanup();
       resolve(line);
     };
+    const onStderr = (chunk: Buffer): void => {
+      stderr += chunk.toString();
+    };
     const cleanup = (): void => {
       clearTimeout(timer);
       child.stdout.off("data", onData);
+      child.stderr.off("data", onStderr);
     };
     child.stdout.on("data", onData);
+    child.stderr.on("data", onStderr);
   });
 }
 
@@ -93,13 +96,32 @@ try {
   const call = JSON.parse(await waitForLine(child)) as {
     result?: {
       content?: { type: string; text: string }[];
-      structuredContent?: { ok?: boolean };
+      structuredContent?: { sessions?: unknown[] };
       isError?: boolean;
     };
   };
-  assert.equal(call.result?.structuredContent?.ok, true);
+  assert.deepEqual(call.result?.structuredContent?.sessions, [], JSON.stringify(call));
+  assert.equal("ok" in (call.result?.structuredContent ?? {}), false);
+  assert.equal("data" in (call.result?.structuredContent ?? {}), false);
   assert.equal(call.result?.content?.[0]?.text, "ok");
   assert.equal(call.result?.isError, false);
+
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: { name: "bp_debug_run_to_line", arguments: { projectPath: root, filePath: "src/Hello.java", line: 0 } }
+  })}\n`);
+  const errorCall = JSON.parse(await waitForLine(child)) as {
+    result?: {
+      content?: { type: string; text: string }[];
+      structuredContent?: { error?: { message?: string } };
+      isError?: boolean;
+    };
+  };
+  assert.equal(errorCall.result?.isError, true);
+  assert.ok(errorCall.result?.structuredContent?.error?.message);
+  assert.equal(errorCall.result?.content?.[0]?.text, errorCall.result?.structuredContent?.error?.message);
 
   assert.equal(fs.existsSync(path.join(root, ".breakpilot", "bridge.json")), false);
 

@@ -24,10 +24,11 @@ interface JsonRpcMessage {
 }
 
 function toolCallResult(result: ToolResponse): AnyRecord {
+  const isError = Boolean(result.error);
   return {
-    content: [{ type: "text", text: result.ok === false ? result.error?.message ?? "error" : "ok" }],
+    content: [{ type: "text", text: isError ? result.error?.message ?? "error" : "ok" }],
     structuredContent: result,
-    isError: result.ok === false
+    isError
   };
 }
 
@@ -142,7 +143,6 @@ export class BreakPilotHub {
 
   status(): AnyRecord {
     return {
-      ok: true,
       server: "breakpilot-hub",
       host: this.host,
       port: this.port,
@@ -163,7 +163,7 @@ export class BreakPilotHub {
         return;
       }
       if (req.method === "POST" && pathname === "/shutdown") {
-        sendJson(res, 200, { ok: true });
+        sendJson(res, 200, { shutdown: true });
         setImmediate(() => {
           void this.close();
         });
@@ -176,7 +176,7 @@ export class BreakPilotHub {
       if (req.method === "POST" && pathname === "/tools/call") {
         const payload = JSON.parse((await readRequestBody(req)) || "{}") as AnyRecord;
         const result = await this.callTool(String(payload.name), (payload.arguments as AnyRecord | undefined) ?? {});
-        sendJson(res, result.ok ? 200 : 400, result);
+        sendJson(res, result.error ? 400 : 200, result);
         return;
       }
       if (pathname === "/stream") {
@@ -191,10 +191,10 @@ export class BreakPilotHub {
         await this.#handleLegacyMessage(req, res);
         return;
       }
-      sendJson(res, 404, { ok: false, error: { message: "Not found" } });
+      sendJson(res, 404, { error: { message: "Not found" } });
     } catch (error) {
       const typedError = error as Error;
-      sendJson(res, 500, { ok: false, error: { message: typedError.message } });
+      sendJson(res, 500, { error: { message: typedError.message } });
     }
   }
 
@@ -207,12 +207,12 @@ export class BreakPilotHub {
     }
     if (req.method === "DELETE") {
       this.mcpSessions.remove(sessionId);
-      sendJson(res, 200, { ok: true });
+      sendJson(res, 200, { closed: true });
       this.#scheduleIdleCheck();
       return;
     }
     if (req.method !== "POST") {
-      sendJson(res, 405, { ok: false, error: { message: "Method not allowed" } });
+      sendJson(res, 405, { error: { message: "Method not allowed" } });
       return;
     }
     const message = JSON.parse((await readRequestBody(req)) || "{}") as JsonRpcMessage;
@@ -247,7 +247,7 @@ export class BreakPilotHub {
     if (response && session.response && !session.response.destroyed) {
       writeSse(session.response, "message", JSON.stringify(response));
     }
-    sendJson(res, 202, { ok: true });
+    sendJson(res, 202, { accepted: true });
   }
 
   #openSseResponse(res: ServerResponse, session: McpSessionRecord): void {

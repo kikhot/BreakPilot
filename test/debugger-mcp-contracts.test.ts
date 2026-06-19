@@ -45,6 +45,12 @@ assert.deepEqual((tool("bp_debug_set_breakpoint").inputSchema as AnyRecord).anyO
   { required: ["filePath", "line"] },
   { required: ["breakpointId"] }
 ]);
+for (const nullableField of ["condition", "hitCondition", "logMessage"]) {
+  assert.deepEqual(properties("bp_debug_set_breakpoint")[nullableField].oneOf, [
+    { type: "string" },
+    { type: "null" }
+  ]);
+}
 
 assertHasProperties("bp_debug_set_breakpoint", [
   "breakpointId",
@@ -232,6 +238,46 @@ const allBreakpoints = await router.callTool("bp_debug_list_breakpoints", {
   includeDisabled: true
 });
 assert.equal((allBreakpoints.breakpoints as AnyRecord[]).length, 3);
+
+const protectedDefaultRemove = await router.callTool("bp_debug_remove_breakpoint", {
+  sessionId: "sess_contract",
+  breakpointId: "bp_user_enabled"
+});
+assert.deepEqual(
+  {
+    removed: protectedDefaultRemove.removed,
+    protected: protectedDefaultRemove.protected,
+    breakpointId: protectedDefaultRemove.breakpointId
+  },
+  { removed: false, protected: true, breakpointId: "bp_user_enabled" }
+);
+
+const protectedAgentRemove = await router.callTool("bp_debug_remove_breakpoint", {
+  sessionId: "sess_contract",
+  breakpointId: "bp_user_enabled",
+  owner: "agent"
+});
+assert.deepEqual(
+  {
+    removed: protectedAgentRemove.removed,
+    protected: protectedAgentRemove.protected,
+    breakpointId: protectedAgentRemove.breakpointId
+  },
+  { removed: false, protected: true, breakpointId: "bp_user_enabled" }
+);
+
+const allOwnerRemove = await router.callTool("bp_debug_remove_breakpoint", {
+  sessionId: "sess_contract",
+  breakpointId: "bp_user_enabled",
+  owner: "all"
+});
+assert.deepEqual(
+  {
+    removed: allOwnerRemove.removed,
+    breakpointId: allOwnerRemove.breakpointId
+  },
+  { removed: true, breakpointId: "bp_user_enabled" }
+);
 
 manager.breakpoints.addProject({
   id: "project_agent_enabled",
