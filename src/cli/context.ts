@@ -46,7 +46,7 @@ export interface CreateContextOptions {
 /**
  * Build the daemon-unreachable error JSON (R5.8).
  *
- * Returns the canonical `{ ok:false, error: { message, cause } }` shape used
+ * Returns the canonical `{ error: { message, cause } }` shape used
  * whenever a control-plane request fails at the transport level. The `message`
  * embeds the start-command hint and `cause` carries the original error message.
  * Shared by {@link createContext}'s `runTool` and the `daemon status` handler so
