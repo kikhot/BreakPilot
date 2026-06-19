@@ -8,15 +8,12 @@ export interface ToolDefinition {
 }
 
 export interface ToolResponse<TData = unknown> {
-  ok: boolean;
-  sessionId?: string;
-  data?: TData;
+  [key: string]: unknown;
   warnings?: string[];
-  auditId: string;
   error?: {
     code: string;
     message: string;
-    details: AnyRecord;
+    details?: AnyRecord;
   };
 }
 
