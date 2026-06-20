@@ -16,6 +16,9 @@ export class CommandExecutor {
       case MessageTypes.AgentContinue:
         await this.executeDebugCommand(message, "continue", "workbench.action.debug.continue");
         break;
+      case MessageTypes.AgentPause:
+        await this.executeDebugCommand(message, "pause", "workbench.action.debug.pause");
+        break;
       case MessageTypes.AgentStepOver:
         await this.executeDebugCommand(message, "step_over", "workbench.action.debug.stepOver");
         break;

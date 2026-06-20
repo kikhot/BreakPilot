@@ -83,6 +83,7 @@ export const MessageTypes = {
   AgentClearBreakpoints: "agent_clear_breakpoints",
   AgentRequestVariables: "agent_request_variables",
   AgentContinue: "agent_continue",
+  AgentPause: "agent_pause",
   AgentStepOver: "agent_step_over",
   AgentStepInto: "agent_step_into",
   AgentStepOut: "agent_step_out",

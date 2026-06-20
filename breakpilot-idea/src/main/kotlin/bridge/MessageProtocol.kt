@@ -77,6 +77,7 @@ object MessageTypes {
     const val AgentRequestVariables = "agent_request_variables"
     const val AgentStartDebug = "agent_start_debug"
     const val AgentContinue = "agent_continue"
+    const val AgentPause = "agent_pause"
     const val AgentStepOver = "agent_step_over"
     const val AgentStepInto = "agent_step_into"
     const val AgentStepOut = "agent_step_out"

@@ -48,6 +48,7 @@
 | `agent_remove_breakpoint` | MCP -> IDE | Agent 删除断点 |
 | `agent_request_variables` | MCP -> IDE | 请求 IDE 变量快照 |
 | `agent_continue` | MCP -> IDE | 请求 continue |
+| `agent_pause` | MCP -> IDE | 请求 pause |
 | `agent_step_over` | MCP -> IDE | 请求 step over |
 | `agent_step_into` | MCP -> IDE | 请求 step into |
 | `agent_step_out` | MCP -> IDE | 请求 step out |

@@ -30,6 +30,7 @@ class CommandExecutor(
         when (message.type) {
             MessageTypes.AgentStartDebug -> ApplicationManager.getApplication().invokeLater { startDebug(message) }
             MessageTypes.AgentContinue -> execute(message, "continue") { it.resume() }
+            MessageTypes.AgentPause -> execute(message, "pause") { it.pause() }
             MessageTypes.AgentStepOver -> execute(message, "step_over") { it.stepOver(false) }
             MessageTypes.AgentStepInto -> execute(message, "step_into") { it.stepInto() }
             MessageTypes.AgentStepOut -> execute(message, "step_out") { it.stepOut() }

@@ -127,7 +127,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         allThreadsStopped: true,
         ideSessionId: this.ideSessionId,
         requestId,
-        stopped: message.stopped
+        topFrame: message.topFrame ?? message.stopped?.topFrame
       });
     };
     this.bridge.on("message", listener);
@@ -267,17 +267,37 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         context: options.context ?? "watch"
       })
     );
-    return this.#command("evaluate", {
+    const timeoutMs = options.timeoutMs ?? 5000;
+    const deadline = Date.now() + timeoutMs;
+    let attempts = 0;
+    let lastResult: AnyRecord = {};
+    while (attempts < 3) {
+      attempts += 1;
+      const remaining = Math.max(250, deadline - Date.now());
+      lastResult = await this.#command("evaluate", {
+        expression,
+        frameId: options.frameId,
+        threadId: options.threadId,
+        timeoutMs: remaining
+      });
+      if (!this.#isPendingPresentation(lastResult)) return lastResult;
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(150, Math.max(0, deadline - Date.now()))));
+    }
+    throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "IDE evaluate returned only a pending placeholder before timeout.", {
       expression,
-      frameId: options.frameId,
-      threadId: options.threadId,
-      timeoutMs: options.timeoutMs
+      result: lastResult
     });
   }
 
   async continue(threadId: number | null = this.threadId): Promise<AnyRecord> {
     await this.#confirm(debugControlConfirmationRequest("continue", { threadId }));
     return this.#command("continue", { threadId }, IdeMessageTypes.AGENT_CONTINUE);
+  }
+
+  async pause(threadId: number | null = this.threadId): Promise<AnyRecord> {
+    await this.#confirm(debugControlConfirmationRequest("pause", { threadId }));
+    return this.#command("pause", { threadId }, IdeMessageTypes.AGENT_PAUSE);
   }
 
   async step(kind: RuntimeStepKind, threadId: number | null = this.threadId): Promise<AnyRecord> {
@@ -431,6 +451,14 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     return this.bridge.registry.findSession(this.ideSessionId, this.ideClientId);
   }
 
+  #isPendingPresentation(result: AnyRecord): boolean {
+    const value = result.value as AnyRecord | undefined;
+    const raw = value?.valuePreview ?? value?.value ?? result.valuePreview ?? result.value;
+    if (typeof raw !== "string") return false;
+    const normalized = raw.replace(/\u2026/g, "...").trim().toLowerCase();
+    return normalized === "collecting data..." || normalized === "collecting data";
+  }
+
   #stoppedFromSession(session: IdeDebugSessionInfo): StoppedEvent {
     return {
       sessionId: this.sessionId,
@@ -439,8 +467,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       description: session.stopped?.description ?? "IDE debug session is paused.",
       allThreadsStopped: true,
       ideSessionId: this.ideSessionId,
-      topFrame: session.topFrame,
-      stopped: session.stopped
+      topFrame: session.topFrame ?? (session.stopped as AnyRecord | undefined)?.topFrame
     };
   }
 }
