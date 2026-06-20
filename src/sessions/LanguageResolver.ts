@@ -12,8 +12,8 @@ export type ResolveRequestKind = "launch" | "attach";
 
 /**
  * Raw, untransformed inputs relevant to Language_Resolution, taken directly
- * from the `debug_launch` / `debug_attach` tool arguments. `lang` and
- * `language` are the two spellings the Debug_Session_Manager reads today;
+ * from the `bp_debug_start` tool arguments. `lang` and `language` are the two
+ * spellings the Debug_Session_Manager reads today;
  * `program` and `file` are the two source-path spellings from which a language
  * may be inferred. `request` distinguishes launch from attach so the
  * attach-without-source rule can be enforced.
@@ -115,8 +115,8 @@ export class FileExtensionMap {
 }
 
 /**
- * Resolves the target {@link Adapter_Contract} for a `debug_launch` /
- * `debug_attach` request using the Requirement 13 strategy ("option B"):
+ * Resolves the target {@link Adapter_Contract} for a `bp_debug_start` launch
+ * or attach request using the Requirement 13 strategy ("option B"):
  *
  * 1. An explicit `lang`/`language` resolves case-insensitively via the
  *    {@link AdapterRegistry} (Requirement 13.1); an unknown identifier surfaces

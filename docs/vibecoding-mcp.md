@@ -197,7 +197,6 @@ Recommended config when `breakpilot` is installed or linked:
       "autoApprove": [
         "bp_debug_status",
         "bp_debug_list_breakpoints",
-        "ide_status",
         "bp_debug_threads",
         "bp_debug_call_stack",
         "bp_debug_frame",
@@ -231,7 +230,6 @@ Source checkout fallback:
       "autoApprove": [
         "bp_debug_status",
         "bp_debug_list_breakpoints",
-        "ide_status",
         "bp_debug_threads",
         "bp_debug_call_stack",
         "bp_debug_frame",

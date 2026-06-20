@@ -88,7 +88,7 @@ export interface ValidationResult {
 }
 
 /**
- * Classification of a `debug_attach` target, returned by
+ * Classification of an attach target, returned by
  * {@link Adapter_Contract.classifyAttachTarget} (Requirements 4.2, 4.4, 4.8).
  *
  * The Debug_Session_Manager uses this to decide how (or whether) to connect:
@@ -223,24 +223,4 @@ export interface AdapterFactory {
   metadata: AdapterMetadata;
   /** Construct the adapter instance on demand. */
   create(): Adapter_Contract;
-}
-
-/**
- * One entry in the Capability_Reporter's `list_supported_languages` output
- * (Requirements 3.3, 3.4, 12.2).
- *
- * `availability` is produced by invoking the adapter's
- * {@link Adapter_Contract.validateEnvironment} as part of the query; an
- * unavailable language carries the validation errors describing the missing
- * toolchain.
- */
-export interface LanguageCapability {
-  /** Canonical language identifier. */
-  language: string;
-  /** Human-readable display name. */
-  displayName: string;
-  /** Whether the language supports attach mode. */
-  supportsAttach: boolean;
-  /** Live availability result from environment validation. */
-  availability: ValidationResult;
 }
