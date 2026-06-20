@@ -7,16 +7,20 @@ import bridge.MessageTypes
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Key
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.xdebugger.XDebuggerManager
 import com.intellij.xdebugger.breakpoints.XBreakpoint
 import com.intellij.xdebugger.breakpoints.XBreakpointProperties
+import com.intellij.xdebugger.breakpoints.XLineBreakpoint
 import com.intellij.xdebugger.breakpoints.XLineBreakpointType
 
 class BreakpointSync(
     private val project: Project,
     private val bridge: BridgeClient
 ) {
+    private val agentBreakpointIdKey = Key.create<String>("breakpilot.agent.breakpoint.id")
+
     private data class AgentBreakpointEntry(
         val breakpoint: XBreakpoint<*>,
         val sessionId: String?,
@@ -28,7 +32,7 @@ class BreakpointSync(
     fun handle(message: BridgeMessage) {
         when (message.type) {
             MessageTypes.AgentSetBreakpoint -> message.breakpoint?.let { addAgentBreakpoint(it, message.requestId, message) }
-            MessageTypes.AgentRemoveBreakpoint -> message.breakpointId?.let { removeAgentBreakpoint(it, message.requestId) }
+            MessageTypes.AgentRemoveBreakpoint -> message.breakpointId?.let { removeAgentBreakpoint(it, message) }
             MessageTypes.AgentClearBreakpoints, MessageTypes.BridgeDisconnected -> clearAgentBreakpoints(message.sessionId, message.workspaceRoot)
         }
     }
@@ -77,6 +81,7 @@ class BreakpointSync(
             breakpoint.line - 1,
             typed.createBreakpointProperties(file, breakpoint.line - 1)
         )
+        lineBreakpoint.putUserData(agentBreakpointIdKey, breakpoint.id)
         byAgentId[breakpoint.id] = AgentBreakpointEntry(lineBreakpoint, message.sessionId, message.workspaceRoot)
         notify("BreakPilot set a breakpoint at ${file.name}:${breakpoint.line}.")
         bridge.send(
@@ -89,26 +94,44 @@ class BreakpointSync(
         )
     }
 
-    private fun removeAgentBreakpoint(agentId: String, requestId: String?) {
-        val entry = byAgentId.remove(agentId) ?: run {
-            bridge.send(
-                BridgeMessage(
-                    type = MessageTypes.IdeBreakpointRemoved,
-                    requestId = requestId,
-                    breakpointId = agentId
-                )
-            )
-            return
+    private fun removeAgentBreakpoint(agentId: String, message: BridgeMessage) {
+        val manager = XDebuggerManager.getInstance(project).breakpointManager
+        val entry = byAgentId.remove(agentId)
+        val removed = if (entry != null) {
+            manager.removeBreakpoint(entry.breakpoint)
+            true
+        } else {
+            removeStoredAgentBreakpoint(manager, agentId, message.breakpoint)
         }
-        XDebuggerManager.getInstance(project).breakpointManager.removeBreakpoint(entry.breakpoint)
-        notify("BreakPilot removed an agent breakpoint.")
+        if (removed) notify("BreakPilot removed an agent breakpoint.")
         bridge.send(
             BridgeMessage(
                 type = MessageTypes.IdeBreakpointRemoved,
-                requestId = requestId,
+                requestId = message.requestId,
                 breakpointId = agentId
             )
         )
+    }
+
+    private fun removeStoredAgentBreakpoint(
+        manager: com.intellij.xdebugger.breakpoints.XBreakpointManager,
+        agentId: String,
+        requested: AgentBreakpoint?
+    ): Boolean {
+        val all = manager.allBreakpoints.toList()
+        val marked = all.firstOrNull { it.getUserData(agentBreakpointIdKey) == agentId }
+        if (marked != null) {
+            manager.removeBreakpoint(marked)
+            return true
+        }
+        if (requested == null) return false
+        val file = LocalFileSystem.getInstance().findFileByPath(requested.file) ?: return false
+        val match = all
+            .filterIsInstance<XLineBreakpoint<*>>()
+            .firstOrNull { it.fileUrl == file.url && it.line == requested.line - 1 }
+            ?: return false
+        manager.removeBreakpoint(match)
+        return true
     }
 
     fun clearAgentBreakpoints(sessionId: String? = null, workspaceRoot: String? = null) {

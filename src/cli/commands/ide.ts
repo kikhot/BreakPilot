@@ -7,7 +7,7 @@
  * handler (exit code 1).
  *
  * Each handler maps the typed yargs argv to a control-plane tool argument
- * object that is DEEPLY EQUAL to the legacy `toolFromCommand` output (the PBT
+ * object that is DEEPLY EQUAL to the `toolFromCommand` output (the PBT
  * oracle, Property 2 / task 8.1). To preserve exact equivalence:
  * - string flags pass through as `string | undefined` (no defaulting),
  * - number flags are declared `type: "number"` (so yargs validates invalid
@@ -33,15 +33,15 @@ import { parseNumber } from "../flags.ts";
  */
 export function registerIdeCommands(y: Argv, ctx: CommandContext): Argv {
   y.command("ide", ctx.t("cmd.ide"), (sub) => {
-    // status -> ide_status (no options, empty args)
+    // status -> bp_debug_status (no options, empty args)
     sub.command(
       "status",
       ctx.t("cmd.ide status"),
       (b) => b,
-      (argv) => ctx.runTool("ide_status", {}, Boolean(argv.pretty))
+      (argv) => ctx.runTool("bp_debug_status", {}, Boolean(argv.pretty))
     );
 
-    // sessions -> list_ide_sessions
+    // sessions -> bp_debug_status
     sub.command(
       "sessions",
       ctx.t("cmd.ide sessions"),
@@ -51,7 +51,7 @@ export function registerIdeCommands(y: Argv, ctx: CommandContext): Argv {
           .option("workspace", { type: "string", describe: ctx.t("opt.workspace") }),
       (argv) =>
         ctx.runTool(
-          "list_ide_sessions",
+          "bp_debug_status",
           {
             clientId: argv.client as string | undefined,
             workspace: argv.workspace as string | undefined
@@ -60,7 +60,7 @@ export function registerIdeCommands(y: Argv, ctx: CommandContext): Argv {
         )
     );
 
-    // adopt -> adopt_ide_session
+    // adopt -> bp_debug_start(mode=ide)
     sub.command(
       "adopt",
       ctx.t("cmd.ide adopt"),
@@ -74,20 +74,20 @@ export function registerIdeCommands(y: Argv, ctx: CommandContext): Argv {
           .option("owner", { type: "string", describe: ctx.t("opt.owner") }),
       (argv) =>
         ctx.runTool(
-          "adopt_ide_session",
+          "bp_debug_start",
           {
             clientId: argv.client as string | undefined,
             ideSessionId: argv["ide-session"] as string | undefined,
             workspace: argv.workspace as string | undefined,
             lang: argv.lang as string | undefined,
-            mode: argv.mode as string | undefined,
+            mode: (argv.mode as string | undefined) ?? "ide",
             owner: argv.owner as string | undefined
           },
           Boolean(argv.pretty)
         )
     );
 
-    // context -> get_active_breakpoint_context
+    // context -> bp_debug_context
     sub.command(
       "context",
       ctx.t("cmd.ide context"),
@@ -106,13 +106,13 @@ export function registerIdeCommands(y: Argv, ctx: CommandContext): Argv {
           .option("max-string-length", { type: "number", describe: ctx.t("opt.max-string-length") }),
       (argv) =>
         ctx.runTool(
-          "get_active_breakpoint_context",
+          "bp_debug_context",
           {
             sessionId: argv.session as string | undefined,
             clientId: argv.client as string | undefined,
             ideSessionId: argv["ide-session"] as string | undefined,
             workspace: argv.workspace as string | undefined,
-            timeoutMs: parseNumber(argv.timeout as number | undefined),
+            timeout: parseNumber(argv.timeout as number | undefined),
             frameIndex: parseNumber(argv.frame as number | undefined),
             profile: argv.profile as string | undefined,
             objectFields: argv.objects as string | undefined,

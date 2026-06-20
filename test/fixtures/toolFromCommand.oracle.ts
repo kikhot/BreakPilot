@@ -135,6 +135,9 @@ export function toolFromCommand(
       "bp_debug_set_breakpoint",
       {
         sessionId: stringFlag(flags, "session"),
+        workspace: stringFlag(flags, "workspace"),
+        clientId: stringFlag(flags, "client"),
+        ide: stringFlag(flags, "ide"),
         filePath: stringFlag(flags, "file"),
         line: parseNumber(flags.line),
         column: parseNumber(flags.column),
@@ -148,13 +151,22 @@ export function toolFromCommand(
   if (command === "bp" && subcommand === "remove") {
     return ["bp_debug_remove_breakpoint", {
       sessionId: stringFlag(flags, "session"),
+      workspace: stringFlag(flags, "workspace"),
+      clientId: stringFlag(flags, "client"),
+      ide: stringFlag(flags, "ide"),
       breakpointId: stringFlag(flags, "id"),
       filePath: stringFlag(flags, "file"),
       line: parseNumber(flags.line)
     }];
   }
   if (command === "bp" && subcommand === "list") {
-    return ["bp_debug_list_breakpoints", { sessionId: stringFlag(flags, "session"), filePath: stringFlag(flags, "file") }];
+    return ["bp_debug_list_breakpoints", {
+      sessionId: stringFlag(flags, "session"),
+      workspace: stringFlag(flags, "workspace"),
+      clientId: stringFlag(flags, "client"),
+      ide: stringFlag(flags, "ide"),
+      filePath: stringFlag(flags, "file")
+    }];
   }
   if (command === "wait") {
     return [
@@ -228,11 +240,11 @@ export function toolFromCommand(
     return ["bp_debug_status", {}];
   }
   if (command === "ide" && subcommand === "status") {
-    return ["ide_status", {}];
+    return ["bp_debug_status", {}];
   }
   if (command === "ide" && subcommand === "sessions") {
     return [
-      "list_ide_sessions",
+      "bp_debug_status",
       {
         clientId: stringFlag(flags, "client"),
         workspace: stringFlag(flags, "workspace")
@@ -241,26 +253,26 @@ export function toolFromCommand(
   }
   if (command === "ide" && subcommand === "adopt") {
     return [
-      "adopt_ide_session",
+      "bp_debug_start",
       {
         clientId: stringFlag(flags, "client"),
         ideSessionId: stringFlag(flags, "ide-session"),
         workspace: stringFlag(flags, "workspace"),
         lang: stringFlag(flags, "lang"),
-        mode: stringFlag(flags, "mode"),
+        mode: stringFlag(flags, "mode") ?? "ide",
         owner: stringFlag(flags, "owner")
       }
     ];
   }
   if (command === "ide" && subcommand === "context") {
     return [
-      "get_active_breakpoint_context",
+      "bp_debug_context",
       {
         sessionId: stringFlag(flags, "session"),
         clientId: stringFlag(flags, "client"),
         ideSessionId: stringFlag(flags, "ide-session"),
         workspace: stringFlag(flags, "workspace"),
-        timeoutMs: parseNumber(flags.timeout),
+        timeout: parseNumber(flags.timeout),
         frameIndex: parseNumber(flags.frame),
         profile: stringFlag(flags, "profile"),
         objectFields: stringFlag(flags, "objects"),

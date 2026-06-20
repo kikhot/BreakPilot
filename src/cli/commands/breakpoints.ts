@@ -8,7 +8,7 @@
  * fails via the unified `.fail()` handler (exit code 1).
  *
  * Each handler maps the typed yargs argv to a control-plane tool argument
- * object that is DEEPLY EQUAL to the legacy `toolFromCommand` output (the PBT
+ * object that is DEEPLY EQUAL to the `toolFromCommand` output (the PBT
  * oracle, Property 2 / task 8.1). To preserve exact equivalence:
  * - string flags pass through as `string | undefined` (no defaulting),
  * - `--line` / `--column` are declared `type: "number"` (so yargs validates
@@ -44,6 +44,9 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
       (b) =>
         b
           .option("session", { type: "string", describe: ctx.t("opt.session") })
+          .option("workspace", { type: "string", describe: ctx.t("opt.workspace") })
+          .option("client", { type: "string", describe: ctx.t("opt.client") })
+          .option("ide", { type: "string", choices: ["vscode", "idea"] as const, describe: ctx.t("opt.ide") })
           .option("file", { type: "string", describe: ctx.t("opt.file") })
           .option("line", { type: "number", describe: ctx.t("opt.line") })
           .option("column", { type: "number", describe: ctx.t("opt.column") })
@@ -57,6 +60,9 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
           "bp_debug_set_breakpoint",
           {
             sessionId: argv.session as string | undefined,
+            workspace: argv.workspace as string | undefined,
+            clientId: argv.client as string | undefined,
+            ide: argv.ide as string | undefined,
             filePath: argv.file as string | undefined,
             line: parseNumber(argv.line as number | undefined),
             column: parseNumber(argv.column as number | undefined),
@@ -76,6 +82,9 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
       (b) =>
         b
           .option("session", { type: "string", describe: ctx.t("opt.session") })
+          .option("workspace", { type: "string", describe: ctx.t("opt.workspace") })
+          .option("client", { type: "string", describe: ctx.t("opt.client") })
+          .option("ide", { type: "string", choices: ["vscode", "idea"] as const, describe: ctx.t("opt.ide") })
           .option("id", { type: "string", describe: ctx.t("opt.id") })
           .option("file", { type: "string", describe: ctx.t("opt.file") })
           .option("line", { type: "number", describe: ctx.t("opt.line") }),
@@ -84,6 +93,9 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
           "bp_debug_remove_breakpoint",
           {
             sessionId: argv.session as string | undefined,
+            workspace: argv.workspace as string | undefined,
+            clientId: argv.client as string | undefined,
+            ide: argv.ide as string | undefined,
             breakpointId: argv.id as string | undefined,
             filePath: argv.file as string | undefined,
             line: parseNumber(argv.line as number | undefined)
@@ -98,12 +110,18 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
       ctx.t("cmd.breakpoint list"),
       (b) => b
         .option("session", { type: "string", describe: ctx.t("opt.session") })
+        .option("workspace", { type: "string", describe: ctx.t("opt.workspace") })
+        .option("client", { type: "string", describe: ctx.t("opt.client") })
+        .option("ide", { type: "string", choices: ["vscode", "idea"] as const, describe: ctx.t("opt.ide") })
         .option("file", { type: "string", describe: ctx.t("opt.file") }),
       (argv) =>
         ctx.runTool(
           "bp_debug_list_breakpoints",
           {
             sessionId: argv.session as string | undefined,
+            workspace: argv.workspace as string | undefined,
+            clientId: argv.client as string | undefined,
+            ide: argv.ide as string | undefined,
             filePath: argv.file as string | undefined
           },
           Boolean(argv.pretty)
