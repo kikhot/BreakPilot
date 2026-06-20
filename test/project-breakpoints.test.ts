@@ -69,6 +69,27 @@ class FakeIdeBridge extends EventEmitter {
         };
         this.emit(IdeMessageTypes.IDE_BREAKPOINT_REMOVED, { clientId, message: response });
       }
+      if (message.type === IdeMessageTypes.AGENT_LIST_BREAKPOINTS) {
+        const response: BridgeMessage = {
+          type: IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT,
+          clientId,
+          requestId: message.requestId,
+          ideSessionId: message.ideSessionId,
+          result: {
+            breakpoints: [
+              {
+                id: `${clientId}:user:21`,
+                file: filePath,
+                line: 21,
+                owner: "user",
+                enabled: true,
+                verified: true
+              }
+            ]
+          }
+        };
+        this.emit(IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT, { clientId, message: response });
+      }
     });
     return true;
   }
@@ -248,8 +269,27 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
   const afterRemove = await manager.bpDebugListBreakpoints({ ide: "vscode" });
 
   assert.equal(removed.removed, true);
-  assert.equal(afterRemove.totalCount, 0);
-  assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_REMOVE_BREAKPOINT);
+  assert.equal(afterRemove.totalCount, 1);
+  assert.equal((afterRemove.breakpoints as AnyRecord[])[0]?.owner, "user");
+  assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT), true);
+}
+
+{
+  const bridge = new FakeIdeBridge();
+  bridge.addClient("idea_one", "idea", workspaceRoot);
+  const manager = managerWithBridge(bridge);
+
+  const listed = await manager.bpDebugListBreakpoints({ ide: "idea", owner: "all" });
+
+  assert.deepEqual(
+    (listed.breakpoints as AnyRecord[]).map((breakpoint) => ({
+      breakpointId: breakpoint.breakpointId,
+      owner: breakpoint.owner,
+      line: breakpoint.line
+    })),
+    [{ breakpointId: "idea_one:user:21", owner: "user", line: 21 }]
+  );
+  assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_LIST_BREAKPOINTS);
 }
 
 console.log("project breakpoint routing tests ok");

@@ -19,6 +19,8 @@ data class BridgeMessage(
     val filePath: String? = null,
     val file: String? = null,
     val line: Int? = null,
+    val path: List<String> = emptyList(),
+    val newValue: String? = null,
     val rememberScopes: List<String> = emptyList(),
     val rememberScope: String? = null,
     val command: String? = null,
@@ -51,6 +53,13 @@ data class AgentBreakpoint(
     val line: Int,
     val column: Int? = null,
     val condition: String? = null,
+    val hitCondition: String? = null,
+    val logMessage: String? = null,
+    val enabled: Boolean = true,
+    val temporary: Boolean = false,
+    val suspendPolicy: String? = null,
+    val isLogMessage: Boolean = false,
+    val isLogStack: Boolean = false,
     val owner: String = "agent",
     val verified: Boolean = false
 )
@@ -68,12 +77,14 @@ object MessageTypes {
     const val IdeBreakpointAdded = "ide_breakpoint_added"
     const val IdeBreakpointRemoved = "ide_breakpoint_removed"
     const val IdeBreakpointHit = "ide_breakpoint_hit"
+    const val IdeBreakpointsSnapshot = "ide_breakpoints_snapshot"
     const val IdeStackSnapshot = "ide_stack_snapshot"
     const val IdeVariablesSnapshot = "ide_variables_snapshot"
     const val IdeCommandResult = "ide_command_result"
     const val AgentSetBreakpoint = "agent_set_breakpoint"
     const val AgentRemoveBreakpoint = "agent_remove_breakpoint"
     const val AgentClearBreakpoints = "agent_clear_breakpoints"
+    const val AgentListBreakpoints = "agent_list_breakpoints"
     const val AgentRequestVariables = "agent_request_variables"
     const val AgentStartDebug = "agent_start_debug"
     const val AgentContinue = "agent_continue"
@@ -81,6 +92,8 @@ object MessageTypes {
     const val AgentStepOver = "agent_step_over"
     const val AgentStepInto = "agent_step_into"
     const val AgentStepOut = "agent_step_out"
+    const val AgentRunToLine = "agent_run_to_line"
+    const val AgentSetVariable = "agent_set_variable"
     const val AgentEvaluate = "agent_evaluate"
     const val AgentStopDebug = "agent_stop_debug"
     const val UserConfirmContinue = "user_confirm_continue"

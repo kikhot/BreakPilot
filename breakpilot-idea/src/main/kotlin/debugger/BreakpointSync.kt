@@ -9,6 +9,7 @@ import com.intellij.notification.NotificationType
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Key
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.xdebugger.XDebuggerManager
 import com.intellij.xdebugger.breakpoints.XBreakpoint
 import com.intellij.xdebugger.breakpoints.XBreakpointProperties
@@ -33,6 +34,7 @@ class BreakpointSync(
         when (message.type) {
             MessageTypes.AgentSetBreakpoint -> message.breakpoint?.let { addAgentBreakpoint(it, message.requestId, message) }
             MessageTypes.AgentRemoveBreakpoint -> message.breakpointId?.let { removeAgentBreakpoint(it, message) }
+            MessageTypes.AgentListBreakpoints -> listBreakpoints(message)
             MessageTypes.AgentClearBreakpoints, MessageTypes.BridgeDisconnected -> clearAgentBreakpoints(message.sessionId, message.workspaceRoot)
         }
     }
@@ -147,6 +149,52 @@ class BreakpointSync(
             byAgentId.remove(agentId)?.let { manager.removeBreakpoint(it.breakpoint) }
         }
         if (removed.isNotEmpty()) notify("BreakPilot cleared agent breakpoints.")
+    }
+
+    private fun listBreakpoints(message: BridgeMessage) {
+        val breakpoints = XDebuggerManager.getInstance(project)
+            .breakpointManager
+            .allBreakpoints
+            .mapIndexedNotNull { index, breakpoint -> breakpointSnapshot(index, breakpoint) }
+        bridge.send(
+            BridgeMessage(
+                type = MessageTypes.IdeBreakpointsSnapshot,
+                requestId = message.requestId,
+                sessionId = message.sessionId,
+                ideSessionId = message.ideSessionId,
+                result = mapOf("breakpoints" to breakpoints)
+            )
+        )
+    }
+
+    private fun breakpointSnapshot(index: Int, breakpoint: XBreakpoint<*>): Map<String, Any?>? {
+        val agentId = breakpoint.getUserData(agentBreakpointIdKey)
+        val owner = if (agentId != null) "agent" else "user"
+        if (breakpoint is XLineBreakpoint<*>) {
+            val filePath = VirtualFileManager.getInstance().findFileByUrl(breakpoint.fileUrl)?.path
+                ?: breakpoint.fileUrl.removePrefix("file://")
+            val id = agentId ?: "line|${breakpoint.fileUrl}|${breakpoint.line}"
+            return mapOf(
+                "id" to id,
+                "ideBreakpointId" to id,
+                "type" to "line",
+                "file" to filePath,
+                "line" to breakpoint.line + 1,
+                "owner" to owner,
+                "enabled" to breakpoint.isEnabled,
+                "verified" to true,
+                "condition" to breakpoint.conditionExpression?.expression
+            )
+        }
+        val id = agentId ?: "${breakpoint.javaClass.simpleName}|$index"
+        return mapOf(
+            "id" to id,
+            "ideBreakpointId" to id,
+            "type" to breakpoint.javaClass.simpleName,
+            "owner" to owner,
+            "enabled" to breakpoint.isEnabled,
+            "verified" to true
+        )
     }
 
     private fun notify(content: String) {

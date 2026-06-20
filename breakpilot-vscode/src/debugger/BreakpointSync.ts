@@ -17,6 +17,9 @@ export class BreakpointSync {
     if (message.type === MessageTypes.AgentRemoveBreakpoint && message.breakpointId) {
       this.removeAgentBreakpoint(message.breakpointId, message);
     }
+    if (message.type === MessageTypes.AgentListBreakpoints) {
+      this.listBreakpoints(message);
+    }
     if (message.type === MessageTypes.AgentClearBreakpoints || message.type === "bridge_disconnected") {
       this.clearAgentBreakpoints(message);
     }
@@ -149,6 +152,22 @@ export class BreakpointSync {
       this.byVsCodeId.delete(entry.breakpoint.id);
     }
     if (removed.length > 0) vscode.debug.removeBreakpoints(removed);
+  }
+
+  private listBreakpoints(message: BridgeMessage) {
+    const breakpoints = vscode.debug.breakpoints
+      .filter((breakpoint): breakpoint is vscode.SourceBreakpoint => breakpoint instanceof vscode.SourceBreakpoint)
+      .map((breakpoint) => {
+        const agentId = this.byVsCodeId.get(breakpoint.id);
+        return this.toAgentBreakpoint(breakpoint, agentId ?? breakpoint.id, agentId ? "agent" : "user");
+      });
+    this.bridge.send({
+      type: MessageTypes.IdeBreakpointsSnapshot,
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      ideSessionId: message.ideSessionId,
+      result: { breakpoints }
+    });
   }
 
   private toAgentBreakpoint(

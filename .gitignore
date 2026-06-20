@@ -11,6 +11,7 @@ dist/
 
 # Gradle / IntelliJ plugin build artifacts
 breakpilot-idea/.gradle/
+breakpilot-idea/.kotlin/
 breakpilot-idea/.intellijPlatform/
 breakpilot-idea/build/
 *.class

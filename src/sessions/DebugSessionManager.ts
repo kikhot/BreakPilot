@@ -303,7 +303,7 @@ export class DebugSessionManager {
 
   async bpDebugRunToLine(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
-    this.audit.record("bp_debug_run_to_line_requested", {
+    const auditId = this.audit.record("bp_debug_run_to_line_requested", {
       sessionId: normalized.sessionId,
       filePath: normalized.filePath,
       line: normalized.line
@@ -312,17 +312,21 @@ export class DebugSessionManager {
     if (!normalized.filePath || !Number.isInteger(line) || line === undefined || line < 1) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_run_to_line requires filePath and line.", {});
     }
-    return {
-      error: {
-        code: ErrorCodes.UNSUPPORTED_CAPABILITY,
-        message: "bp_debug_run_to_line contract is registered, but the runtime implementation is not available in Phase 1.",
-        details: {
-          phase: "contract",
-          filePath: normalized.filePath,
-          line
-        }
-      }
-    };
+    const session = this.#resolveSession(normalized);
+    if (!session.provider.runToLine) {
+      throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support run-to-line.", {
+        sessionId: session.sessionId,
+        providerKind: session.providerKind
+      });
+    }
+    const result = await session.provider.runToLine({
+      filePath: normalized.filePath,
+      line,
+      threadId: normalized.threadId,
+      timeoutMs: normalized.timeout
+    });
+    session.state = result.status === "paused" ? SessionState.PAUSED : result.status === "stopped" ? SessionState.TERMINATED : session.state;
+    return ok(session.sessionId, result as AnyRecord, auditId);
   }
 
   async bpDebugThreads(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -421,7 +425,7 @@ export class DebugSessionManager {
         path: normalized.path
       });
     }
-    if (!node.parentRef) {
+    if (!node.parentRef && session.providerKind !== "ide") {
       throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider cannot mutate this variable because parentRef is unavailable.", {
         path: normalized.path,
         providerKind: session.providerKind
@@ -510,7 +514,13 @@ export class DebugSessionManager {
     const session = this.#resolveBreakpointSession(normalized);
     if (!session) return this.#listProjectBreakpoints(normalized);
     const auditId = this.audit.record("bp_debug_list_breakpoints_requested", { sessionId: session.sessionId });
-    let breakpoints = this.breakpoints.list(session.sessionId);
+    let breakpoints = session.provider.listBreakpoints
+      ? await session.provider.listBreakpoints({
+          filePath: normalized.filePath,
+          owner: this.#breakpointOwnerFilter(normalized.owner),
+          includeDisabled: normalized.includeDisabled
+        })
+      : this.breakpoints.list(session.sessionId);
     if (normalized.filePath) {
       const file = this.security.assertWorkspacePath(normalized.filePath);
       breakpoints = breakpoints.filter((bp) => path.resolve(bp.file) === path.resolve(file));
@@ -903,7 +913,7 @@ export class DebugSessionManager {
     }
   }
 
-  #listProjectBreakpoints(args: DebugToolArgs): ToolResponse {
+  async #listProjectBreakpoints(args: DebugToolArgs): Promise<ToolResponse> {
     const workspaceRoot = this.#statusWorkspaceRoot(args);
     const ide = this.#normalizedIde(args.ide);
     const file = args.filePath ? this.security.assertWorkspacePath(args.filePath) : undefined;
@@ -913,7 +923,11 @@ export class DebugSessionManager {
       ide,
       file
     });
-    const breakpoints = this.breakpoints.listProject({
+    const ideBreakpoints = await this.#listIdeProjectBreakpoints(args, workspaceRoot, ide, file).catch((error) => {
+      if (error instanceof BreakPilotError && error.code === ErrorCodes.IDE_NOT_CONNECTED) return null;
+      throw error;
+    });
+    const breakpoints = ideBreakpoints ?? this.breakpoints.listProject({
       workspaceRoot,
       clientId: args.clientId,
       ide,
@@ -971,6 +985,47 @@ export class DebugSessionManager {
       removed: true,
       breakpointId: breakpoint.id
     }, auditId);
+  }
+
+  async #listIdeProjectBreakpoints(
+    args: DebugToolArgs,
+    workspaceRoot: string,
+    ide: string | undefined,
+    file: string | undefined
+  ): Promise<ProjectBreakpointRecord[] | null> {
+    if (!this.ideBridge) return null;
+    const target = this.#selectProjectIdeTarget(args, workspaceRoot);
+    const requestId = makeId("ide_req");
+    const response = await this.#sendIdeClientRequest(
+      target.client.clientId,
+      {
+        type: IdeMessageTypes.AGENT_LIST_BREAKPOINTS,
+        requestId,
+        workspaceRoot,
+        ideSessionId: target.session?.ideSessionId,
+        options: {
+          filePath: file,
+          owner: args.owner,
+          includeDisabled: args.includeDisabled
+        }
+      },
+      [IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT],
+      (message) => message.requestId === requestId
+    );
+    const rawBreakpoints: unknown[] = Array.isArray(response.result?.breakpoints)
+      ? response.result.breakpoints
+      : Array.isArray(response.breakpoints)
+        ? response.breakpoints
+        : [];
+    return rawBreakpoints
+      .map((breakpoint, index) => this.#projectBreakpointFromIde(
+        breakpoint as AnyRecord,
+        index,
+        workspaceRoot,
+        target.client,
+        target.session?.ideSessionId
+      ))
+      .filter((breakpoint): breakpoint is ProjectBreakpointRecord => Boolean(breakpoint));
   }
 
   #normalizeBpArgs(args: DebugToolArgs = {}): DebugToolArgs {
@@ -1287,6 +1342,10 @@ export class DebugSessionManager {
     return breakpoint.owner === requestedOwner;
   }
 
+  #breakpointOwnerFilter(owner: unknown): "agent" | "user" | "all" | undefined {
+    return owner === "agent" || owner === "user" || owner === "all" ? owner : undefined;
+  }
+
   #protectedBreakpointRemoveView(breakpoint: BreakpointRecord | ProjectBreakpointRecord): AnyRecord {
     return {
       removed: false,
@@ -1389,6 +1448,47 @@ export class DebugSessionManager {
       isLogMessage: breakpoint.isLogMessage,
       isLogStack: breakpoint.isLogStack,
       ...(breakpoint.message ? { message: breakpoint.message } : {})
+    };
+  }
+
+  #projectBreakpointFromIde(
+    raw: AnyRecord,
+    index: number,
+    workspaceRoot: string,
+    client: IdeClientInfo,
+    ideSessionId?: string
+  ): ProjectBreakpointRecord | null {
+    const type = typeof raw.type === "string" ? raw.type : "line";
+    const file = raw.file ?? raw.filePath;
+    const line = raw.line;
+    if (type === "line" && (typeof file !== "string" || typeof line !== "number")) return null;
+    const id = String(raw.id ?? raw.breakpointId ?? raw.ideBreakpointId ?? `${client.clientId}:ide_bp_${index}`);
+    return {
+      id,
+      workspaceRoot,
+      clientId: client.clientId,
+      ide: client.ide,
+      ideSessionId,
+      file: typeof file === "string" ? file : "",
+      line: typeof line === "number" ? line : -1,
+      column: this.#numberOrUndefined(raw.column),
+      condition: typeof raw.condition === "string" ? raw.condition : undefined,
+      hitCondition: typeof raw.hitCondition === "string" ? raw.hitCondition : undefined,
+      logMessage: typeof raw.logMessage === "string" ? raw.logMessage : undefined,
+      enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+      temporary: Boolean(raw.temporary),
+      suspendPolicy: raw.suspendPolicy === "ALL" || raw.suspendPolicy === "THREAD" || raw.suspendPolicy === "NONE"
+        ? raw.suspendPolicy
+        : undefined,
+      isLogMessage: Boolean(raw.isLogMessage),
+      isLogStack: Boolean(raw.isLogStack),
+      owner: typeof raw.owner === "string" ? raw.owner : "user",
+      verified: raw.verified === undefined ? true : Boolean(raw.verified),
+      adapterBreakpointId: typeof raw.adapterBreakpointId === "number" || typeof raw.adapterBreakpointId === "string"
+        ? raw.adapterBreakpointId
+        : undefined,
+      ideBreakpointId: typeof raw.ideBreakpointId === "string" ? raw.ideBreakpointId : id,
+      createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString()
     };
   }
 

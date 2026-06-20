@@ -155,6 +155,26 @@ export class VariableReader {
     }
   }
 
+  async setVariable(
+    ideSessionId: string | undefined,
+    path: string[] | undefined,
+    newValue: string | undefined,
+    options: AnyRecord = {}
+  ): Promise<{ result?: AnyRecord; error?: string }> {
+    if (!path?.length || !newValue) return { error: "path and newValue are required." };
+    const expression = `${path.join(".")} = ${newValue}`;
+    const evaluated = await this.evaluate(ideSessionId, expression, options);
+    if (evaluated.error) return evaluated;
+    return {
+      result: {
+        path,
+        newValue,
+        applied: true,
+        result: evaluated.result
+      }
+    };
+  }
+
   private async resolveFrame(session: vscode.DebugSession, options: SnapshotOptions): Promise<FrameSelection> {
     const explicitThreadId = this.numberOption(options.threadId);
     const explicitFrameId = this.numberOption(options.frameId);

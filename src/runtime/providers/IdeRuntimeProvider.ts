@@ -6,7 +6,7 @@ import type { DapBreakpoint, StoppedEvent } from "../../types/dap.ts";
 import type { DebugLanguage, RuntimeStepKind } from "../../types/debug.ts";
 import type { InspectVariableResult, RuntimeSnapshot, VariableLimits } from "../../types/inspection.ts";
 import type { AnyRecord } from "../../types/json.ts";
-import type { BreakpointRecord, RuntimeDebugProvider } from "../../types/sessions.ts";
+import type { BreakpointFilter, BreakpointRecord, RunToLineArgs, RunToLineResult, RuntimeDebugProvider } from "../../types/sessions.ts";
 import {
   debugControlConfirmationRequest,
   evaluateConfirmationRequest,
@@ -100,6 +100,23 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       5000,
       (message) => message.breakpointId === breakpoint.id
     );
+  }
+
+  async listBreakpoints(filter: BreakpointFilter = {}): Promise<BreakpointRecord[]> {
+    const response = await this.#request(
+      IdeMessageTypes.AGENT_LIST_BREAKPOINTS,
+      { options: filter },
+      [IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT],
+      5000
+    );
+    const rawBreakpoints: unknown[] = Array.isArray(response.result?.breakpoints)
+      ? response.result.breakpoints
+      : Array.isArray(response.breakpoints)
+        ? response.breakpoints
+        : [];
+    return rawBreakpoints
+      .map((breakpoint, index) => this.#breakpointFromIde(breakpoint as AnyRecord, index))
+      .filter((breakpoint): breakpoint is BreakpointRecord => Boolean(breakpoint));
   }
 
   async waitForBreakpoint(timeoutMs = 30000): Promise<StoppedEvent> {
@@ -252,11 +269,19 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async setVariable(args: AnyRecord): Promise<AnyRecord> {
-    throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "IDE variable mutation is not supported by the current BreakPilot IDE bridge.", {
-      providerKind: this.kind,
+    if (!Array.isArray(args.path) || args.path.length === 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "IDE variable mutation requires a non-empty path.", {
+        providerKind: this.kind,
+        path: args.path
+      });
+    }
+    return this.#command("set_variable", {
       path: args.path,
-      ref: args.ref
-    });
+      newValue: args.newValue,
+      frameId: args.frameId,
+      frameIndex: args.frameIndex,
+      threadId: args.threadId
+    }, IdeMessageTypes.AGENT_SET_VARIABLE);
   }
 
   async evaluate(expression: string, options: AnyRecord = {}): Promise<AnyRecord> {
@@ -298,6 +323,29 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   async pause(threadId: number | null = this.threadId): Promise<AnyRecord> {
     await this.#confirm(debugControlConfirmationRequest("pause", { threadId }));
     return this.#command("pause", { threadId }, IdeMessageTypes.AGENT_PAUSE);
+  }
+
+  async runToLine(args: RunToLineArgs): Promise<RunToLineResult> {
+    await this.#confirm(debugControlConfirmationRequest("run_to_line", {
+      threadId: args.threadId ?? this.threadId,
+      file: args.filePath,
+      line: args.line
+    }));
+    const result = await this.#command("run_to_line", {
+      filePath: args.filePath,
+      line: args.line,
+      threadId: args.threadId ?? this.threadId,
+      timeoutMs: args.timeoutMs
+    }, IdeMessageTypes.AGENT_RUN_TO_LINE);
+    if (result.status === "paused" || result.status === "stopped" || result.status === "timeout") {
+      return result as RunToLineResult;
+    }
+    const stopped = await this.waitForBreakpoint(args.timeoutMs ?? 30000);
+    return {
+      status: "paused",
+      position: this.#positionFromStopped(stopped),
+      frame: stopped.topFrame
+    };
   }
 
   async step(kind: RuntimeStepKind, threadId: number | null = this.threadId): Promise<AnyRecord> {
@@ -459,6 +507,38 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     return normalized === "collecting data..." || normalized === "collecting data";
   }
 
+  #breakpointFromIde(raw: AnyRecord, index: number): BreakpointRecord | null {
+    const file = raw.file ?? raw.filePath;
+    const line = raw.line;
+    const type = typeof raw.type === "string" ? raw.type : "line";
+    if (type === "line" && (typeof file !== "string" || typeof line !== "number")) return null;
+    const id = String(raw.id ?? raw.breakpointId ?? raw.ideBreakpointId ?? `ide_bp_${index}`);
+    return {
+      id,
+      sessionId: this.sessionId,
+      file: typeof file === "string" ? file : "",
+      line: typeof line === "number" ? line : -1,
+      column: typeof raw.column === "number" ? raw.column : undefined,
+      condition: typeof raw.condition === "string" ? raw.condition : undefined,
+      hitCondition: typeof raw.hitCondition === "string" ? raw.hitCondition : undefined,
+      logMessage: typeof raw.logMessage === "string" ? raw.logMessage : undefined,
+      enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+      temporary: Boolean(raw.temporary),
+      suspendPolicy: raw.suspendPolicy === "ALL" || raw.suspendPolicy === "THREAD" || raw.suspendPolicy === "NONE"
+        ? raw.suspendPolicy
+        : undefined,
+      isLogMessage: Boolean(raw.isLogMessage),
+      isLogStack: Boolean(raw.isLogStack),
+      owner: typeof raw.owner === "string" ? raw.owner : "user",
+      verified: raw.verified === undefined ? true : Boolean(raw.verified),
+      adapterBreakpointId: typeof raw.adapterBreakpointId === "number" || typeof raw.adapterBreakpointId === "string"
+        ? raw.adapterBreakpointId
+        : undefined,
+      ideBreakpointId: typeof raw.ideBreakpointId === "string" ? raw.ideBreakpointId : id,
+      createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString()
+    };
+  }
+
   #stoppedFromSession(session: IdeDebugSessionInfo): StoppedEvent {
     return {
       sessionId: this.sessionId,
@@ -468,6 +548,16 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       allThreadsStopped: true,
       ideSessionId: this.ideSessionId,
       topFrame: session.topFrame ?? (session.stopped as AnyRecord | undefined)?.topFrame
+    };
+  }
+
+  #positionFromStopped(stopped: AnyRecord): AnyRecord | undefined {
+    const topFrame = (stopped.topFrame ?? stopped.stopped?.topFrame) as AnyRecord | undefined;
+    if (!topFrame) return undefined;
+    const source = topFrame.source as AnyRecord | undefined;
+    return {
+      filePath: source?.path ?? topFrame.filePath,
+      line: topFrame.line
     };
   }
 }

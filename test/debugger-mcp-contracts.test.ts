@@ -104,11 +104,7 @@ const response = await router.callTool("bp_debug_run_to_line", {
   filePath: "src/Hello.java",
   line: 12
 });
-assert.equal(response.error?.code, "UNSUPPORTED_CAPABILITY");
-assert.match(
-  response.error?.message ?? "",
-  /runtime implementation is not available/i
-);
+assert.equal(response.error?.code, "SESSION_NOT_FOUND");
 
 const invalidRunToLine = await router.callTool("bp_debug_run_to_line", {
   filePath: "src/Hello.java",
@@ -119,6 +115,8 @@ assert.equal(invalidRunToLine.error?.code, "INVALID_ARGUMENT");
 let listThreadsArgs: unknown = "not-called";
 let callStackArgs: unknown = "not-called";
 let snapshotThreadId: unknown = "not-called";
+let runToLineArgs: unknown = "not-called";
+let setVariableArgs: unknown = "not-called";
 const threadIds = ["thread-a", "thread-b", "thread-c", "thread-d"];
 manager.sessions.add({
   sessionId: "sess_contract",
@@ -138,6 +136,40 @@ manager.sessions.add({
     threadId: "opaque-thread",
     async setBreakpoints() {
       return [];
+    },
+    async listBreakpoints() {
+      return [
+        {
+          id: "ide_user_enabled",
+          sessionId: "sess_contract",
+          file: "src/IdeUser.java",
+          line: 11,
+          owner: "user",
+          enabled: true,
+          verified: true,
+          createdAt: "2026-06-20T00:00:00.000Z"
+        },
+        {
+          id: "ide_agent_enabled",
+          sessionId: "sess_contract",
+          file: "src/IdeAgent.java",
+          line: 12,
+          owner: "agent",
+          enabled: true,
+          verified: true,
+          createdAt: "2026-06-20T00:00:00.000Z"
+        },
+        {
+          id: "ide_agent_disabled",
+          sessionId: "sess_contract",
+          file: "src/IdeDisabled.java",
+          line: 13,
+          owner: "agent",
+          enabled: false,
+          verified: true,
+          createdAt: "2026-06-20T00:00:00.000Z"
+        }
+      ];
     },
     async waitForBreakpoint() {
       return {
@@ -174,8 +206,39 @@ manager.sessions.add({
         threadId: args.threadId,
         frameId: 101,
         stackFrames: [{ id: 101, name: "pausedHere", line: 42, source: { path: "src/Hello.java" } }],
-        variables: {},
+        variables: {
+          locals: {
+            name: "locals",
+            category: "locals",
+            variables: {
+              name: {
+                name: "name",
+                kind: "primitive",
+                valuePreview: "Alan Turing",
+                value: "Alan Turing",
+                variablesReference: 0
+              }
+            }
+          }
+        },
         limits: { maxDepth: 1, maxItems: 10, maxStringLength: 2000 }
+      };
+    },
+    async runToLine(args: AnyRecord) {
+      runToLineArgs = args;
+      return {
+        status: "paused",
+        position: { filePath: args.filePath, line: args.line },
+        frame: { id: 202, source: { path: args.filePath }, line: args.line }
+      };
+    },
+    async setVariable(args: AnyRecord) {
+      setVariableArgs = args;
+      return {
+        path: args.path,
+        oldValue: "Alan Turing",
+        newValue: args.newValue,
+        applied: true
       };
     },
     async evaluate() {
@@ -229,7 +292,7 @@ const filteredBreakpoints = await router.callTool("bp_debug_list_breakpoints", {
 });
 assert.deepEqual(
   (filteredBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
-  ["bp_agent_enabled"]
+  ["ide_agent_enabled"]
 );
 
 const allBreakpoints = await router.callTool("bp_debug_list_breakpoints", {
@@ -237,7 +300,20 @@ const allBreakpoints = await router.callTool("bp_debug_list_breakpoints", {
   owner: "all",
   includeDisabled: true
 });
-assert.equal((allBreakpoints.breakpoints as AnyRecord[]).length, 3);
+assert.deepEqual(
+  (allBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+  ["ide_user_enabled", "ide_agent_enabled", "ide_agent_disabled"]
+);
+
+const enabledIdeBreakpoints = await router.callTool("bp_debug_list_breakpoints", {
+  sessionId: "sess_contract",
+  owner: "all",
+  includeDisabled: false
+});
+assert.deepEqual(
+  (enabledIdeBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+  ["ide_user_enabled", "ide_agent_enabled"]
+);
 
 const protectedDefaultRemove = await router.callTool("bp_debug_remove_breakpoint", {
   sessionId: "sess_contract",
@@ -318,6 +394,37 @@ assert.deepEqual(
   (filteredProjectBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
   ["project_agent_enabled"]
 );
+
+const runToLineResult = await router.callTool("bp_debug_run_to_line", {
+  sessionId: "sess_contract",
+  filePath: "src/Hello.java",
+  line: 24,
+  timeout: 1000
+});
+assert.deepEqual(runToLineArgs, {
+  filePath: "src/Hello.java",
+  line: 24,
+  threadId: undefined,
+  timeoutMs: 1000
+});
+assert.equal(runToLineResult.status, "paused");
+assert.deepEqual(runToLineResult.position, { filePath: "src/Hello.java", line: 24 });
+
+const setValueResult = await router.callTool("bp_debug_set_value", {
+  sessionId: "sess_contract",
+  path: ["name"],
+  newValue: "\"Katherine Johnson\""
+});
+assert.deepEqual((setVariableArgs as AnyRecord).path, ["name"]);
+assert.equal((setVariableArgs as AnyRecord).newValue, "\"Katherine Johnson\"");
+assert.equal((setVariableArgs as AnyRecord).parentRef, undefined);
+assert.equal((setVariableArgs as AnyRecord).name, "name");
+assert.deepEqual(setValueResult.result, {
+  path: ["name"],
+  oldValue: "Alan Turing",
+  newValue: "\"Katherine Johnson\"",
+  applied: true
+});
 
 const threads = await router.callTool("bp_debug_threads", {
   sessionId: "sess_contract",

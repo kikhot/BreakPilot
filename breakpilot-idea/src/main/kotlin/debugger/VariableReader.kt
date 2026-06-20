@@ -106,7 +106,7 @@ class VariableReader(
             XExpressionImpl.fromText(expression),
             object : XDebuggerEvaluator.XEvaluationCallback {
                 override fun evaluated(result: XValue) {
-                    readValue("result", result, 10, 1, 2000) { variable ->
+                    readValue("result", result, 10, 1, 2000, 5000) { variable ->
                         callback(mapOf("value" to variable), null)
                     }
                 }
@@ -291,9 +291,10 @@ class VariableReader(
         maxItems: Int,
         maxDepth: Int,
         maxStringLength: Int,
+        presentationTimeoutMs: Long = 1000,
         callback: (Map<String, Any?>) -> Unit
     ) {
-        readPresentation(value, maxStringLength) { presentation ->
+        readPresentation(value, maxStringLength, presentationTimeoutMs) { presentation ->
             val preview = presentation.valuePreview
             val result = linkedMapOf<String, Any?>(
                 "name" to name,
@@ -358,14 +359,15 @@ class VariableReader(
     private fun readPresentation(
         value: XValue,
         maxStringLength: Int,
+        timeoutMs: Long = 1000,
         callback: (PresentationData) -> Unit
     ) {
         val node = CollectingValueNode(maxStringLength, callback)
         presentationAlarm.addRequest(
             {
-                node.finishUnavailable("Presentation callback was not invoked within 1000 ms.")
+                node.finishUnavailable("Presentation callback was not invoked within ${timeoutMs} ms.")
             },
-            1000
+            timeoutMs
         )
         try {
             value.computePresentation(node, XValuePlace.TREE)
@@ -439,6 +441,7 @@ private class CollectingValueNode(
     private var finished = false
 
     override fun setPresentation(icon: Icon?, type: String?, value: String, hasChildren: Boolean) {
+        if (isPendingPresentation(value)) return
         finish(
             PresentationData(
                 valuePreview = truncateDisplay(value),
@@ -452,6 +455,7 @@ private class CollectingValueNode(
         val rendered = PresentationTextCollector()
         try {
             presentation.renderValue(rendered)
+            if (isPendingPresentation(rendered.text())) return
             finish(
                 PresentationData(
                     valuePreview = truncateDisplay(rendered.text()),
@@ -490,6 +494,11 @@ private class CollectingValueNode(
     private fun truncateDisplay(value: String): String {
         if (value.length <= maxStringLength) return value
         return value.take(maxStringLength)
+    }
+
+    private fun isPendingPresentation(value: String): Boolean {
+        val normalized = value.replace("…", "...").trim().lowercase()
+        return normalized == "collecting data..." || normalized == "collecting data"
     }
 }
 

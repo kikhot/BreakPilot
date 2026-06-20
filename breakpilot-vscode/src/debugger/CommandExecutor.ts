@@ -28,6 +28,12 @@ export class CommandExecutor {
       case MessageTypes.AgentStepOut:
         await this.executeDebugCommand(message, "step_out", "workbench.action.debug.stepOut");
         break;
+      case MessageTypes.AgentRunToLine:
+        await this.runToLine(message);
+        break;
+      case MessageTypes.AgentSetVariable:
+        await this.setVariable(message);
+        break;
       case MessageTypes.AgentStopDebug:
         await this.stopDebug(message);
         break;
@@ -91,6 +97,42 @@ export class CommandExecutor {
       return;
     }
     this.sendResult(message, "evaluate", response.result ?? {});
+  }
+
+  private async setVariable(message: BridgeMessage) {
+    const response = await this.variableReader.setVariable(message.ideSessionId, message.path, message.newValue, {
+      ...(message.options ?? {}),
+      ...(message.payload ?? {}),
+      frameId: message.frameId ?? message.options?.frameId ?? message.payload?.frameId,
+      threadId: message.threadId ?? message.options?.threadId ?? message.payload?.threadId
+    });
+    if (response.error) {
+      this.sendError(message, "set_variable", "SET_VARIABLE_FAILED", response.error);
+      return;
+    }
+    this.sendResult(message, "set_variable", response.result ?? {});
+  }
+
+  private async runToLine(message: BridgeMessage) {
+    const filePath = typeof message.filePath === "string" ? message.filePath : message.file;
+    if (!filePath || !message.line) {
+      this.sendError(message, "run_to_line", "INVALID_ARGUMENT", "filePath and line are required.");
+      return;
+    }
+    try {
+      const uri = vscode.Uri.file(filePath);
+      const document = await vscode.workspace.openTextDocument(uri);
+      const editor = await vscode.window.showTextDocument(document, { preview: false });
+      const position = new vscode.Position(Math.max(0, message.line - 1), 0);
+      editor.selection = new vscode.Selection(position, position);
+      await vscode.commands.executeCommand("editor.debug.action.runToCursor");
+      this.sendResult(message, "run_to_line", {
+        status: "running",
+        position: { filePath, line: message.line }
+      });
+    } catch (error) {
+      this.sendError(message, "run_to_line", "RUN_TO_LINE_FAILED", this.errorMessage(error));
+    }
   }
 
   private targetSession(message: BridgeMessage): vscode.DebugSession | undefined {

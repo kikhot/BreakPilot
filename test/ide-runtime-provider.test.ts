@@ -74,6 +74,66 @@ class FakeIdeBridge extends EventEmitter {
         return;
       }
 
+      if (message.type === IdeMessageTypes.AGENT_LIST_BREAKPOINTS) {
+        this.emit("message", {
+          clientId,
+          message: {
+            type: IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT,
+            requestId: message.requestId,
+            ideSessionId: message.ideSessionId,
+            result: {
+              breakpoints: [
+                {
+                  id: "line|/workspace/Hello.java|20",
+                  file: "/workspace/Hello.java",
+                  line: 21,
+                  owner: "user",
+                  enabled: true,
+                  verified: true
+                }
+              ]
+            }
+          }
+        });
+        return;
+      }
+
+      if (message.type === IdeMessageTypes.AGENT_SET_VARIABLE) {
+        this.emit("message", {
+          clientId,
+          message: {
+            type: IdeMessageTypes.IDE_COMMAND_RESULT,
+            requestId: message.requestId,
+            ideSessionId: message.ideSessionId,
+            command: "set_variable",
+            result: {
+              path: message.path,
+              oldValue: "\"Alan Turing\"",
+              newValue: message.newValue,
+              applied: true
+            }
+          }
+        });
+        return;
+      }
+
+      if (message.type === IdeMessageTypes.AGENT_RUN_TO_LINE) {
+        this.emit("message", {
+          clientId,
+          message: {
+            type: IdeMessageTypes.IDE_COMMAND_RESULT,
+            requestId: message.requestId,
+            ideSessionId: message.ideSessionId,
+            command: "run_to_line",
+            result: {
+              status: "paused",
+              position: { filePath: message.filePath, line: message.line }
+            }
+          }
+        });
+        return;
+      }
+
       if (message.type === "agent_pause") {
         this.emit("message", {
           clientId,
@@ -108,5 +168,39 @@ assert.equal(bridge.sent.some((message) => message.type === "agent_pause" && mes
 const evalResult = await provider.evaluate("name.toUpperCase()", { mode: "readonly", timeoutMs: 1000 });
 assert.equal(bridge.evaluateCalls, 2);
 assert.equal(evalResult.value.valuePreview, "ADA LOVELACE");
+
+const breakpoints = await provider.listBreakpoints?.({ owner: "all", includeDisabled: true });
+assert.deepEqual(breakpoints?.map((breakpoint) => ({
+  id: breakpoint.id,
+  file: breakpoint.file,
+  line: breakpoint.line,
+  owner: breakpoint.owner,
+  enabled: breakpoint.enabled
+})), [{
+  id: "line|/workspace/Hello.java|20",
+  file: "/workspace/Hello.java",
+  line: 21,
+  owner: "user",
+  enabled: true
+}]);
+assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_LIST_BREAKPOINTS), true);
+
+const setValue = await provider.setVariable?.({ path: ["name"], newValue: "\"Katherine Johnson\"" });
+assert.deepEqual(setValue, {
+  path: ["name"],
+  oldValue: "\"Alan Turing\"",
+  newValue: "\"Katherine Johnson\"",
+  applied: true
+});
+
+const runToLine = await provider.runToLine?.({
+  filePath: "/workspace/Hello.java",
+  line: 24,
+  timeoutMs: 1000
+});
+assert.deepEqual(runToLine, {
+  status: "paused",
+  position: { filePath: "/workspace/Hello.java", line: 24 }
+});
 
 console.log("ide runtime provider tests ok");

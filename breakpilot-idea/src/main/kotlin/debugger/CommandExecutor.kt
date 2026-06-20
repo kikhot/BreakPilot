@@ -14,6 +14,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiManager
+import com.intellij.xdebugger.XDebuggerUtil
 
 private data class SourceDebugTarget(
     val settings: RunnerAndConfigurationSettings,
@@ -34,6 +35,8 @@ class CommandExecutor(
             MessageTypes.AgentStepOver -> execute(message, "step_over") { it.stepOver(false) }
             MessageTypes.AgentStepInto -> execute(message, "step_into") { it.stepInto() }
             MessageTypes.AgentStepOut -> execute(message, "step_out") { it.stepOut() }
+            MessageTypes.AgentRunToLine -> runToLine(message)
+            MessageTypes.AgentSetVariable -> setVariable(message)
             MessageTypes.AgentStopDebug -> execute(message, "stop_debug") { it.stop() }
             MessageTypes.AgentEvaluate -> evaluate(message)
         }
@@ -140,6 +143,47 @@ class CommandExecutor(
             sendResult(message, command, mapOf("ok" to true))
         } catch (error: Throwable) {
             sendError(message, command, "IDE_COMMAND_FAILED", error.message ?: error.javaClass.name)
+        }
+    }
+
+    private fun runToLine(message: BridgeMessage) {
+        val sourcePath = message.filePath ?: message.file
+        val line = message.line
+        if (sourcePath.isNullOrBlank() || line == null || line < 1) {
+            sendError(message, "run_to_line", "INVALID_ARGUMENT", "filePath and line are required.")
+            return
+        }
+        execute(message, "run_to_line") { session ->
+            val file = LocalFileSystem.getInstance().findFileByPath(sourcePath)
+                ?: throw IllegalArgumentException("File was not found in IDEA local filesystem: $sourcePath")
+            val position = XDebuggerUtil.getInstance().createPosition(file, line - 1)
+                ?: throw IllegalArgumentException("No executable source position was found at $sourcePath:$line")
+            session.runToPosition(position, false)
+        }
+    }
+
+    private fun setVariable(message: BridgeMessage) {
+        if (message.path.isEmpty() || message.newValue.isNullOrBlank()) {
+            sendError(message, "set_variable", "INVALID_ARGUMENT", "path and newValue are required.")
+            return
+        }
+        val target = message.path.joinToString(".")
+        val assignment = "$target = ${message.newValue}"
+        variableReader.evaluate(message.ideSessionId, assignment) { result, error ->
+            if (error != null) {
+                sendError(message, "set_variable", "SET_VARIABLE_FAILED", error)
+            } else {
+                sendResult(
+                    message,
+                    "set_variable",
+                    mapOf(
+                        "path" to message.path,
+                        "newValue" to message.newValue,
+                        "applied" to true,
+                        "result" to result
+                    )
+                )
+            }
         }
     }
 
