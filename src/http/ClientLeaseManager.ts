@@ -62,7 +62,7 @@ export class ClientLeaseManager {
   heartbeat(payload: ClientLeasePayload = {}): AnyRecord {
     const clientId = payload.clientId;
     if (!clientId || !this.leases.has(clientId)) {
-      return { ok: false, error: { message: "Unknown client lease." }, activeClients: this.activeCount() };
+      return { error: { message: "Unknown client lease." }, activeClients: this.activeCount() };
     }
     const lease = this.leases.get(clientId);
     if (lease) lease.lastHeartbeatAt = Date.now();
@@ -77,7 +77,6 @@ export class ClientLeaseManager {
 
   status(clientId?: string): AnyRecord {
     return {
-      ok: true,
       clientId,
       lifecycle: this.lifecycle,
       activeClients: this.activeCount(),

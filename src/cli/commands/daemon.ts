@@ -153,7 +153,7 @@ export function registerDaemonCommands(y: Argv, ctx: CommandContext): Argv {
           await new Promise((resolve) => setTimeout(resolve, 500));
           const context = hubContext(argv.policy as string | undefined);
           const started = await startDetachedDaemon(context);
-          ctx.output({ ok: true, data: started }, Boolean(argv.pretty));
+          ctx.output(started, Boolean(argv.pretty));
         } catch (error) {
           const typedError = error as Error;
           ctx.output(daemonUnreachableError(ctx.controlUrl, typedError.message), true);
