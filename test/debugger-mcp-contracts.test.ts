@@ -99,6 +99,15 @@ const manager = new DebugSessionManager({ policy: loadPolicy() });
 const router = new ToolRouter(manager);
 const listed = router.listTools().map((candidate) => candidate.name);
 assert.ok(listed.includes("bp_debug_run_to_line"), "ToolRouter should advertise bp_debug_run_to_line");
+assert.ok(listed.includes("bp_debug_run_configurations"), "ToolRouter should advertise bp_debug_run_configurations");
+
+assertHasProperties("bp_debug_run_configurations", [
+  "projectPath",
+  "clientId",
+  "ide",
+  "filePath",
+  "detail"
+]);
 
 const response = await router.callTool("bp_debug_run_to_line", {
   filePath: "src/Hello.java",

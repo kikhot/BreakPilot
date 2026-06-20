@@ -14,6 +14,7 @@ export class ToolRouter {
     this.manager = manager;
     this.handlers = new Map<string, ToolHandler>([
       ["bp_debug_start", (args: AnyRecord) => this.manager.bpDebugStart(args)],
+      ["bp_debug_run_configurations", (args: AnyRecord) => this.manager.bpDebugRunConfigurations(args)],
       ["bp_debug_status", (args: AnyRecord) => this.manager.bpDebugStatus(args)],
       ["bp_debug_control", (args: AnyRecord) => this.manager.bpDebugControl(args)],
       ["bp_debug_run_to_line", (args: AnyRecord) => this.manager.bpDebugRunToLine(args)],

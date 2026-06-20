@@ -99,6 +99,21 @@ export const toolDefinitions: ToolDefinition[] = [
     outputSchema: toolResponseOutputSchema
   },
   {
+    name: "bp_debug_run_configurations",
+    description: "List IDE run configurations or runnable source locations for a project/file.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectPath,
+        clientId,
+        ide,
+        filePath: { type: "string", description: "Optional source file path. When provided, returns runnable locations in that file." },
+        detail
+      }
+    },
+    outputSchema: toolResponseOutputSchema
+  },
+  {
     name: "bp_debug_status",
     description: "Return compact debugger status, live sessions, and IDE bridge summary.",
     inputSchema: { type: "object", properties: { projectPath } },

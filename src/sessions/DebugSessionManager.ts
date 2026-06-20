@@ -224,6 +224,42 @@ export class DebugSessionManager {
     return ok(null, data, auditId);
   }
 
+  async bpDebugRunConfigurations(args: DebugToolArgs = {}): Promise<ToolResponse> {
+    const normalized = this.#normalizeBpArgs(args);
+    const workspaceRoot = this.#statusWorkspaceRoot(normalized);
+    const target = this.#selectProjectIdeTarget(normalized, workspaceRoot);
+    const auditId = this.audit.record("bp_debug_run_configurations_requested", {
+      workspaceRoot,
+      clientId: target.client.clientId,
+      ide: target.client.ide,
+      filePath: normalized.filePath
+    });
+    const requestId = makeId("ide_req");
+    const response = await this.#sendIdeClientRequest(
+      target.client.clientId,
+      {
+        type: IdeMessageTypes.AGENT_LIST_RUN_CONFIGURATIONS,
+        requestId,
+        workspaceRoot,
+        filePath: normalized.filePath
+      },
+      [IdeMessageTypes.IDE_RUN_CONFIGURATIONS_SNAPSHOT],
+      (message) => message.requestId === requestId
+    );
+    if (this.#bridgeMessageError(response)) {
+      throw new BreakPilotError(
+        String(response.error?.code ?? ErrorCodes.TOOL_FAILED),
+        String(response.error?.message ?? "IDE failed to list run configurations."),
+        { error: response.error }
+      );
+    }
+    return ok(null, {
+      ...(normalized.filePath ? { filePath: normalized.filePath } : {}),
+      configurations: Array.isArray(response.result?.configurations) ? response.result.configurations : undefined,
+      runPoints: Array.isArray(response.result?.runPoints) ? response.result.runPoints : undefined
+    }, auditId);
+  }
+
   async bpDebugControl(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
     const action = normalized.action;

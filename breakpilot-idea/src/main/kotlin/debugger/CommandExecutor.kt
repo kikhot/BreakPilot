@@ -39,6 +39,7 @@ class CommandExecutor(
             MessageTypes.AgentSetVariable -> setVariable(message)
             MessageTypes.AgentStopDebug -> execute(message, "stop_debug") { it.stop() }
             MessageTypes.AgentEvaluate -> evaluate(message)
+            MessageTypes.AgentListRunConfigurations -> listRunConfigurations(message)
         }
     }
 
@@ -130,6 +131,81 @@ class CommandExecutor(
             }
             null
         }
+    }
+
+    private fun listRunConfigurations(message: BridgeMessage) {
+        val sourcePath = message.filePath ?: message.file
+        if (!sourcePath.isNullOrBlank()) {
+            listRunPoints(message, sourcePath)
+            return
+        }
+        val configurations = RunManager.getInstance(project).allSettings.map { settings ->
+            mapOf(
+                "name" to settings.name,
+                "description" to settings.type.displayName,
+                "supportsDynamicLaunchOverrides" to true
+            )
+        }
+        bridge.send(
+            BridgeMessage(
+                type = MessageTypes.IdeRunConfigurationsSnapshot,
+                requestId = message.requestId,
+                sessionId = message.sessionId,
+                ideSessionId = message.ideSessionId,
+                result = mapOf("configurations" to configurations)
+            )
+        )
+    }
+
+    private fun listRunPoints(message: BridgeMessage, sourcePath: String) {
+        val file = LocalFileSystem.getInstance().findFileByPath(sourcePath)
+        if (file == null) {
+            sendRunConfigurationsError(message, "WORKSPACE_VIOLATION", "File was not found in IDEA local filesystem.")
+            return
+        }
+        val document = FileDocumentManager.getInstance().getDocument(file)
+        if (document == null) {
+            sendRunConfigurationsError(message, "WORKSPACE_VIOLATION", "File cannot be opened as a document.")
+            return
+        }
+        val runPoints = mutableListOf<Map<String, Any?>>()
+        val seenElements = mutableSetOf<String>()
+        for (lineIndex in 0 until document.lineCount) {
+            val target = findConfigurationForSourceLine(sourcePath, lineIndex + 1) ?: continue
+            if (!seenElements.add(target.sourceElement)) continue
+            runPoints += mapOf(
+                "line" to lineIndex + 1,
+                "description" to "Run '${target.settings.name}'\nDebug '${target.settings.name}'",
+                "elementText" to target.settings.configuration.name
+            )
+        }
+        bridge.send(
+            BridgeMessage(
+                type = MessageTypes.IdeRunConfigurationsSnapshot,
+                requestId = message.requestId,
+                sessionId = message.sessionId,
+                ideSessionId = message.ideSessionId,
+                result = mapOf(
+                    "filePath" to sourcePath,
+                    "runPoints" to runPoints
+                )
+            )
+        )
+    }
+
+    private fun sendRunConfigurationsError(message: BridgeMessage, code: String, text: String) {
+        bridge.send(
+            BridgeMessage(
+                type = MessageTypes.IdeRunConfigurationsSnapshot,
+                requestId = message.requestId,
+                sessionId = message.sessionId,
+                ideSessionId = message.ideSessionId,
+                error = mapOf(
+                    "code" to code,
+                    "message" to text
+                )
+            )
+        )
     }
 
     private fun execute(message: BridgeMessage, command: String, action: (com.intellij.xdebugger.XDebugSession) -> Unit) {

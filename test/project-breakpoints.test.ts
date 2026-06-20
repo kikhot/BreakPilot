@@ -90,6 +90,34 @@ class FakeIdeBridge extends EventEmitter {
         };
         this.emit(IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT, { clientId, message: response });
       }
+      if (message.type === IdeMessageTypes.AGENT_LIST_RUN_CONFIGURATIONS) {
+        const response: BridgeMessage = {
+          type: IdeMessageTypes.IDE_RUN_CONFIGURATIONS_SNAPSHOT,
+          clientId,
+          requestId: message.requestId,
+          result: message.filePath
+            ? {
+                filePath: message.filePath,
+                runPoints: [
+                  {
+                    line: 9,
+                    description: "Run 'DemoApplication.main()'\nDebug 'DemoApplication.main()'",
+                    elementText: "com.example.demo.DemoApplication"
+                  }
+                ]
+              }
+            : {
+                configurations: [
+                  {
+                    name: "DemoApplication",
+                    description: "Spring Boot Application",
+                    supportsDynamicLaunchOverrides: true
+                  }
+                ]
+              }
+        };
+        this.emit(IdeMessageTypes.IDE_RUN_CONFIGURATIONS_SNAPSHOT, { clientId, message: response });
+      }
     });
     return true;
   }
@@ -290,6 +318,34 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
     [{ breakpointId: "idea_one:user:21", owner: "user", line: 21 }]
   );
   assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_LIST_BREAKPOINTS);
+}
+
+{
+  const bridge = new FakeIdeBridge();
+  bridge.addClient("idea_one", "idea", workspaceRoot);
+  const manager = managerWithBridge(bridge);
+
+  const configurations = await manager.bpDebugRunConfigurations({ ide: "idea" });
+  assert.deepEqual(configurations.configurations, [
+    {
+      name: "DemoApplication",
+      description: "Spring Boot Application",
+      supportsDynamicLaunchOverrides: true
+    }
+  ]);
+
+  const runPoints = await manager.bpDebugRunConfigurations({
+    ide: "idea",
+    filePath: "src/main/java/com/example/demo/DemoApplication.java"
+  });
+  assert.deepEqual(runPoints.runPoints, [
+    {
+      line: 9,
+      description: "Run 'DemoApplication.main()'\nDebug 'DemoApplication.main()'",
+      elementText: "com.example.demo.DemoApplication"
+    }
+  ]);
+  assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_LIST_RUN_CONFIGURATIONS);
 }
 
 console.log("project breakpoint routing tests ok");

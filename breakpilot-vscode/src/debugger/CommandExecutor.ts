@@ -40,6 +40,9 @@ export class CommandExecutor {
       case MessageTypes.AgentEvaluate:
         await this.evaluate(message);
         break;
+      case MessageTypes.AgentListRunConfigurations:
+        await this.listRunConfigurations(message);
+        break;
     }
   }
 
@@ -133,6 +136,38 @@ export class CommandExecutor {
     } catch (error) {
       this.sendError(message, "run_to_line", "RUN_TO_LINE_FAILED", this.errorMessage(error));
     }
+  }
+
+  private async listRunConfigurations(message: BridgeMessage) {
+    if (message.filePath || message.file) {
+      this.bridge.send({
+        type: MessageTypes.IdeRunConfigurationsSnapshot,
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        ideSessionId: message.ideSessionId,
+        result: {
+          filePath: message.filePath ?? message.file,
+          runPoints: []
+        }
+      });
+      return;
+    }
+    const configurations = vscode.workspace
+      .getConfiguration("launch")
+      .get<AnyRecord[]>("configurations", [])
+      .map((configuration) => ({
+        name: String(configuration.name ?? ""),
+        description: String(configuration.type ?? "VS Code Debug Configuration"),
+        supportsDynamicLaunchOverrides: false
+      }))
+      .filter((configuration) => configuration.name.length > 0);
+    this.bridge.send({
+      type: MessageTypes.IdeRunConfigurationsSnapshot,
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      ideSessionId: message.ideSessionId,
+      result: { configurations }
+    });
   }
 
   private targetSession(message: BridgeMessage): vscode.DebugSession | undefined {
