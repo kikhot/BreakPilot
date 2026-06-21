@@ -330,6 +330,8 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
     {
       name: "DemoApplication",
       description: "Spring Boot Application",
+      ide: "idea",
+      projectPath: workspaceRoot,
       supportsDynamicLaunchOverrides: true
     }
   ]);

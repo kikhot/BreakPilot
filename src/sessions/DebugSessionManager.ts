@@ -253,9 +253,16 @@ export class DebugSessionManager {
         { error: response.error }
       );
     }
+    const configurations = Array.isArray(response.result?.configurations)
+      ? response.result.configurations.map((configuration: unknown) => ({
+        ...(configuration && typeof configuration === "object" ? configuration as AnyRecord : {}),
+        ide: target.client.ide,
+        projectPath: workspaceRoot
+      }))
+      : undefined;
     return ok(null, {
       ...(normalized.filePath ? { filePath: normalized.filePath } : {}),
-      configurations: Array.isArray(response.result?.configurations) ? response.result.configurations : undefined,
+      configurations,
       runPoints: Array.isArray(response.result?.runPoints) ? response.result.runPoints : undefined
     }, auditId);
   }
