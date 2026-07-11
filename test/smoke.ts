@@ -39,17 +39,19 @@ assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_cont
 assert.equal(runtime.router.listTools().some((tool) => tool.name === "debug_launch"), false);
 
 const frameTool = toolDefinitions.find((tool) => tool.name === "bp_debug_frame");
-assert.equal(frameTool?.inputSchema.properties.expand.default, "preview");
-assert.ok(frameTool?.inputSchema.properties.depth);
-assert.ok(frameTool?.inputSchema.properties.limit);
+assert.equal(frameTool?.inputSchema.properties?.expand?.default, "preview");
+assert.ok(frameTool?.inputSchema.properties?.depth);
+assert.ok(frameTool?.inputSchema.properties?.limit);
 assert.ok(frameTool?.outputSchema);
 assert.ok(toolDefinitions.find((tool) => tool.name === "bp_debug_status")?.outputSchema);
 assert.equal(toolDefinitions.some((tool) => tool.name === "bp_debug_diagnostics"), false);
 const statusTool = toolDefinitions.find((tool) => tool.name === "bp_debug_status");
-assert.equal("verbose" in statusTool!.inputSchema.properties, false);
-assert.equal("includeHub" in statusTool!.inputSchema.properties, false);
-assert.equal("includeLanguages" in statusTool!.inputSchema.properties, false);
-assert.equal("includeTerminated" in statusTool!.inputSchema.properties, false);
+assert.ok(statusTool);
+const statusProperties = statusTool.inputSchema.properties ?? {};
+assert.equal("verbose" in statusProperties, false);
+assert.equal("includeHub" in statusProperties, false);
+assert.equal("includeLanguages" in statusProperties, false);
+assert.equal("includeTerminated" in statusProperties, false);
 
 const sessions = await runtime.router.callTool("bp_debug_status", {});
 assert.equal("ok" in sessions, false);

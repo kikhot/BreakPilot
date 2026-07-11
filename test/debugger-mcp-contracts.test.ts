@@ -29,7 +29,11 @@ function assertHasProperties(name: string, expected: string[]): void {
 
 const runToLine = tool("bp_debug_run_to_line");
 assert.equal(runToLine.description, "Run the selected debug session to a source line.");
-assert.deepEqual((runToLine.inputSchema as AnyRecord).required, ["filePath", "line"]);
+assert.deepEqual((runToLine.inputSchema as AnyRecord).required, ["line"]);
+assert.deepEqual((runToLine.inputSchema as AnyRecord).oneOf, [
+  { required: ["filePath"] },
+  { required: ["file"] }
+]);
 assert.equal(properties("bp_debug_run_to_line").line.minimum, 1);
 assertHasProperties("bp_debug_run_to_line", [
   "projectPath",
@@ -41,27 +45,51 @@ assertHasProperties("bp_debug_run_to_line", [
   "includeFrame",
   "detail"
 ]);
-assert.deepEqual((tool("bp_debug_set_breakpoint").inputSchema as AnyRecord).anyOf, [
-  { required: ["filePath", "line"] },
-  { required: ["breakpointId"] }
+const breakpointInput = tool("bp_debug_set_breakpoint").inputSchema as AnyRecord;
+assert.ok(Array.isArray(breakpointInput.oneOf));
+assert.equal(breakpointInput.oneOf.length, 2);
+const breakpointLocationInput = breakpointInput.oneOf[0] as AnyRecord;
+const breakpointIdInput = breakpointInput.oneOf[1] as AnyRecord;
+assert.deepEqual(breakpointLocationInput.required, ["line"]);
+assert.deepEqual(breakpointLocationInput.oneOf, [
+  { required: ["filePath"] },
+  { required: ["file"] }
 ]);
-for (const nullableField of ["condition", "hitCondition", "logMessage"]) {
-  assert.deepEqual(properties("bp_debug_set_breakpoint")[nullableField].oneOf, [
-    { type: "string" },
-    { type: "null" }
-  ]);
-}
+assert.deepEqual(breakpointIdInput.required, ["breakpointId"]);
+assert.equal(breakpointLocationInput.additionalProperties, false);
+assert.equal(breakpointIdInput.additionalProperties, false);
+assert.equal("breakpointId" in breakpointLocationInput.properties, false);
+assert.equal("filePath" in breakpointIdInput.properties, false);
+assert.equal("line" in breakpointIdInput.properties, false);
+assert.equal("column" in breakpointIdInput.properties, false);
+assert.ok("column" in breakpointLocationInput.properties);
 
-assertHasProperties("bp_debug_set_breakpoint", [
-  "breakpointId",
+const breakpointSharedProperties = [
+  "projectPath",
+  "workspace",
+  "sessionId",
+  "clientId",
+  "ide",
   "enabled",
   "temporary",
   "suspendPolicy",
   "isLogMessage",
   "isLogStack",
   "owner",
+  "requireVerified",
   "detail"
-]);
+];
+for (const branch of [breakpointLocationInput, breakpointIdInput]) {
+  for (const field of breakpointSharedProperties) {
+    assert.ok(field in branch.properties, `breakpoint branch should expose ${field}`);
+  }
+  for (const nullableField of ["condition", "hitCondition", "logMessage"]) {
+    assert.deepEqual(branch.properties[nullableField].oneOf, [
+      { type: "string" },
+      { type: "null" }
+    ]);
+  }
+}
 
 assertHasProperties("bp_debug_list_breakpoints", [
   "owner",
@@ -94,6 +122,94 @@ assertHasProperties("bp_debug_control", [
 assertHasProperties("bp_debug_context", [
   "detail"
 ]);
+
+for (const definition of toolDefinitions) {
+  if (definition.name === "bp_debug_set_breakpoint") continue;
+  assert.equal(
+    (definition.inputSchema as AnyRecord).additionalProperties,
+    false,
+    `${definition.name} input should reject undeclared arguments`
+  );
+}
+
+assertHasProperties("bp_debug_start", [
+  "workspace",
+  "lang",
+  "owner",
+  "adapterPort",
+  "file",
+  "timeout",
+  "timeoutMs"
+]);
+assertHasProperties("bp_debug_run_configurations", ["workspace", "file"]);
+assertHasProperties("bp_debug_status", ["workspace", "clientId", "detail"]);
+assertHasProperties("bp_debug_control", [
+  "workspace",
+  "timeoutMs",
+  "objectFields",
+  "maxDepth",
+  "maxItems",
+  "maxStringLength",
+  "redactPatterns"
+]);
+assertHasProperties("bp_debug_run_to_line", ["workspace", "file", "timeoutMs"]);
+assertHasProperties("bp_debug_threads", ["workspace"]);
+assertHasProperties("bp_debug_call_stack", ["workspace"]);
+for (const name of ["bp_debug_frame", "bp_debug_value", "bp_debug_set_value"]) {
+  assertHasProperties(name, [
+    "workspace",
+    "timeout",
+    "timeoutMs",
+    "objectFields",
+    "maxDepth",
+    "maxItems",
+    "maxStringLength",
+    "redactPatterns"
+  ]);
+}
+assertHasProperties("bp_debug_value", ["variablesReference"]);
+assertHasProperties("bp_debug_set_value", [
+  "threadId",
+  "frameId",
+  "expand",
+  "depth",
+  "limit",
+  "maxString"
+]);
+assertHasProperties("bp_debug_eval", ["workspace", "timeoutMs", "context"]);
+assertHasProperties("bp_debug_context", [
+  "workspace",
+  "clientId",
+  "ideSessionId",
+  "frameIndex",
+  "profile",
+  "objectFields",
+  "maxDepth",
+  "maxItems",
+  "maxStringLength",
+  "timeoutMs",
+  "threadId",
+  "frameId",
+  "maxString",
+  "redactPatterns"
+]);
+assert.ok("file" in breakpointLocationInput.properties);
+assertHasProperties("bp_debug_list_breakpoints", ["workspace", "file"]);
+assertHasProperties("bp_debug_remove_breakpoint", ["workspace", "file"]);
+
+for (const name of [
+  "bp_debug_control",
+  "bp_debug_frame",
+  "bp_debug_value",
+  "bp_debug_set_value",
+  "bp_debug_context"
+]) {
+  for (const field of ["depth", "maxDepth"]) {
+    const schema = properties(name)[field] as AnyRecord;
+    assert.equal(schema.minimum, 0, `${name}.${field} should reject negative expansion depth`);
+    assert.equal(schema.maximum, 8, `${name}.${field} should cap expansion depth`);
+  }
+}
 
 const statusOutput = tool("bp_debug_status").outputSchema as AnyRecord;
 assert.match(JSON.stringify(statusOutput), /capabilities/);
