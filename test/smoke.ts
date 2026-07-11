@@ -25,7 +25,7 @@ assert.equal(parsed.network.allowedHosts[0], "127.0.0.1");
 assert.equal(parsed.network.allowedPorts[0], 5678);
 
 const policy = loadPolicy("breakpilot.yaml");
-assert.ok(policy.workspace.root.endsWith("BreakPilot"));
+assert.equal(policy.workspace.root, process.cwd());
 assert.equal(policy.evaluate.defaultMode, "readonly");
 
 const runtime = createRuntime({ policyPath: "breakpilot.yaml", enableIdeBridge: false });
