@@ -58,14 +58,26 @@ try {
   assert.equal(callBody.result?.content?.[0]?.text, "ok");
   assert.equal(callBody.result?.isError, false);
 
+  const expectedInvalidLineError = {
+    code: "INVALID_ARGUMENT",
+    message: "Invalid arguments for bp_debug_run_to_line.",
+    details: {
+      issues: [{
+        path: "$.line",
+        keyword: "minimum",
+        message: "must be >= 1"
+      }]
+    }
+  };
+
   const httpErrorCall = await fetch(`${handle.url}/tools/call`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "bp_debug_run_to_line", arguments: { filePath: "src/Hello.java", line: 0 } })
   });
   assert.equal(httpErrorCall.status, 400);
-  const httpErrorBody = await httpErrorCall.json() as { error?: { message?: string } };
-  assert.match(httpErrorBody.error?.message ?? "", /requires filePath and line/);
+  const httpErrorBody = await httpErrorCall.json() as { error?: unknown };
+  assert.deepEqual(httpErrorBody.error, expectedInvalidLineError);
 
   const streamErrorCall = await fetch(`${handle.url}/stream`, {
     method: "POST",
@@ -84,13 +96,58 @@ try {
   const streamErrorBody = await streamErrorCall.json() as {
     result?: {
       content?: { type: string; text: string }[];
-      structuredContent?: { error?: { message?: string } };
+      structuredContent?: { error?: unknown };
       isError?: boolean;
     };
   };
   assert.equal(streamErrorBody.result?.isError, true);
-  assert.match(streamErrorBody.result?.content?.[0]?.text ?? "", /requires filePath and line/);
-  assert.match(streamErrorBody.result?.structuredContent?.error?.message ?? "", /requires filePath and line/);
+  assert.equal(streamErrorBody.result?.content?.[0]?.text, expectedInvalidLineError.message);
+  assert.deepEqual(streamErrorBody.result?.structuredContent?.error, expectedInvalidLineError);
+
+  const expectedUnknownPropertyError = {
+    code: "INVALID_ARGUMENT",
+    message: "Invalid arguments for bp_debug_status.",
+    details: {
+      issues: [{
+        path: "$.typo",
+        keyword: "additionalProperties",
+        message: "is not allowed"
+      }]
+    }
+  };
+  const httpUnknownPropertyCall = await fetch(`${handle.url}/tools/call`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "bp_debug_status", arguments: { typo: true } })
+  });
+  assert.equal(httpUnknownPropertyCall.status, 400);
+  const httpUnknownPropertyBody = await httpUnknownPropertyCall.json() as { error?: unknown };
+  assert.deepEqual(httpUnknownPropertyBody.error, expectedUnknownPropertyError);
+
+  const streamUnknownPropertyCall = await fetch(`${handle.url}/stream`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-session-id": sessionId
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: { name: "bp_debug_status", arguments: { typo: true } }
+    })
+  });
+  assert.equal(streamUnknownPropertyCall.status, 200);
+  const streamUnknownPropertyBody = await streamUnknownPropertyCall.json() as {
+    result?: {
+      content?: { type: string; text: string }[];
+      structuredContent?: { error?: unknown };
+      isError?: boolean;
+    };
+  };
+  assert.equal(streamUnknownPropertyBody.result?.isError, true);
+  assert.equal(streamUnknownPropertyBody.result?.content?.[0]?.text, expectedUnknownPropertyError.message);
+  assert.deepEqual(streamUnknownPropertyBody.result?.structuredContent?.error, expectedUnknownPropertyError);
 
   const sse = await fetch(`${handle.url}/sse`);
   assert.equal(sse.status, 200);

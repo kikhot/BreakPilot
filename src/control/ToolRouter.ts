@@ -1,7 +1,8 @@
 import type { ToolDefinition, ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
 import { DebugSessionManager } from "../sessions/DebugSessionManager.ts";
-import { fail } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes, fail } from "../utils/errors.ts";
+import { validateToolInput } from "./ToolInputValidator.ts";
 import { toolDefinitions } from "./toolDefinitions.ts";
 
 type ToolHandler = (args: AnyRecord) => Promise<ToolResponse<unknown>> | ToolResponse<unknown>;
@@ -9,9 +10,11 @@ type ToolHandler = (args: AnyRecord) => Promise<ToolResponse<unknown>> | ToolRes
 export class ToolRouter {
   manager: DebugSessionManager;
   handlers: Map<string, ToolHandler>;
+  definitions: Map<string, ToolDefinition>;
 
   constructor(manager: DebugSessionManager) {
     this.manager = manager;
+    this.definitions = new Map(toolDefinitions.map((definition) => [definition.name, definition]));
     this.handlers = new Map<string, ToolHandler>([
       ["bp_debug_start", (args: AnyRecord) => this.manager.bpDebugStart(args)],
       ["bp_debug_run_configurations", (args: AnyRecord) => this.manager.bpDebugRunConfigurations(args)],
@@ -51,7 +54,18 @@ export class ToolRouter {
       return fail(new Error(`Unknown tool: ${name}`), this.manager.audit.record("unknown_tool", { name }));
     }
     try {
-      return await handler(args);
+      const definition = this.definitions.get(name);
+      const validation = definition
+        ? validateToolInput(this.#validationSchema(definition), args)
+        : { value: args, errors: [] };
+      if (validation.errors.length > 0) {
+        throw new BreakPilotError(
+          ErrorCodes.INVALID_ARGUMENT,
+          `Invalid arguments for ${name}.`,
+          { issues: validation.errors }
+        );
+      }
+      return await handler(validation.value);
     } catch (error) {
       const typedError = error as Error & { code?: string };
       const auditId = this.manager.audit.record("tool_failed", {
@@ -61,5 +75,13 @@ export class ToolRouter {
       });
       return fail(error, auditId);
     }
+  }
+
+  #validationSchema(definition: ToolDefinition): ToolDefinition["inputSchema"] {
+    if (definition.name !== "bp_debug_start") return definition.inputSchema;
+    const schema = structuredClone(definition.inputSchema);
+    const language = schema.properties?.language;
+    if (language) language.enum = this.manager.adapters.listIdentifiers();
+    return schema;
   }
 }
