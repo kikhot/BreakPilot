@@ -95,6 +95,12 @@ assertHasProperties("bp_debug_context", [
   "detail"
 ]);
 
+const statusOutput = tool("bp_debug_status").outputSchema as AnyRecord;
+assert.match(JSON.stringify(statusOutput), /capabilities/);
+
+const startOutput = tool("bp_debug_start").outputSchema as AnyRecord;
+assert.match(JSON.stringify(startOutput), /capabilities/);
+
 const manager = new DebugSessionManager({ policy: loadPolicy() });
 const router = new ToolRouter(manager);
 const listed = router.listTools().map((candidate) => candidate.name);
