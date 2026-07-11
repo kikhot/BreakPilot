@@ -3,6 +3,7 @@ import {
   breakpointSchema,
   frameSchema,
   positionSchema,
+  scalarValueSchema,
   scopeSchema,
   sessionSummarySchema,
   successOrErrorSchema,
@@ -202,8 +203,8 @@ export const setValueSuccessSchema: JsonSchema = {
   additionalProperties: false,
   properties: {
     path: { type: "array", items: { type: "string" } },
-    oldValue: {},
-    newValue: {},
+    oldValue: scalarValueSchema,
+    newValue: { type: "string" },
     applied: { type: "boolean" },
     result: providerPayloadSchema,
     warnings: warningsSchema
@@ -216,7 +217,7 @@ export const evalSuccessSchema: JsonSchema = {
   additionalProperties: false,
   properties: {
     expression: { type: "string" },
-    value: {},
+    value: scalarValueSchema,
     type: { type: "string" },
     result: providerPayloadSchema,
     warnings: warningsSchema

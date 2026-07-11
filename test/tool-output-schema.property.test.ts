@@ -28,6 +28,33 @@ const expectedSuccessFields: Record<string, string[]> = {
   bp_debug_remove_breakpoint: ["breakpointId", "removed", "protected", "message", "warnings"]
 };
 
+const expectedRequiredFields: Record<string, string[]> = {
+  bp_debug_start: ["sessionId", "language", "mode", "state", "startMode", "providerKind", "capabilities"],
+  bp_debug_run_configurations: [],
+  bp_debug_status: ["activeSessionId", "sessions", "ideConnected", "ideSessions"],
+  bp_debug_control: ["status"],
+  bp_debug_run_to_line: ["status"],
+  bp_debug_threads: ["threads", "offset", "totalCount"],
+  bp_debug_call_stack: ["threadId", "frames", "offset", "totalFrames"],
+  bp_debug_frame: ["threadId", "frame", "variables"],
+  bp_debug_value: [],
+  bp_debug_set_value: ["path", "oldValue"],
+  bp_debug_eval: ["expression"],
+  bp_debug_context: ["status", "position", "frames", "variables"],
+  bp_debug_set_breakpoint: ["breakpointId", "filePath", "line", "verified", "owner", "enabled", "temporary"],
+  bp_debug_list_breakpoints: ["breakpoints", "totalCount"],
+  bp_debug_remove_breakpoint: ["removed"]
+};
+
+const scalarValueSchema: AnyRecord = {
+  oneOf: [
+    { type: "string" },
+    { type: "number" },
+    { type: "boolean" },
+    { type: "null" }
+  ]
+};
+
 for (const tool of toolDefinitions) {
   const output = tool.outputSchema as AnyRecord;
   assert.equal(output.type, "object", `${tool.name} output must be an object`);
@@ -42,6 +69,27 @@ for (const tool of toolDefinitions) {
     expectedSuccessFields[tool.name]?.slice().sort(),
     `${tool.name} must publish its exact compact success fields`
   );
+  assert.deepEqual(
+    (success.required ?? []).slice().sort(),
+    expectedRequiredFields[tool.name]?.slice().sort(),
+    `${tool.name} must publish its exact required success fields`
+  );
+
+  const error = output.oneOf[1] as AnyRecord;
+  assert.equal(error.type, "object", `${tool.name} error must be an object`);
+  assert.equal(error.additionalProperties, false, `${tool.name} error must be closed`);
+  assert.deepEqual(Object.keys(error.properties).sort(), ["error", "warnings"]);
+  assert.deepEqual(error.required, ["error"]);
+  assert.equal(error.properties.error.type, "object");
+  assert.equal(error.properties.error.additionalProperties, false);
+  assert.deepEqual(error.properties.error.required, ["code", "message"]);
+  assert.deepEqual(Object.keys(error.properties.error.properties).sort(), ["code", "details", "message"]);
+  assert.equal(error.properties.error.properties.code.type, "string");
+  assert.equal(error.properties.error.properties.message.type, "string");
+  assert.equal(error.properties.error.properties.details.type, "object");
+  assert.equal(error.properties.error.properties.details.additionalProperties, true);
+  assert.equal(error.properties.warnings.type, "array");
+  assert.equal(error.properties.warnings.items.type, "string");
 }
 
 function assertStrictVariableNodes(schema: AnyRecord, depth = 0): number {
@@ -69,6 +117,7 @@ const allowedOpenOutputPaths = new Set<string>([
 ]);
 
 function collectOpenObjects(schema: AnyRecord, path: string, found: string[]): void {
+  if (Object.keys(schema).length === 0) found.push(path);
   if (schema.additionalProperties === true) found.push(path);
   for (const [name, property] of Object.entries((schema.properties ?? {}) as AnyRecord)) {
     collectOpenObjects(property as AnyRecord, `${path}.${name}`, found);
@@ -86,6 +135,16 @@ for (const tool of toolDefinitions) {
   collectOpenObjects(output.oneOf[1] as AnyRecord, tool.name, openOutputPaths);
 }
 assert.deepEqual(new Set(openOutputPaths), allowedOpenOutputPaths);
+
+const setValueOutput = toolOutputSchemas.bp_debug_set_value;
+const evalOutput = toolOutputSchemas.bp_debug_eval;
+assert.ok(setValueOutput);
+assert.ok(evalOutput);
+const setValueProperties = (setValueOutput.oneOf?.[0]?.properties ?? {}) as AnyRecord;
+const evalProperties = (evalOutput.oneOf?.[0]?.properties ?? {}) as AnyRecord;
+assert.deepEqual(setValueProperties.oldValue, scalarValueSchema);
+assert.deepEqual(setValueProperties.newValue, { type: "string" });
+assert.deepEqual(evalProperties.value, scalarValueSchema);
 
 const listBreakpointsOutput = toolOutputSchemas.bp_debug_list_breakpoints;
 assert.ok(listBreakpointsOutput);

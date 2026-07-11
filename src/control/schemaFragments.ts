@@ -4,6 +4,15 @@ const nullableNumberSchema: JsonSchema = {
   oneOf: [{ type: "number" }, { type: "null" }]
 };
 
+export const scalarValueSchema: JsonSchema = {
+  oneOf: [
+    { type: "string" },
+    { type: "number" },
+    { type: "boolean" },
+    { type: "null" }
+  ]
+};
+
 const compactVariableNodeProperties: Record<string, JsonSchema> = {
   name: { type: "string" },
   value: { type: "string" },
@@ -175,6 +184,7 @@ export const commonSchemas: Record<string, JsonSchema> = {
   position: positionSchema,
   frame: frameSchema,
   variableNode: variableNodeSchema,
+  scalarValue: scalarValueSchema,
   scope: scopeSchema,
   breakpoint: breakpointSchema,
   sessionSummary: sessionSummarySchema,
