@@ -195,6 +195,49 @@ function childSchema(schema: JsonSchema | undefined, property: string): JsonSche
     : undefined;
 }
 
+function preflightCloneSafety(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet()
+): ToolValidationIssue | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+
+  if (value instanceof Map) {
+    for (const [key, entryValue] of Map.prototype.entries.call(value)) {
+      const keyIssue = preflightCloneSafety(key, seen);
+      if (keyIssue) return keyIssue;
+      const valueIssue = preflightCloneSafety(entryValue, seen);
+      if (valueIssue) return valueIssue;
+    }
+  } else if (value instanceof Set) {
+    for (const entryValue of Set.prototype.values.call(value)) {
+      const valueIssue = preflightCloneSafety(entryValue, seen);
+      if (valueIssue) return valueIssue;
+    }
+  }
+
+  const ownKeys = Reflect.ownKeys(value);
+  for (const key of ownKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) return jsonCompatibilityIssue();
+    if (typeof key === "symbol" || !descriptor.enumerable) continue;
+    if (!("value" in descriptor)) return jsonCompatibilityIssue();
+    const childIssue = preflightCloneSafety(descriptor.value, seen);
+    if (childIssue) return childIssue;
+  }
+  return undefined;
+}
+
+function isStructuredCloneable(value: object): boolean {
+  try {
+    structuredClone(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function preflightJsonValue(
   schema: JsonSchema | undefined,
   value: unknown,
@@ -205,13 +248,13 @@ function preflightJsonValue(
     return undefined;
   }
   if (typeof value === "number") {
-    return Number.isFinite(value) ? undefined : incompatibleValueIssue(schema, value, path);
+    return Number.isFinite(value) ? undefined : jsonCompatibilityIssue();
   }
   if (typeof value === "function" || typeof value === "symbol") {
     return jsonCompatibilityIssue();
   }
   if (typeof value !== "object") {
-    return incompatibleValueIssue(schema, value, path);
+    return jsonCompatibilityIssue();
   }
 
   if (active.has(value)) return jsonCompatibilityIssue();
@@ -246,7 +289,12 @@ function preflightJsonValue(
       return undefined;
     }
 
-    if (!isRecord(value)) return incompatibleValueIssue(schema, value, path);
+    if (!isRecord(value)) {
+      const safetyIssue = preflightCloneSafety(value);
+      if (safetyIssue) return safetyIssue;
+      if (!isStructuredCloneable(value)) return jsonCompatibilityIssue();
+      return incompatibleValueIssue(schema, value, path);
+    }
 
     const ownKeys = Reflect.ownKeys(value);
     if (ownKeys.some((key) => typeof key === "symbol")) return jsonCompatibilityIssue();

@@ -23,6 +23,13 @@ function captureValidationErrors(schema: JsonSchema, input: unknown): unknown {
   }
 }
 
+const closedObjectSchema: JsonSchema = { type: "object", additionalProperties: false };
+const jsonCompatibleObjectIssue = {
+  path: "$",
+  keyword: "type",
+  message: "must be a JSON-compatible object"
+};
+
 const controlInput = { action: "wait", redactPatterns: ["token"] };
 const normalizedControl = validateToolInput(inputSchema("bp_debug_control"), controlInput);
 assert.deepEqual(normalizedControl.errors, []);
@@ -34,16 +41,9 @@ assert.equal(normalizedControl.value.detail, "compact");
 
 const explicitUndefined = { action: "wait", includeFrame: undefined };
 const undefinedResult = validateToolInput(inputSchema("bp_debug_control"), explicitUndefined);
-assert.equal(undefinedResult.value.includeFrame, undefined, "present undefined values must not receive defaults");
-assert.ok(undefinedResult.errors.some((issue) => issue.path === "$.includeFrame" && issue.keyword === "type"));
+assert.deepEqual(undefinedResult.errors, [jsonCompatibleObjectIssue]);
 assert.deepEqual(explicitUndefined, { action: "wait", includeFrame: undefined });
 
-const closedObjectSchema: JsonSchema = { type: "object", additionalProperties: false };
-const jsonCompatibleObjectIssue = {
-  path: "$",
-  keyword: "type",
-  message: "must be a JSON-compatible object"
-};
 const nonCloneableInputs: Array<{ label: string; value: unknown }> = [
   { label: "function", value: function nonJsonInput() {} },
   { label: "symbol", value: Symbol("non-json-input") },
@@ -71,6 +71,7 @@ const exoticObjectInputs: Array<{ label: string; value: unknown }> = [
   { label: "Date", value: new Date(0) },
   { label: "Map", value: new Map() },
   { label: "Set", value: new Set() },
+  { label: "RegExp", value: /non-json-input/ },
   { label: "custom prototype", value: new CustomPrototypeInput() }
 ];
 assert.deepEqual(
@@ -133,6 +134,132 @@ assert.deepEqual(validateToolInput({
   properties: { value: { type: "number", enum: [0] } }
 }, { value: -0 }).errors, [], "JSON numeric enum equality must treat -0 and 0 as equal");
 
+const structuralPrimitiveInputs: Array<{ label: string; value: unknown }> = [
+  { label: "undefined", value: undefined },
+  { label: "bigint", value: 1n },
+  { label: "NaN", value: Number.NaN },
+  { label: "positive infinity", value: Number.POSITIVE_INFINITY },
+  { label: "negative infinity", value: Number.NEGATIVE_INFINITY }
+];
+const knownNumberPropertySchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { value: { type: "number" } },
+  required: ["value"]
+};
+assert.deepEqual(
+  structuralPrimitiveInputs.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(closedObjectSchema, value)
+  })),
+  structuralPrimitiveInputs.map(({ label }) => ({
+    label,
+    errors: [jsonCompatibleObjectIssue]
+  }))
+);
+assert.deepEqual(
+  structuralPrimitiveInputs.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(knownNumberPropertySchema, { value })
+  })),
+  structuralPrimitiveInputs.map(({ label }) => ({
+    label,
+    errors: [jsonCompatibleObjectIssue]
+  }))
+);
+
+const nonCloneableExoticInputs: Array<{ label: string; value: unknown }> = [
+  { label: "WeakMap", value: new WeakMap() },
+  { label: "WeakSet", value: new WeakSet() },
+  { label: "Promise", value: Promise.resolve("non-json-input") }
+];
+assert.deepEqual(
+  nonCloneableExoticInputs.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(closedObjectSchema, value)
+  })),
+  nonCloneableExoticInputs.map(({ label }) => ({
+    label,
+    errors: [jsonCompatibleObjectIssue]
+  }))
+);
+assert.deepEqual(
+  nonCloneableExoticInputs.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(nestedObjectSchema, { payload: value })
+  })),
+  nonCloneableExoticInputs.map(({ label }) => ({
+    label,
+    errors: [jsonCompatibleObjectIssue]
+  }))
+);
+
+let containedAccessorReads = 0;
+const containedAccessorValue: AnyRecord = {};
+Object.defineProperty(containedAccessorValue, "unsafe", {
+  get() {
+    containedAccessorReads += 1;
+    return "accessed";
+  },
+  enumerable: true,
+  configurable: true
+});
+const cyclicMap = new Map<unknown, unknown>();
+cyclicMap.set("self", cyclicMap);
+const cloneSafeContainerInputs: Array<{ label: string; value: unknown }> = [
+  { label: "Map bigint value", value: new Map([["value", 1n]]) },
+  { label: "Map non-finite key", value: new Map([[Number.NaN, "value"]]) },
+  { label: "Set undefined value", value: new Set([undefined]) },
+  { label: "cyclic Map", value: cyclicMap }
+];
+const structurallyInvalidExoticInputs: Array<{ label: string; value: unknown }> = [
+  { label: "Map function value", value: new Map([["value", () => undefined]]) },
+  { label: "Map WeakMap value", value: new Map([["value", new WeakMap()]]) },
+  { label: "Set symbol value", value: new Set([Symbol("non-cloneable")]) },
+  { label: "Map accessor value", value: new Map([["value", containedAccessorValue]]) }
+];
+assert.deepEqual(
+  structurallyInvalidExoticInputs.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(closedObjectSchema, value)
+  })),
+  structurallyInvalidExoticInputs.map(({ label }) => ({
+    label,
+    errors: [jsonCompatibleObjectIssue]
+  }))
+);
+assert.deepEqual(
+  structurallyInvalidExoticInputs.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(nestedObjectSchema, { payload: value })
+  })),
+  structurallyInvalidExoticInputs.map(({ label }) => ({
+    label,
+    errors: [jsonCompatibleObjectIssue]
+  }))
+);
+assert.equal(containedAccessorReads, 0, "Map value accessors must not be invoked");
+assert.deepEqual(
+  cloneSafeContainerInputs.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(closedObjectSchema, value)
+  })),
+  cloneSafeContainerInputs.map(({ label }) => ({
+    label,
+    errors: [{ path: "$", keyword: "type", message: "must be object" }]
+  }))
+);
+assert.deepEqual(
+  cloneSafeContainerInputs.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(nestedObjectSchema, { payload: value })
+  })),
+  cloneSafeContainerInputs.map(({ label }) => ({
+    label,
+    errors: [{ path: "$.payload", keyword: "type", message: "must be object" }]
+  }))
+);
+
 let accessorReads = 0;
 const accessorInput: AnyRecord = {};
 Object.defineProperty(accessorInput, "value", {
@@ -162,6 +289,16 @@ const extraKeyArray: unknown[] & { extra?: string } = [];
 extraKeyArray.extra = "not-an-index";
 const cyclicInput: AnyRecord = {};
 cyclicInput.self = cyclicInput;
+let exoticAccessorReads = 0;
+const exoticAccessorInput = new Date(0);
+Object.defineProperty(exoticAccessorInput, "unsafe", {
+  get() {
+    exoticAccessorReads += 1;
+    return "accessed";
+  },
+  enumerable: true,
+  configurable: true
+});
 
 const wholeGraphInvalidInputs: Array<{ label: string; value: unknown }> = [
   { label: "undefined property", value: { value: undefined } },
@@ -175,6 +312,7 @@ const wholeGraphInvalidInputs: Array<{ label: string; value: unknown }> = [
   { label: "non-enumerable property", value: nonEnumerableInput },
   { label: "sparse array", value: { value: sparseArray } },
   { label: "extra-key array", value: { value: extraKeyArray } },
+  { label: "exotic accessor property", value: exoticAccessorInput },
   { label: "cycle", value: cyclicInput }
 ];
 assert.deepEqual(
@@ -188,6 +326,7 @@ assert.deepEqual(
   }))
 );
 assert.equal(accessorReads, 0, "JSON compatibility checks must not invoke accessors");
+assert.equal(exoticAccessorReads, 0, "exotic compatibility checks must not invoke accessors");
 
 const sharedNode = { label: "shared" };
 const sharedInput = { left: sharedNode, right: sharedNode };
@@ -423,6 +562,29 @@ assert.deepEqual(
 );
 assert.equal(statusCalls, 0, "non-cloneable arguments must not invoke the manager");
 
+const nonCloneableExoticRouterResults = [];
+for (const { label, value } of nonCloneableExoticInputs) {
+  const response = await router.callTool("bp_debug_status", value);
+  nonCloneableExoticRouterResults.push({ label, error: response.error });
+}
+assert.deepEqual(
+  nonCloneableExoticRouterResults,
+  nonCloneableExoticInputs.map(({ label }) => ({ label, error: expectedStatusRootError }))
+);
+assert.equal(statusCalls, 0, "non-cloneable exotic arguments must not invoke the manager");
+
+const structurallyInvalidExoticRouterResults = [];
+for (const { label, value } of structurallyInvalidExoticInputs) {
+  const response = await router.callTool("bp_debug_status", value);
+  structurallyInvalidExoticRouterResults.push({ label, error: response.error });
+}
+assert.deepEqual(
+  structurallyInvalidExoticRouterResults,
+  structurallyInvalidExoticInputs.map(({ label }) => ({ label, error: expectedStatusRootError }))
+);
+assert.equal(statusCalls, 0, "structurally invalid exotics must not invoke the manager");
+assert.equal(containedAccessorReads, 0, "router validation must not invoke Map value accessors");
+
 const expectedExoticRootError = {
   code: "INVALID_ARGUMENT",
   message: "Invalid arguments for bp_debug_status.",
@@ -438,6 +600,17 @@ assert.deepEqual(
   exoticObjectInputs.map(({ label }) => ({ label, error: expectedExoticRootError }))
 );
 assert.equal(statusCalls, 0, "exotic root objects must not invoke the manager");
+
+const cloneSafeContainerRouterResults = [];
+for (const { label, value } of cloneSafeContainerInputs) {
+  const response = await router.callTool("bp_debug_status", value);
+  cloneSafeContainerRouterResults.push({ label, error: response.error });
+}
+assert.deepEqual(
+  cloneSafeContainerRouterResults,
+  cloneSafeContainerInputs.map(({ label }) => ({ label, error: expectedExoticRootError }))
+);
+assert.equal(statusCalls, 0, "clone-safe exotic containers must not invoke the manager");
 
 const cyclicRouterResult = await router.callTool("bp_debug_status", cyclicInput);
 assert.deepEqual(cyclicRouterResult.error, expectedStatusRootError);
@@ -528,6 +701,28 @@ assert.deepEqual(
   exoticObjectInputs.map(({ label }) => ({ label, error: expectedExoticNestedError }))
 );
 assert.equal(startCalls, 0, "exotic nested objects must not invoke the manager");
+
+const nonCloneableExoticNestedRouterResults = [];
+for (const { label, value } of nonCloneableExoticInputs) {
+  const response = await dynamicRouter.callTool("bp_debug_start", {
+    language: dynamicLanguage,
+    env: value
+  });
+  nonCloneableExoticNestedRouterResults.push({ label, error: response.error });
+}
+const expectedStartRootCompatibilityError = {
+  code: "INVALID_ARGUMENT",
+  message: "Invalid arguments for bp_debug_start.",
+  details: { issues: [jsonCompatibleObjectIssue] }
+};
+assert.deepEqual(
+  nonCloneableExoticNestedRouterResults,
+  nonCloneableExoticInputs.map(({ label }) => ({
+    label,
+    error: expectedStartRootCompatibilityError
+  }))
+);
+assert.equal(startCalls, 0, "nested non-cloneable exotics must not invoke the manager");
 
 const nestedOneOfRouterResult = await dynamicRouter.callTool("bp_debug_start", {
   language: dynamicLanguage,
