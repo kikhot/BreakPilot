@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runInNewContext } from "node:vm";
 
 import { LanguageAdapter } from "../src/debug-adapters/LanguageAdapter.ts";
 import { ToolRouter } from "../src/control/ToolRouter.ts";
@@ -259,6 +260,101 @@ assert.deepEqual(
     errors: [{ path: "$.payload", keyword: "type", message: "must be object" }]
   }))
 );
+
+let crossRealmGetterReads = 0;
+const crossRealmGetterValue: AnyRecord = {};
+Object.defineProperty(crossRealmGetterValue, "unsafe", {
+  get() {
+    crossRealmGetterReads += 1;
+    return "accessed";
+  },
+  enumerable: true,
+  configurable: true
+});
+const unsafeCrossRealmMap = runInNewContext("new Map()") as Map<unknown, unknown>;
+const unsafeCrossRealmSet = runInNewContext("new Set()") as Set<unknown>;
+Map.prototype.set.call(unsafeCrossRealmMap, "value", crossRealmGetterValue);
+Set.prototype.add.call(unsafeCrossRealmSet, crossRealmGetterValue);
+const unsafeCrossRealmContainers = [
+  { label: "cross-realm Map accessor value", value: unsafeCrossRealmMap },
+  { label: "cross-realm Set accessor value", value: unsafeCrossRealmSet }
+];
+const safeCrossRealmContainers = [
+  {
+    label: "safe cross-realm Map",
+    value: runInNewContext("new Map([['key', 'value']])") as Map<unknown, unknown>
+  },
+  {
+    label: "safe cross-realm Set",
+    value: runInNewContext("new Set(['value'])") as Set<unknown>
+  }
+];
+const forgedContainerPrototypes = [
+  { label: "forged Map prototype", value: Object.create(Map.prototype) as unknown },
+  { label: "forged Set prototype", value: Object.create(Set.prototype) as unknown }
+];
+const realmBoundaryActual = {
+  unsafe: unsafeCrossRealmContainers.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(closedObjectSchema, value)
+  })),
+  safeRoot: safeCrossRealmContainers.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(closedObjectSchema, value)
+  })),
+  safeNested: safeCrossRealmContainers.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(nestedObjectSchema, { payload: value })
+  })),
+  safeEnum: safeCrossRealmContainers.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(objectEnumSchema, { choice: value })
+  })),
+  forgedRoot: forgedContainerPrototypes.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(closedObjectSchema, value)
+  })),
+  forgedNested: forgedContainerPrototypes.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(nestedObjectSchema, { payload: value })
+  })),
+  forgedEnum: forgedContainerPrototypes.map(({ label, value }) => ({
+    label,
+    errors: captureValidationErrors(objectEnumSchema, { choice: value })
+  })),
+  getterReads: crossRealmGetterReads
+};
+assert.deepEqual(realmBoundaryActual, {
+  unsafe: unsafeCrossRealmContainers.map(({ label }) => ({
+    label,
+    errors: [jsonCompatibleObjectIssue]
+  })),
+  safeRoot: safeCrossRealmContainers.map(({ label }) => ({
+    label,
+    errors: [{ path: "$", keyword: "type", message: "must be object" }]
+  })),
+  safeNested: safeCrossRealmContainers.map(({ label }) => ({
+    label,
+    errors: [{ path: "$.payload", keyword: "type", message: "must be object" }]
+  })),
+  safeEnum: safeCrossRealmContainers.map(({ label }) => ({
+    label,
+    errors: [{ path: "$.choice", keyword: "enum", message: "must be one of [{}]" }]
+  })),
+  forgedRoot: forgedContainerPrototypes.map(({ label }) => ({
+    label,
+    errors: [{ path: "$", keyword: "type", message: "must be object" }]
+  })),
+  forgedNested: forgedContainerPrototypes.map(({ label }) => ({
+    label,
+    errors: [{ path: "$.payload", keyword: "type", message: "must be object" }]
+  })),
+  forgedEnum: forgedContainerPrototypes.map(({ label }) => ({
+    label,
+    errors: [{ path: "$.choice", keyword: "enum", message: "must be one of [{}]" }]
+  })),
+  getterReads: 0
+});
 
 let accessorReads = 0;
 const accessorInput: AnyRecord = {};

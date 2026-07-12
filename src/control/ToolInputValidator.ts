@@ -13,6 +13,13 @@ interface NodeValidationResult {
 const hasOwn = (value: object, key: PropertyKey): boolean =>
   Object.prototype.hasOwnProperty.call(value, key);
 
+const mapHas = Map.prototype.has;
+const mapForEach = Map.prototype.forEach;
+const setHas = Set.prototype.has;
+const setForEach = Set.prototype.forEach;
+const mapBrandSentinel = Symbol("BreakPilot.mapBrand");
+const setBrandSentinel = Symbol("BreakPilot.setBrand");
+
 function setOwn(value: AnyRecord, property: string, propertyValue: unknown): void {
   Object.defineProperty(value, property, {
     value: propertyValue,
@@ -195,6 +202,24 @@ function childSchema(schema: JsonSchema | undefined, property: string): JsonSche
     : undefined;
 }
 
+function hasMapInternalSlot(value: object): boolean {
+  try {
+    Reflect.apply(mapHas, value, [mapBrandSentinel]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasSetInternalSlot(value: object): boolean {
+  try {
+    Reflect.apply(setHas, value, [setBrandSentinel]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function preflightCloneSafety(
   value: unknown,
   seen: WeakSet<object> = new WeakSet()
@@ -203,18 +228,20 @@ function preflightCloneSafety(
   if (seen.has(value)) return undefined;
   seen.add(value);
 
-  if (value instanceof Map) {
-    for (const [key, entryValue] of Map.prototype.entries.call(value)) {
+  if (hasMapInternalSlot(value)) {
+    let entryIssue: ToolValidationIssue | undefined;
+    Reflect.apply(mapForEach, value, [function (entryValue: unknown, key: unknown) {
+      if (entryIssue) return;
       const keyIssue = preflightCloneSafety(key, seen);
-      if (keyIssue) return keyIssue;
-      const valueIssue = preflightCloneSafety(entryValue, seen);
-      if (valueIssue) return valueIssue;
-    }
-  } else if (value instanceof Set) {
-    for (const entryValue of Set.prototype.values.call(value)) {
-      const valueIssue = preflightCloneSafety(entryValue, seen);
-      if (valueIssue) return valueIssue;
-    }
+      entryIssue = keyIssue ?? preflightCloneSafety(entryValue, seen);
+    }]);
+    if (entryIssue) return entryIssue;
+  } else if (hasSetInternalSlot(value)) {
+    let entryIssue: ToolValidationIssue | undefined;
+    Reflect.apply(setForEach, value, [function (entryValue: unknown) {
+      if (!entryIssue) entryIssue = preflightCloneSafety(entryValue, seen);
+    }]);
+    if (entryIssue) return entryIssue;
   }
 
   const ownKeys = Reflect.ownKeys(value);
