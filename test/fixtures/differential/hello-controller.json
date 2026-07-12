@@ -1,0 +1,29 @@
+{
+  "source": {
+    "fileSuffix": "src/main/java/com/example/demo/controller/HelloController.java",
+    "line": 24
+  },
+  "expected": {
+    "normalizedName": "Ada Lovelace",
+    "score": "28",
+    "balanced": "true",
+    "multiPart": "true"
+  },
+  "idea": {
+    "position": { "line": 24 },
+    "framePresentation": "hello:24, HelloController (com.example.demo.controller)",
+    "values": {
+      "normalizedName": "Ada Lovelace",
+      "analysis.score": "28"
+    }
+  },
+  "breakpilot": {
+    "position": { "line": 24 },
+    "values": [
+      { "path": ["normalizedName"], "value": "Ada Lovelace" },
+      { "path": ["analysis", "score"], "value": "28" },
+      { "path": ["analysis", "balanced"], "value": "true" },
+      { "path": ["analysis", "multiPart"], "value": "true" }
+    ]
+  }
+}
