@@ -42,6 +42,12 @@ assert.deepEqual(fixture.idea.values, {
   normalizedName: "Ada Lovelace",
   "analysis.score": "28"
 });
+assert.deepEqual(fixture.breakpilot.values, [
+  { path: ["normalizedName"], value: "Ada Lovelace" },
+  { path: ["analysis", "score"], value: "28" },
+  { path: ["analysis", "balanced"], value: "true" },
+  { path: ["analysis", "multiPart"], value: "true" }
+]);
 assert.deepEqual(Object.keys(breakpilotValues).sort(), [
   "analysis.balanced",
   "analysis.multiPart",
