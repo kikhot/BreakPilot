@@ -36,6 +36,7 @@ import { SessionCoordinator } from "./SessionCoordinator.ts";
 import { SessionOwner, SessionState } from "./SessionOwner.ts";
 import { SessionStore } from "./SessionStore.ts";
 import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../runtime/ProviderCapabilities.ts";
+import type { RuntimeProviderCapabilities } from "../types/capabilities.ts";
 
 type DebugToolArgs = AnyRecord & {
   sessionId?: string;
@@ -437,6 +438,7 @@ export class DebugSessionManager {
   async bpDebugFrame(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
     const session = this.#resolveSession(normalized);
+    this.#assertVariableReferences(session, "frame inspection");
     const auditId = this.audit.record("bp_debug_frame_requested", { sessionId: session.sessionId });
     const frame = await this.#frameView(session, normalized);
     return ok(session.sessionId, frame, auditId);
@@ -445,6 +447,7 @@ export class DebugSessionManager {
   async bpDebugValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
     const session = this.#resolveSession(normalized);
+    this.#assertVariableReferences(session, "value inspection");
     const auditId = this.audit.record("bp_debug_value_requested", { sessionId: session.sessionId, ref: normalized.ref, path: normalized.path });
 
     if (normalized.ref !== undefined) {
@@ -488,6 +491,7 @@ export class DebugSessionManager {
   async bpDebugSetValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
     const session = this.#resolveSession(normalized);
+    this.#assertVariableReferences(session, "set-value path resolution");
     const auditId = this.audit.record("bp_debug_set_value_requested", { sessionId: session.sessionId, path: normalized.path, ref: normalized.ref });
     if (!normalized.path || normalized.path.length === 0) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value requires path + newValue.", {});
@@ -553,6 +557,7 @@ export class DebugSessionManager {
       session = await this.#adoptActiveIdeSession(normalized);
     }
     const auditId = this.audit.record("bp_debug_context_requested", { sessionId: session.sessionId });
+    this.#assertVariableReferences(session, "context inspection");
     const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 1000).catch(() => null);
     const stack = await this.#callStack(session, normalized.threadId, normalized.limit ?? 20).catch(() => null);
     const frame = await this.#frameView(session, normalized).catch(() => null);
@@ -770,6 +775,7 @@ export class DebugSessionManager {
     if (session.providerKind !== "ide") {
       this.coordinator.assertCanControl(session, SessionOwner.MCP, "set breakpoint");
     }
+    this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.providerKind);
     const file = this.security.assertWorkspacePath(args.file);
     this.audit.record("bp_debug_session_set_breakpoint_requested", {
       sessionId: session.sessionId,
@@ -919,6 +925,14 @@ export class DebugSessionManager {
     const workspaceRoot = this.#statusWorkspaceRoot(args);
     const file = this.security.assertWorkspacePath(args.filePath);
     const target = this.#selectProjectIdeTarget(args, workspaceRoot);
+    this.#assertBreakpointCapabilities(
+      ideProviderCapabilities(mergeIdeCapabilityRecords(
+        target.client.capabilities ?? {},
+        target.session?.capabilities ?? {}
+      )),
+      args,
+      target.client.ide
+    );
     const auditId = this.audit.record("bp_debug_project_set_breakpoint_requested", {
       workspaceRoot,
       clientId: target.client.clientId,
@@ -1137,6 +1151,83 @@ export class DebugSessionManager {
       maxStringLength: args.maxStringLength ?? args.maxString,
       redactPatterns: args.redactPatterns
     });
+  }
+
+  #assertVariableReferences(session: DebugSessionRecord, operation: string): void {
+    if (session.provider.capabilities.variableReferences !== "unsupported") return;
+    throw new BreakPilotError(
+      ErrorCodes.UNSUPPORTED_CAPABILITY,
+      `Runtime provider does not support ${operation}.`,
+      {
+        sessionId: session.sessionId,
+        providerKind: session.providerKind,
+        capability: "variableReferences",
+        operation
+      }
+    );
+  }
+
+  #assertBreakpointCapabilities(
+    capabilities: RuntimeProviderCapabilities,
+    args: DebugToolArgs,
+    providerKind: string
+  ): void {
+    const advancedOptions: Array<{
+      requested: boolean;
+      capability: keyof Pick<
+        RuntimeProviderCapabilities,
+        "conditionalBreakpoints" | "hitConditionalBreakpoints" | "tracepoints"
+      >;
+      option: string;
+    }> = [
+      {
+        requested: args.condition !== undefined && args.condition !== null,
+        capability: "conditionalBreakpoints",
+        option: "condition"
+      },
+      {
+        requested: args.hitCondition !== undefined && args.hitCondition !== null,
+        capability: "hitConditionalBreakpoints",
+        option: "hitCondition"
+      },
+      {
+        requested: args.logMessage !== undefined && args.logMessage !== null,
+        capability: "tracepoints",
+        option: "logMessage"
+      }
+    ];
+    const unsupportedAdvanced = advancedOptions.find(
+      ({ requested, capability }) => requested && capabilities[capability] === "unsupported"
+    );
+    if (unsupportedAdvanced) {
+      throw new BreakPilotError(
+        ErrorCodes.UNSUPPORTED_CAPABILITY,
+        `Runtime provider does not support breakpoint option ${unsupportedAdvanced.option}.`,
+        {
+          providerKind,
+          capability: unsupportedAdvanced.capability,
+          option: unsupportedAdvanced.option
+        }
+      );
+    }
+
+    const unsupportedSemantic = [
+      { requested: args.enabled === false, option: "enabled:false" },
+      { requested: args.temporary === true, option: "temporary:true" },
+      { requested: args.suspendPolicy !== undefined, option: "suspendPolicy" },
+      { requested: args.isLogMessage === true, option: "isLogMessage:true" },
+      { requested: args.isLogStack === true, option: "isLogStack:true" }
+    ].find(({ requested }) => requested);
+    if (unsupportedSemantic) {
+      throw new BreakPilotError(
+        ErrorCodes.UNSUPPORTED_CAPABILITY,
+        `Runtime provider does not implement breakpoint semantic ${unsupportedSemantic.option}.`,
+        {
+          providerKind,
+          option: unsupportedSemantic.option
+        }
+      );
+    }
   }
 
   #resolveSession(args: DebugToolArgs = {}): DebugSessionRecord {
