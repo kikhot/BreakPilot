@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import type { Socket } from "node:net";
 
 import { ToolRouter } from "../src/control/ToolRouter.ts";
@@ -94,6 +95,18 @@ assert.deepEqual(ideProviderCapabilities({
   hitConditionalBreakpoints: "native",
   tracepoints: "native"
 });
+assert.deepEqual(ideProviderCapabilities({
+  runToLine: false,
+  supportsRunToLine: true,
+  setVariable: false,
+  supportsSetVariable: true,
+  conditionalBreakpoints: false,
+  supportsConditionalBreakpoints: true,
+  hitConditionalBreakpoints: false,
+  supportsHitConditionalBreakpoints: true,
+  tracepoints: false,
+  supportsLogPoints: true
+}), ideUnsupported, "canonical false flags must override legacy true aliases");
 assert.notStrictEqual(dapProviderCapabilities(), dapProviderCapabilities());
 assert.notStrictEqual(ideProviderCapabilities(), ideProviderCapabilities());
 assert.deepEqual(Object.keys(dapProviderCapabilities()).sort(), Object.keys(ideProviderCapabilities()).sort());
@@ -134,8 +147,7 @@ bridge.registry.upsertSession("idea_caps", {
   ideSessionId: "idea_caps_session",
   workspaceRoot,
   state: "paused",
-  active: true,
-  capabilities: {}
+  active: true
 }, "paused");
 
 const ideSession = bridge.registry.findSession("idea_caps_session", "idea_caps");
@@ -146,6 +158,7 @@ const ideProvider = new IdeRuntimeProvider({
   ideSession,
   workspaceRoot
 });
+assert.deepEqual(ideSession.capabilities, {}, "sessions must store only session-declared overrides");
 assert.deepEqual(ideProvider.capabilities, {
   ...ideUnsupported,
   pause: "native",
@@ -169,6 +182,25 @@ assert.deepEqual(ideProvider.capabilities, {
   variableReferences: "snapshot"
 });
 
+bridge.registry.update("idea_caps", {
+  capabilities: {
+    debugCommands: true,
+    variableSnapshot: true,
+    supportsRunToLine: true,
+    supportsSetVariable: true
+  }
+});
+bridge.registry.upsertSession("idea_caps", {
+  type: IdeMessageTypes.IDE_SESSION_PAUSED,
+  ideSessionId: "idea_caps_session",
+  workspaceRoot,
+  state: "paused",
+  active: true,
+  capabilities: { runToLine: false, setVariable: false }
+}, "paused");
+assert.equal(ideProvider.capabilities.runToLine, "unsupported");
+assert.equal(ideProvider.capabilities.setValue, "unsupported");
+
 // Restore the live client capabilities for manager status/start assertions.
 bridge.registry.update("idea_caps", {
   capabilities: {
@@ -179,6 +211,14 @@ bridge.registry.update("idea_caps", {
     setVariableMode: "evaluateAssignment"
   }
 });
+bridge.registry.upsertSession("idea_caps", {
+  type: IdeMessageTypes.IDE_SESSION_PAUSED,
+  ideSessionId: "idea_caps_session",
+  workspaceRoot,
+  state: "paused",
+  active: true,
+  capabilities: {}
+}, "paused");
 const manager = new DebugSessionManager({ policy, ideBridge: bridge });
 
 const compactBeforeAdopt = await manager.bpDebugStatus({}) as AnyRecord;
@@ -285,5 +325,16 @@ assert.deepEqual({ drainCalls, runToLineCalls, setVariableCalls }, {
   runToLineCalls: 0,
   setVariableCalls: 0
 });
+
+const vscodeBridgeSource = fs.readFileSync(
+  new URL("../breakpilot-vscode/src/bridge/BridgeClient.ts", import.meta.url),
+  "utf8"
+);
+assert.match(vscodeBridgeSource, /setVariableMode:\s*"evaluateAssignment"/);
+const ideaBridgeSource = fs.readFileSync(
+  new URL("../breakpilot-idea/src/main/kotlin/bridge/BridgeClient.kt", import.meta.url),
+  "utf8"
+);
+assert.match(ideaBridgeSource, /"setVariableMode"\s+to\s+"evaluateAssignment"/);
 
 console.log("provider capability tests ok");

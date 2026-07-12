@@ -19,7 +19,7 @@ import { BreakPilotError, ErrorCodes } from "../../utils/errors.ts";
 import { makeId } from "../../utils/ids.ts";
 import { createDeferred, withTimeout } from "../../utils/timeout.ts";
 import type { RuntimeProviderCapabilities } from "../../types/capabilities.ts";
-import { ideProviderCapabilities } from "../ProviderCapabilities.ts";
+import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../ProviderCapabilities.ts";
 
 type BridgeEvent = { clientId?: string; message: BridgeMessage };
 
@@ -62,7 +62,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   get capabilities(): RuntimeProviderCapabilities {
     const client = this.bridge.registry.get(this.ideClientId)?.capabilities ?? {};
     const session = this.#sessionInfo()?.capabilities ?? {};
-    return ideProviderCapabilities({ ...client, ...session });
+    return ideProviderCapabilities(mergeIdeCapabilityRecords(client, session));
   }
 
   get threadId(): number | null {

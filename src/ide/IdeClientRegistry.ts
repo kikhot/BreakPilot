@@ -83,7 +83,7 @@ export class IdeClientRegistry {
       threadId: message.threadId ?? message.stopped?.threadId ?? existing?.threadId ?? null,
       stopped: message.stopped ?? existing?.stopped,
       topFrame: message.topFrame ?? message.stopped?.topFrame ?? existing?.topFrame,
-      capabilities: message.capabilities ?? existing?.capabilities ?? client?.capabilities ?? {},
+      capabilities: message.capabilities ?? existing?.capabilities ?? {},
       startedAt: existing?.startedAt ?? message.startedAt ?? now,
       updatedAt: now
     };

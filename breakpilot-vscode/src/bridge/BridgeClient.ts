@@ -123,7 +123,7 @@ export class BridgeClient {
       variableSnapshot: true,
       runToLine: true,
       setVariable: true,
-      setVariableMode: "native",
+      setVariableMode: "evaluateAssignment",
       conditionalBreakpoints: true,
       hitConditionalBreakpoints: true,
       tracepoints: true,

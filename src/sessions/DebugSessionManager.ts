@@ -35,7 +35,7 @@ import { VariableSerializer } from "../inspection/VariableSerializer.ts";
 import { SessionCoordinator } from "./SessionCoordinator.ts";
 import { SessionOwner, SessionState } from "./SessionOwner.ts";
 import { SessionStore } from "./SessionStore.ts";
-import { ideProviderCapabilities } from "../runtime/ProviderCapabilities.ts";
+import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../runtime/ProviderCapabilities.ts";
 
 type DebugToolArgs = AnyRecord & {
   sessionId?: string;
@@ -1237,10 +1237,10 @@ export class DebugSessionManager {
         ...(args.detail === "diagnostic"
           ? {
               providerKind: "ide",
-              capabilities: ideProviderCapabilities({
-                ...(this.ideBridge?.registry.get(session.clientId)?.capabilities ?? {}),
-                ...(session.capabilities ?? {})
-              })
+              capabilities: ideProviderCapabilities(mergeIdeCapabilityRecords(
+                this.ideBridge?.registry.get(session.clientId)?.capabilities ?? {},
+                session.capabilities ?? {}
+              ))
             }
           : {})
       }))
