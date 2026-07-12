@@ -4,6 +4,13 @@ import fs from "node:fs";
 const fixture = JSON.parse(
   fs.readFileSync(new URL("./fixtures/differential/hello-controller.json", import.meta.url), "utf8")
 ) as {
+  provenance: {
+    classification: string;
+    rawCaptureRetained: boolean;
+    cryptographicProof: boolean;
+    limitations: string[];
+    captureReplayGuide: string;
+  };
   source: { fileSuffix: string; line: number };
   expected: Record<string, string>;
   idea: {
@@ -16,6 +23,28 @@ const fixture = JSON.parse(
     values: Array<{ path: string[]; value: string }>;
   };
 };
+
+assert.deepEqual(fixture.provenance, {
+  classification: "deterministic-semantic-regression-fixture",
+  rawCaptureRetained: false,
+  cryptographicProof: false,
+  limitations: [
+    "Original raw IDEA and BreakPilot responses were not retained.",
+    "Capture commands, tool versions, timestamps, and raw-response hashes are unavailable."
+  ],
+  captureReplayGuide: "README.md"
+});
+const captureReplayGuide = fs.readFileSync(
+  new URL("./fixtures/differential/README.md", import.meta.url),
+  "utf8"
+);
+assert.match(captureReplayGuide, /deterministic semantic regression fixture/i);
+assert.match(captureReplayGuide, /not cryptographic proof/i);
+assert.match(captureReplayGuide, /shasum -a 256/);
+assert.match(
+  captureReplayGuide,
+  /node --experimental-strip-types test\/differential-debug-contract\.test\.ts/
+);
 
 const canonicalSource = {
   fileSuffix: "src/main/java/com/example/demo/controller/HelloController.java",

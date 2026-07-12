@@ -1,4 +1,14 @@
 {
+  "provenance": {
+    "classification": "deterministic-semantic-regression-fixture",
+    "rawCaptureRetained": false,
+    "cryptographicProof": false,
+    "limitations": [
+      "Original raw IDEA and BreakPilot responses were not retained.",
+      "Capture commands, tool versions, timestamps, and raw-response hashes are unavailable."
+    ],
+    "captureReplayGuide": "README.md"
+  },
   "source": {
     "fileSuffix": "src/main/java/com/example/demo/controller/HelloController.java",
     "line": 24

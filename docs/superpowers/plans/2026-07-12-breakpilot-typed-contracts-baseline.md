@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make every public BreakPilot debugger tool advertise and enforce a truthful typed contract, expose provider capabilities, and preserve the IDEA-vs-BreakPilot Java comparison as a repeatable acceptance baseline.
+**Goal:** Make every public BreakPilot debugger tool advertise and enforce a truthful typed contract, expose provider capabilities, and preserve the IDEA-vs-BreakPilot Java comparison as a deterministic semantic regression baseline without treating it as raw-capture proof.
 
 **Architecture:** Split reusable JSON-schema fragments and per-tool schemas out of `toolDefinitions.ts`, validate and normalize arguments in `ToolRouter` before manager dispatch, and give each runtime provider a normalized capability matrix. Keep all existing `bp_debug_*` names and compact success payloads while making their shapes explicit.
 
@@ -36,7 +36,8 @@
 - Create `test/tool-output-schema.property.test.ts`: every tool has non-generic output schema.
 - Create `test/tool-input-validation.test.ts`: validation/default/range/discriminator coverage.
 - Create `test/provider-capabilities.test.ts`: DAP and IDEA normalization coverage.
-- Create `test/fixtures/differential/hello-controller.json`: sanitized observed IDEA/BreakPilot baseline.
+- Create `test/fixtures/differential/hello-controller.json`: deterministic IDEA/BreakPilot semantic fixture; the original raw captures were not retained.
+- Create `test/fixtures/differential/README.md`: provenance limitations and the future live capture/replay procedure.
 - Create `test/differential-debug-contract.test.ts`: compare normalized semantic evidence.
 - Modify `test/debugger-mcp-contracts.test.ts`: replace old generic-schema assumptions.
 - Modify `test/hub-transports.test.ts`: assert transport-level validation shape.
@@ -598,18 +599,33 @@ git commit -m "feat(runtime): expose provider capability matrix"
 
 **Files:**
 - Create: `test/fixtures/differential/hello-controller.json`
+- Create: `test/fixtures/differential/README.md`
 - Create: `test/differential-debug-contract.test.ts`
 
 **Interfaces:**
-- Consumes: sanitized captured IDEA and BreakPilot results at the same Java stop.
+- Consumes: canonical sanitized IDEA and BreakPilot semantic values attributed to the same Java stop; raw responses and capture metadata were not retained.
 - Produces: provider-independent semantic assertions used by future real E2E tests.
 
 - [ ] **Step 1: Add the sanitized fixture**
 
 Store only deterministic fields:
 
+The fixture is a regression oracle, not independently repeatable capture
+evidence. Its provenance must state that raw responses, capture commands,
+versions, timestamps, and hashes are unavailable; do not reconstruct them.
+
 ```json
 {
+  "provenance": {
+    "classification": "deterministic-semantic-regression-fixture",
+    "rawCaptureRetained": false,
+    "cryptographicProof": false,
+    "limitations": [
+      "Original raw IDEA and BreakPilot responses were not retained.",
+      "Capture commands, tool versions, timestamps, and raw-response hashes are unavailable."
+    ],
+    "captureReplayGuide": "README.md"
+  },
   "source": {
     "fileSuffix": "src/main/java/com/example/demo/controller/HelloController.java",
     "line": 24
@@ -693,7 +709,7 @@ Expected: PASS and print `differential debugger contract tests ok`.
 - [ ] **Step 4: Commit the baseline**
 
 ```bash
-git add test/fixtures/differential/hello-controller.json test/differential-debug-contract.test.ts
+git add test/fixtures/differential/hello-controller.json test/fixtures/differential/README.md test/differential-debug-contract.test.ts
 git commit -m "test(ide): add differential debugger baseline"
 ```
 

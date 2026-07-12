@@ -164,8 +164,10 @@ MCP 返回的 breakpoint type、suspend policy、presentation 等字段也更完
    大对象和复杂现场。
 6. **安全边界**：workspace、attach endpoint、production policy、redaction，以及
    `readonly/guarded/unsafe` evaluate 模式比直接求值更适合自动化 agent。
-7. **可重复差异基线**：`HelloController.java:24` 的 sanitized fixture 同时保留 IDEA
-   frame presentation 与 BreakPilot 原始 path/value 证据，便于后续 E2E 防回归。
+7. **确定性语义回归基线（非采集证明）**：`HelloController.java:24` 的 sanitized
+   fixture 固定了 IDEA frame presentation 与 BreakPilot path/value 语义，便于测试
+   后续变更；但原始响应、采集命令、工具版本、时间戳与哈希均未保留，因此它不能独立证明
+   历史采集过程。相邻 README 记录了未来真实采集、哈希、清洗与回放流程。
 
 ## IDEA MCP 当前更好的地方
 

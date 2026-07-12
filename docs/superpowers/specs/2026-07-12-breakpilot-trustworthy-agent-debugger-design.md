@@ -16,9 +16,13 @@ request as verified or a timed-out transition as paused.
 
 ## Evidence Behind The Design
 
-The design follows a differential run against the same paused Java request in
-IDEA native MCP and BreakPilot MCP. Both stopped at
-`HelloController.java:24` and observed `analysis.score = 28`.
+The design was informed by sanitized semantic notes attributed to a differential
+run against the same paused Java request in IDEA native MCP and BreakPilot MCP.
+Those notes place both providers at `HelloController.java:24` with
+`analysis.score = 28`. The original raw responses, capture transcript, exact
+versions, timestamps, and hashes were not retained, so the checked-in fixture is
+a deterministic regression oracle rather than independently verifiable capture
+evidence.
 
 BreakPilot was better at returning structured frame and value nodes, project
 routing, IDE-session adoption, error codes, and aggregated context. It was
@@ -329,7 +333,8 @@ and optional observation without manually racing separate requests.
 The work is split into independently testable plans:
 
 1. **Typed contracts and differential baseline.** Exact schemas, runtime input
-   validation, capability matrix, and real-project parity fixtures.
+   validation, capability matrix, and a deterministic semantic parity fixture;
+   live capture evidence remains a future acceptance layer.
 2. **Operations and control correctness.** Operation store, asynchronous
    confirmation, execution locks, stop epochs, atomic control observations, and
    pause watchdog.
