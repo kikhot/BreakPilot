@@ -124,11 +124,22 @@ export class SecurityPolicy {
   }
 
   variableLimits(overrides: Partial<VariableLimits> = {}): Required<VariableLimits> {
+    const boundedInteger = (value: unknown, configuredMaximum: unknown, minimum: number): number => {
+      const rawMaximum = Number(configuredMaximum);
+      const maximum = Number.isFinite(rawMaximum)
+        ? Math.max(minimum, Math.floor(rawMaximum))
+        : minimum;
+      const rawValue = value === undefined ? maximum : Number(value);
+      if (!Number.isFinite(rawValue)) return maximum;
+      return Math.min(maximum, Math.max(minimum, Math.floor(rawValue)));
+    };
     return {
-      maxDepth: Number(overrides.maxDepth ?? this.policy.variables.maxDepth ?? 3),
-      maxItems: Number(overrides.maxItems ?? this.policy.variables.maxItems ?? 50),
-      maxStringLength: Number(
-        overrides.maxStringLength ?? this.policy.variables.maxStringLength ?? 2000
+      maxDepth: boundedInteger(overrides.maxDepth, this.policy.variables.maxDepth ?? 3, 0),
+      maxItems: boundedInteger(overrides.maxItems, this.policy.variables.maxItems ?? 50, 1),
+      maxStringLength: boundedInteger(
+        overrides.maxStringLength,
+        this.policy.variables.maxStringLength ?? 2000,
+        1
       ),
       redactPatterns: overrides.redactPatterns ?? this.policy.variables.redactPatterns ?? []
     };

@@ -39,9 +39,9 @@ export class ToolRouter {
     const clone = structuredClone(toolDefinitions) as ToolDefinition[];
     for (const tool of clone) {
       if (tool.name === "bp_debug_start") {
-        const lang = tool.inputSchema?.properties?.language;
-        if (lang) {
-          lang.enum = identifiers;
+        for (const property of ["language", "lang"]) {
+          const language = tool.inputSchema?.properties?.[property];
+          if (language) language.enum = identifiers;
         }
       }
     }
@@ -79,8 +79,10 @@ export class ToolRouter {
   #validationSchema(definition: ToolDefinition): ToolDefinition["inputSchema"] {
     if (definition.name !== "bp_debug_start") return definition.inputSchema;
     const schema = structuredClone(definition.inputSchema);
-    const language = schema.properties?.language;
-    if (language) language.enum = this.manager.adapters.listIdentifiers();
+    for (const property of ["language", "lang"]) {
+      const language = schema.properties?.[property];
+      if (language) language.enum = this.manager.adapters.listIdentifiers();
+    }
     return schema;
   }
 }

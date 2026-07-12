@@ -424,7 +424,7 @@ export class DebugSessionManager {
     const offset = args.offset ?? 0;
     const limit = args.limit ?? 50;
     const threads = await session.provider.listThreads();
-    const limited = threads.slice(offset, offset + limit).map((thread) => this.#threadView(thread));
+    const limited = threads.slice(offset, offset + limit).map((thread) => this.#threadView(thread, session));
     return ok(session.sessionId, { threads: limited, offset, totalCount: threads.length }, auditId);
   }
 
@@ -452,10 +452,14 @@ export class DebugSessionManager {
 
     if (normalized.ref !== undefined) {
       const limits = this.#variableLimits(normalized);
+      const requestedCount = Number(normalized.count ?? limits.maxItems);
+      const count = Number.isFinite(requestedCount)
+        ? Math.min(limits.maxItems, Math.max(1, Math.floor(requestedCount)))
+        : limits.maxItems;
       if (session.dap) {
         const variables = await session.dap.variables(Number(normalized.ref), {
           start: normalized.start ?? 0,
-          count: normalized.count ?? limits.maxItems
+          count
         });
         const serializer = new VariableSerializer(session.dap, limits, { objectFields: normalized.expand ?? "deep" });
         const items = await serializer.serializeVariableNodes(variables);
@@ -464,7 +468,11 @@ export class DebugSessionManager {
           items: items.map((item) => this.#compactNode(item))
         }, auditId);
       }
-      const result = await session.provider.inspectVariable?.({ variablesReference: normalized.ref, ...normalized }, limits);
+      const result = await session.provider.inspectVariable?.({
+        ...normalized,
+        variablesReference: normalized.ref,
+        count
+      }, limits);
       return ok(session.sessionId, { ref: normalized.ref, result }, auditId);
     }
 
@@ -1547,12 +1555,15 @@ export class DebugSessionManager {
     return fallback;
   }
 
-  #threadView(thread: AnyRecord): AnyRecord {
+  #threadView(thread: AnyRecord, session: DebugSessionRecord): AnyRecord {
+    const providerThreadId = session.provider.threadId;
     return {
       id: thread.id,
-      name: thread.name,
-      state: thread.state,
-      isCurrent: Boolean(thread.isCurrent),
+      name: String(thread.name ?? thread.id ?? ""),
+      state: String(thread.state ?? session.state),
+      isCurrent: thread.isCurrent === undefined
+        ? providerThreadId !== null && providerThreadId !== undefined && String(thread.id) === String(providerThreadId)
+        : Boolean(thread.isCurrent),
       frameCount: thread.frameCount ?? 0,
       ...(thread.partial ? { partial: true } : {})
     };
