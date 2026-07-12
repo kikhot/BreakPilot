@@ -35,6 +35,7 @@ export type BridgeMessage = {
   reason?: string;
   breakpoint?: AgentBreakpoint;
   breakpointId?: string;
+  removed?: boolean;
   capabilities?: AnyRecord;
   options?: AnyRecord;
   payload?: AnyRecord;
@@ -56,6 +57,7 @@ export type AgentBreakpoint = {
   hitCondition?: string;
   logMessage?: string;
   owner?: "agent" | "user";
+  enabled?: boolean;
   verified?: boolean;
   adapterBreakpointId?: number | string;
 };

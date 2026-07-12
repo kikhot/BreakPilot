@@ -92,7 +92,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async removeBreakpoint(breakpoint: BreakpointRecord): Promise<AnyRecord> {
-    return this.#request(
+    const response = await this.#request(
       IdeMessageTypes.AGENT_REMOVE_BREAKPOINT,
       {
         breakpointId: breakpoint.id,
@@ -104,6 +104,9 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       5000,
       (message) => message.breakpointId === breakpoint.id
     );
+    return {
+      removed: response.removed === true || response.result?.removed === true
+    };
   }
 
   async listBreakpoints(filter: BreakpointFilter = {}): Promise<BreakpointRecord[]> {

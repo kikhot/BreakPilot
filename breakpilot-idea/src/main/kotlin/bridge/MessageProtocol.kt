@@ -36,6 +36,7 @@ data class BridgeMessage(
     val description: String? = null,
     val breakpointId: String? = null,
     val breakpoint: AgentBreakpoint? = null,
+    val removed: Boolean? = null,
     val capabilities: Map<String, Any?> = emptyMap(),
     val options: Map<String, Any?> = emptyMap(),
     val snapshot: Map<String, Any?> = emptyMap(),

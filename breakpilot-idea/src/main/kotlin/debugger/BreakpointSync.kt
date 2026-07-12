@@ -98,9 +98,10 @@ class BreakpointSync(
 
     private fun removeAgentBreakpoint(agentId: String, message: BridgeMessage) {
         val manager = XDebuggerManager.getInstance(project).breakpointManager
-        val entry = byAgentId.remove(agentId)
+        val entry = byAgentId[agentId]
         val removed = if (entry != null) {
             manager.removeBreakpoint(entry.breakpoint)
+            byAgentId.remove(agentId)
             true
         } else {
             removeStoredAgentBreakpoint(manager, agentId, message.breakpoint)
@@ -110,7 +111,8 @@ class BreakpointSync(
             BridgeMessage(
                 type = MessageTypes.IdeBreakpointRemoved,
                 requestId = message.requestId,
-                breakpointId = agentId
+                breakpointId = agentId,
+                removed = removed
             )
         )
     }

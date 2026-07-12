@@ -843,23 +843,23 @@ export class DebugSessionManager {
       breakpointId
     });
     const breakpoint = this.breakpoints.list(session.sessionId).find((bp) => bp.id === breakpointId);
+    if (!breakpoint) return { removed: false };
+    const remaining = this.breakpoints
+      .listForSource(session.sessionId, breakpoint.file)
+      .filter((candidate) => candidate.id !== breakpointId);
+    const acknowledged = session.provider.removeBreakpoint
+      ? this.#breakpointRemovalAcknowledged(await session.provider.removeBreakpoint(breakpoint))
+      : await session.provider.setBreakpoints(breakpoint.file, remaining).then(() => true);
+    if (!acknowledged) return { removed: false };
     const removed = this.breakpoints.remove(session.sessionId, breakpointId);
-    if (breakpoint) {
-      const remaining = this.breakpoints.listForSource(session.sessionId, breakpoint.file);
-      if (session.provider.removeBreakpoint) {
-        await session.provider.removeBreakpoint(breakpoint);
-      } else {
-        await session.provider.setBreakpoints(breakpoint.file, remaining);
-      }
-      if (session.providerKind === "dap") {
-        this.#broadcastToWorkspace(session.workspaceRoot, {
-          type: "agent_remove_breakpoint",
-          sessionId: session.sessionId,
-          breakpointId,
-          file: breakpoint.file,
-          line: breakpoint.line
-        });
-      }
+    if (removed && session.providerKind === "dap") {
+      this.#broadcastToWorkspace(session.workspaceRoot, {
+        type: "agent_remove_breakpoint",
+        sessionId: session.sessionId,
+        breakpointId,
+        file: breakpoint.file,
+        line: breakpoint.line
+      });
     }
     return { removed };
   }
@@ -1038,7 +1038,10 @@ export class DebugSessionManager {
       ide,
       file
     });
-    const filtered = this.#filterBreakpointRecords(breakpoints, args);
+    const matchingFile = file
+      ? breakpoints.filter((breakpoint) => path.resolve(breakpoint.file) === path.resolve(file))
+      : breakpoints;
+    const filtered = this.#filterBreakpointRecords(matchingFile, args);
     return ok(null, {
       breakpoints: filtered.map((breakpoint) => this.#projectBreakpointView(breakpoint)),
       totalCount: filtered.length
@@ -1067,9 +1070,8 @@ export class DebugSessionManager {
     if (!this.#canRemoveBreakpointOwner(breakpoint, args.owner)) {
       return ok(null, this.#protectedBreakpointRemoveView(breakpoint), auditId);
     }
-    this.breakpoints.removeProject(breakpoint.id);
     const requestId = makeId("ide_req");
-    await this.#sendIdeClientRequest(
+    const response = await this.#sendIdeClientRequest(
       breakpoint.clientId,
       {
         type: IdeMessageTypes.AGENT_REMOVE_BREAKPOINT,
@@ -1086,8 +1088,10 @@ export class DebugSessionManager {
         message.breakpoint?.id === breakpoint.id
       )
     );
+    const removed = this.#breakpointRemovalAcknowledged(response);
+    if (removed) this.breakpoints.removeProject(breakpoint.id);
     return ok(null, {
-      removed: true,
+      removed,
       breakpointId: breakpoint.id
     }, auditId);
   }
@@ -1540,6 +1544,10 @@ export class DebugSessionManager {
       breakpointId: breakpoint.id,
       message: `Breakpoint ${breakpoint.id} is owned by ${breakpoint.owner ?? "agent"} and was not removed. Pass owner:"all" to remove it.`
     };
+  }
+
+  #breakpointRemovalAcknowledged(response: AnyRecord): boolean {
+    return response.removed === true || (response.result as AnyRecord | undefined)?.removed === true;
   }
 
   #numberOrUndefined(value: unknown): number | undefined {

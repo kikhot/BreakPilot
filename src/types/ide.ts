@@ -12,6 +12,7 @@ export interface BridgeMessage {
   workspaceRoot?: string;
   breakpoint?: BreakpointRecord | BreakpointInput | AnyRecord;
   breakpointId?: string;
+  removed?: boolean;
   confirmationId?: string;
   action?: string;
   command?: string;

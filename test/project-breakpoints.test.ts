@@ -15,6 +15,8 @@ import { dapProviderCapabilities } from "../src/runtime/ProviderCapabilities.ts"
 class FakeIdeBridge extends EventEmitter {
   registry = new IdeClientRegistry();
   sent: BridgeMessage[] = [];
+  removeAcknowledged = true;
+  listedBreakpoints: AnyRecord[] = [];
 
   addClient(clientId: string, ide: "vscode" | "idea", workspaceRoot: string) {
     this.registry.add({} as Socket, {
@@ -66,7 +68,8 @@ class FakeIdeBridge extends EventEmitter {
           clientId,
           requestId: message.requestId,
           ideSessionId: message.ideSessionId,
-          breakpointId: message.breakpointId
+          breakpointId: message.breakpointId,
+          removed: this.removeAcknowledged
         };
         this.emit(IdeMessageTypes.IDE_BREAKPOINT_REMOVED, { clientId, message: response });
       }
@@ -77,16 +80,16 @@ class FakeIdeBridge extends EventEmitter {
           requestId: message.requestId,
           ideSessionId: message.ideSessionId,
           result: {
-            breakpoints: [
-              {
-                id: `${clientId}:user:21`,
-                file: filePath,
-                line: 21,
-                owner: "user",
-                enabled: true,
-                verified: true
-              }
-            ]
+            breakpoints: this.listedBreakpoints.length > 0
+              ? this.listedBreakpoints
+              : [{
+                  id: `${clientId}:user:21`,
+                  file: filePath,
+                  line: 21,
+                  owner: "user",
+                  enabled: true,
+                  verified: true
+                }]
           }
         };
         this.emit(IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT, { clientId, message: response });
@@ -140,7 +143,11 @@ function managerWithBridge(bridge: FakeIdeBridge) {
   return new DebugSessionManager({ policy, ideBridge: bridge as unknown as ConstructorParameters<typeof DebugSessionManager>[0]["ideBridge"] });
 }
 
-function addFakeSession(manager: DebugSessionManager, sessionId = "sess_existing") {
+function addFakeSession(
+  manager: DebugSessionManager,
+  sessionId = "sess_existing",
+  removeBreakpoint?: () => Promise<AnyRecord>
+) {
   manager.sessions.add({
     sessionId,
     language: "python",
@@ -164,6 +171,7 @@ function addFakeSession(manager: DebugSessionManager, sessionId = "sess_existing
           line: breakpoint.line,
           column: breakpoint.column
         })),
+      ...(removeBreakpoint ? { removeBreakpoint } : {}),
       waitForBreakpoint: async () => ({ reason: "breakpoint" }),
       getRuntimeSnapshot: async () => ({
         sessionId,
@@ -349,6 +357,87 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
     }
   ]);
   assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_LIST_RUN_CONFIGURATIONS);
+}
+
+{
+  const bridge = new FakeIdeBridge();
+  const manager = managerWithBridge(bridge);
+  let acknowledged = false;
+  addFakeSession(manager, "sess_removal_truth", async () => ({ removed: acknowledged }));
+  const created = await manager.bpDebugSetBreakpoint({
+    sessionId: "sess_removal_truth",
+    filePath,
+    line: 31
+  });
+  const breakpointId = String(created.breakpointId);
+
+  const missing = await manager.bpDebugRemoveBreakpoint({
+    sessionId: "sess_removal_truth",
+    breakpointId
+  });
+  assert.equal(missing.removed, false);
+  assert.equal(manager.breakpoints.list("sess_removal_truth").some((breakpoint) => breakpoint.id === breakpointId), true);
+
+  acknowledged = true;
+  const removed = await manager.bpDebugRemoveBreakpoint({
+    sessionId: "sess_removal_truth",
+    breakpointId
+  });
+  assert.equal(removed.removed, true);
+  assert.equal(manager.breakpoints.list("sess_removal_truth").some((breakpoint) => breakpoint.id === breakpointId), false);
+}
+
+{
+  const bridge = new FakeIdeBridge();
+  bridge.addClient("vscode_one", "vscode", workspaceRoot);
+  const manager = managerWithBridge(bridge);
+  const created = await manager.bpDebugSetBreakpoint({ filePath, line: 32, ide: "vscode" });
+  const breakpointId = String(created.breakpointId);
+
+  bridge.removeAcknowledged = false;
+  const missing = await manager.bpDebugRemoveBreakpoint({ breakpointId, ide: "vscode" });
+  assert.equal(missing.removed, false);
+  assert.ok(manager.breakpoints.findProject(breakpointId), "missing bridge removal must retain desired state");
+
+  bridge.removeAcknowledged = true;
+  const removed = await manager.bpDebugRemoveBreakpoint({ breakpointId, ide: "vscode" });
+  assert.equal(removed.removed, true);
+  assert.equal(manager.breakpoints.findProject(breakpointId), undefined);
+}
+
+{
+  const bridge = new FakeIdeBridge();
+  bridge.addClient("idea_one", "idea", workspaceRoot);
+  const manager = managerWithBridge(bridge);
+  const otherFile = path.join(workspaceRoot, "src", "control", "ToolRouter.ts");
+  bridge.listedBreakpoints = [
+    { id: "disabled-target", file: filePath, line: 40, owner: "user", enabled: false, verified: true },
+    { id: "enabled-target", file: filePath, line: 41, owner: "user", enabled: true, verified: true },
+    { id: "other-file", file: otherFile, line: 42, owner: "user", enabled: true, verified: true }
+  ];
+
+  const allForFile = await manager.bpDebugListBreakpoints({
+    ide: "idea",
+    filePath,
+    owner: "all",
+    includeDisabled: true
+  });
+  assert.deepEqual(
+    (allForFile.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+    ["disabled-target", "enabled-target"]
+  );
+  assert.equal((allForFile.breakpoints as AnyRecord[])[0]?.enabled, false);
+
+  const enabledForFile = await manager.bpDebugListBreakpoints({
+    ide: "idea",
+    filePath,
+    owner: "all",
+    includeDisabled: false
+  });
+  assert.deepEqual(
+    (enabledForFile.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+    ["enabled-target"]
+  );
 }
 
 console.log("project breakpoint routing tests ok");

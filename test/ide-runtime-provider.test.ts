@@ -11,6 +11,7 @@ class FakeIdeBridge extends EventEmitter {
   registry = new IdeClientRegistry();
   sent: BridgeMessage[] = [];
   evaluateCalls = 0;
+  removeAcknowledged = false;
 
   constructor() {
     super();
@@ -93,6 +94,20 @@ class FakeIdeBridge extends EventEmitter {
                 }
               ]
             }
+          }
+        });
+        return;
+      }
+
+      if (message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT) {
+        this.emit("message", {
+          clientId,
+          message: {
+            type: IdeMessageTypes.IDE_BREAKPOINT_REMOVED,
+            requestId: message.requestId,
+            ideSessionId: message.ideSessionId,
+            breakpointId: message.breakpointId,
+            removed: this.removeAcknowledged
           }
         });
         return;
@@ -184,6 +199,19 @@ assert.deepEqual(breakpoints?.map((breakpoint) => ({
   enabled: true
 }]);
 assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_LIST_BREAKPOINTS), true);
+
+const removableBreakpoint = {
+  id: "agent-breakpoint",
+  sessionId: "sess_ide",
+  file: "/workspace/Hello.java",
+  line: 21,
+  owner: "agent",
+  verified: true,
+  createdAt: new Date(0).toISOString()
+};
+assert.deepEqual(await provider.removeBreakpoint?.(removableBreakpoint), { removed: false });
+bridge.removeAcknowledged = true;
+assert.deepEqual(await provider.removeBreakpoint?.(removableBreakpoint), { removed: true });
 
 const setValue = await provider.setVariable?.({ path: ["name"], newValue: "\"Katherine Johnson\"" });
 assert.deepEqual(setValue, {

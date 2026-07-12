@@ -38,12 +38,14 @@ export class BreakpointSync {
             this.bridge.send({
               type: MessageTypes.IdeBreakpointRemoved,
               breakpointId: agentId,
+              removed: true,
               breakpoint: entry ? this.toAgentBreakpoint(entry.breakpoint, agentId, "agent") : undefined
             });
           } else if (removed instanceof vscode.SourceBreakpoint) {
             this.bridge.send({
               type: MessageTypes.IdeBreakpointRemoved,
               breakpointId: removed.id,
+              removed: true,
               breakpoint: this.toAgentBreakpoint(removed, removed.id, "user")
             });
           }
@@ -126,18 +128,25 @@ export class BreakpointSync {
 
   private removeAgentBreakpoint(agentId: string, message: BridgeMessage) {
     const entry = this.byAgentId.get(agentId);
+    let removed = false;
     if (entry) {
-      this.byAgentId.delete(agentId);
-      this.byVsCodeId.delete(entry.breakpoint.id);
       this.suppressRemovedIds.add(entry.breakpoint.id);
-      vscode.debug.removeBreakpoints([entry.breakpoint]);
+      try {
+        vscode.debug.removeBreakpoints([entry.breakpoint]);
+        this.byAgentId.delete(agentId);
+        this.byVsCodeId.delete(entry.breakpoint.id);
+        removed = true;
+      } catch {
+        this.suppressRemovedIds.delete(entry.breakpoint.id);
+      }
     }
     this.bridge.send({
       type: MessageTypes.IdeBreakpointRemoved,
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
-      breakpointId: agentId
+      breakpointId: agentId,
+      removed
     });
   }
 
@@ -184,7 +193,8 @@ export class BreakpointSync {
       hitCondition: breakpoint.hitCondition,
       logMessage: breakpoint.logMessage,
       owner,
-      verified: breakpoint.enabled
+      enabled: breakpoint.enabled,
+      verified: true
     };
   }
 
