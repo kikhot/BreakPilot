@@ -1,310 +1,227 @@
-# IDEA MCP Debugger 与 BreakPilot MCP Debugger 对照结论
+# IDEA MCP Debugger 与 BreakPilot MCP Debugger 对照报告
 
-本文对照的是当前会话里可用的 IDEA MCP debugger 工具和当前 BreakPilot 代码中的
-`bp_debug_*` 工具。结论按 agent 实际使用场景组织，而不是按源码文件组织。
+本文比较 IDEA 原生 MCP debugger 与当前 BreakPilot Phase 1 的公开契约和 provider
+实现。对照目标不是判断“是否存在同名工具”，而是判断 agent 能否可靠地控制断点、
+理解暂停现场，并在复杂问题中依据真实能力选择下一步。
 
-## 总览结论
+## 结论摘要
 
-BreakPilot 现在已经覆盖了 IDEA MCP debugger 的主要调试闭环：
+BreakPilot 已形成完整的 agent 调试控制面：15 个 `bp_debug_*` 工具统一覆盖启动、
+run configuration、状态、执行控制、run-to-line、线程、调用栈、栈帧、变量读取与修改、
+表达式求值、上下文和断点生命周期。它已经具备此前文档误写为“缺失”的能力：
 
-- 启动或接入调试会话
-- 查看调试状态
-- continue / step / stop / wait
-- 线程、调用栈、栈帧变量
-- 表达式求值
-- 按路径读取变量
-- 设置、列出、删除断点
-- 修改变量值的工具入口
+- `bp_debug_run_to_line` 是公开工具；当前 IDEA/VS Code bridge 声明 native，DAP
+  provider 明确为 unsupported，且没有临时断点 fallback。
+- `bp_debug_threads` 与 `bp_debug_call_stack` 都支持 `offset + limit`；`threadId` 可以是
+  number 或 opaque string。
+- `bp_debug_set_value` 有正式入口；当前 IDEA/VS Code 语义是
+  `evaluateAssignment`，DAP 是否 native 由 adapter 能力决定。
+- `bp_debug_list_breakpoints` 会优先请求 IDE 原生 breakpoint snapshot；没有可用 IDE
+  bridge target 时才可能使用 BreakPilot local project store。
+- 断点输入已包含 `enabled`、`temporary`、`suspendPolicy`、`isLogMessage`、
+  `isLogStack` 和 `owner`；删除与列表也有 owner filter。
 
-但还没有做到完全一一等价。主要差距在四类：
+BreakPilot 仍未与 IDEA MCP 完全等价。最主要差距已经从“缺工具”转为“provider
+保真度和可验证性”：已有 breakpoint id 的更新/迁移目前统一 unsupported；event drain
+目前 unsupported；IDEA bridge 对高级断点字段的实际映射不完整；IDE 栈有时只能提供
+top-frame snapshot；`evaluateAssignment` 也不等同于原生变量 slot setter。
 
-1. **运行入口精度**  
-   IDEA MCP 可以通过 `filePath + line` 直接发现并启动可运行入口；BreakPilot 主要通过
-   `runConfigName`、`mode=ide` adopt、headless launch/attach 表达。BreakPilot 的
-   `filePath + line` IDE 启动依赖 IDE bridge 能力，不等价于 IDEA MCP 的 gutter run
-   discovery。
+## 必须分开的三层
 
-2. **IDE 原生断点能力**  
-   IDEA MCP 支持更新已有 breakpoint id、临时断点、log message、log stack、suspend
-   policy、enabled 开关、owner 过滤等完整断点模型。BreakPilot 目前只暴露 agent 断点的
-   简洁模型，支持 `condition`、`hitCondition`、`logMessage` 等字段，但实际 IDE 插件侧
-   对日志断点、临时断点、suspend policy、禁用/启用已有断点还没有完整等价实现。
+对 agent 来说，下面三层不能混为一谈：
 
-3. **线程和栈帧定位精度**  
-   IDEA MCP 的 `threadId` 是 debugger 显示层使用的 opaque string，`frameIndex` 直接来自
-   当前暂停栈。BreakPilot 将线程 id 规整为 number，并返回 compact frame。对于 IDEA
-   provider，当前栈能力有时是 partial/top-frame 为主，不总是和 IDEA MCP 的完整栈分页等价。
+1. **契约存在**：`tools/list` 中有工具和严格 input/output schema。
+2. **provider 声明支持**：`bp_debug_start` 或 diagnostic status 返回的 capability matrix
+   不是 `unsupported`。
+3. **运行结果保真**：IDE 插件或 DAP adapter 确实完成操作，并返回可核验的现场证据。
 
-4. **运行控制能力仍有环境依赖**  
-   BreakPilot 的 schema 里有 `pause`，代码也已补 `IdeRuntimeProvider.pause()` 和
-   `agent_pause` bridge 消息；但实测如果正在运行的 BreakPilot MCP 服务端仍是旧进程，
-   `bp_debug_control(action="pause")` 仍会报 provider 不支持。也就是说“代码能力已补”，
-   但运行时是否可用取决于 MCP 服务端和 IDEA 插件是否都加载了最新版本。
+IDEA MCP 与 IDE 本体同进程，通常在第 2、3 层更直接。BreakPilot 多了一层跨 IDE/DAP
+抽象，因此必须把 capability matrix 当成权威事实，而不能从工具名推断能力。工具存在但
+capability 为 `unsupported` 时，正确行为是返回 `UNSUPPORTED_CAPABILITY`。
 
-## 一一对应表
+## 能力总表
 
-### 1. 调试会话启动与接入
+| 调试环节 | IDEA MCP | BreakPilot MCP | 当前判断 |
+|---|---|---|---|
+| 启动已有 run configuration | 原生 | `bp_debug_start(runConfigName)` | 都支持；BreakPilot 依赖 bridge discovery/fidelity。 |
+| 从源码位置发现运行入口 | IDEA 原生 gutter/run discovery | `bp_debug_run_configurations(filePath)` + `bp_debug_start(filePath,line)` | 契约对应；IDEA 的原生解析更成熟。 |
+| 复用现有 IDE session | 直接操作 IDE session | `bp_debug_start(mode="ide", ideSessionId)` | BreakPilot 额外提供显式 adopt。 |
+| Headless 调试 | 不属于 IDEA MCP 核心定位 | DAP launch/attach | BreakPilot 明显更强。 |
+| 状态 | 完整 IDE 视图 | compact 默认、diagnostic 可带 capabilities | BreakPilot 更适合 agent 决策，IDEA 信息更丰富。 |
+| pause / resume / step / wait / stop | 原生 | capability-gated control | 常用闭环对应。 |
+| drain events | IDEA 可返回 debugger/tracepoint 事件 | `eventDrain: unsupported` | IDEA 更完整。 |
+| run-to-line | 原生 | IDE bridge native；DAP unsupported | 工具已存在，provider 覆盖不同。 |
+| 线程/调用栈分页 | `offset + limit` | `offset + limit` | 契约已对齐；IDE 栈完整度仍可能为 partial。 |
+| frame/value | 原生 debugger object view | compact node、path 与 opaque `ref` | BreakPilot 更稳定、精简。 |
+| evaluate | 原生 | `readonly/guarded/unsafe` policy | BreakPilot 的安全控制更强。 |
+| set value | 原生 setter | DAP native 或 IDE `evaluateAssignment` | 入口对应，mutation 语义不完全等价。 |
+| 创建断点 | 原生完整模型 | location mode + advanced fields | 契约完整度提高，IDE provider 映射仍不齐。 |
+| 更新已有断点 | 原生 breakpoint id update/relocate | update mode 已注册，但 capability unsupported | IDEA 明显更强。 |
+| 列出断点 | IDE 原生完整对象 | 优先 native snapshot，必要时 local fallback | 已非“仅本地 store”，但字段保真度较低。 |
+| 删除断点 | id/location/owner 相关能力 | id 或 location，并支持 owner filter | 基础闭环对应。 |
 
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_start_debugger_session(configurationName)` | `bp_debug_start(runConfigName)` | 接近一一对应 | 都可通过已有 IDE run configuration 启动调试。BreakPilot 需要 IDE bridge 支持 `agent_start_debug`。 |
-| `xdebug_start_debugger_session(filePath, line)` | `bp_debug_start(filePath, line)` | 部分对应 | IDEA MCP 原生从代码位置启动；BreakPilot 也有参数，但依赖 IDEA bridge 从 source line 找 run config。 |
-| `xdebug_start_debugger_session(...launch overrides...)` | `bp_debug_start(args/cwd/env/...)` | 部分对应 | BreakPilot headless DAP launch 支持更多 adapter 参数；IDE run config override 能力没有完全按 IDEA MCP 的 `supportsDynamicLaunchOverrides` 暴露。 |
-| `xdebug_get_debugger_status()` 后复用 session | `bp_debug_start(mode="ide", ideSessionId)` | BreakPilot 额外能力 | BreakPilot 可以 adopt 已存在 IDE debug session，并把它变成 BreakPilot session。IDEA MCP 本身直接操作 IDE session，不需要 adopt。 |
+## 关键差异分析
 
-结论：启动层面不是完全一一对应。IDEA MCP 更贴近 IDE 原生运行入口；BreakPilot 多了
-headless DAP launch/attach 和 IDE session adopt。
+### 1. 启动与 run configuration
 
-### 2. 调试状态
+BreakPilot 除了 IDE run configuration，还能执行 headless DAP launch/attach，并能 adopt
+已存在的 IDE session。这使同一套 agent 工具可以跨 IDEA、VS Code 和非 IDE 运行环境。
 
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_get_debugger_status()` | `bp_debug_status()` | 一一对应，但视图不同 | IDEA 返回 IDE debug sessions；BreakPilot 返回 `activeSessionId`、BreakPilot sessions、`ideConnected`、`ideSessions`。 |
+IDEA MCP 的优势是直接复用 IDE 原生 run configuration 与 gutter 上下文。BreakPilot 的
+`filePath + line` 契约已经存在，但能否正确找到可运行入口仍取决于 bridge；后续应把
+“候选配置、选中原因、不可运行原因”做成稳定的结构化结果。
 
-BreakPilot 的状态是 agent 视角，字段更少、更 compact，不返回完整 IDE client、capabilities、
-历史 session 等冗余信息。
+### 2. 状态与能力矩阵
 
-### 3. 执行控制
+BreakPilot compact status 只返回 agent 继续调试所需的 live session 摘要；
+`detail: "diagnostic"` 才增加 `providerKind` 与 capability matrix。
+`bp_debug_start` 则始终返回它们，避免 agent 启动后盲目尝试操作。
 
-| IDEA MCP | BreakPilot MCP | 对应程度 | 当前状态 |
-|---|---|---:|---|
-| `xdebug_control_session(action="RESUME")` | `bp_debug_control(action="resume")` | 一一对应 | 已实测可用。 |
-| `xdebug_control_session(action="WAIT_FOR_PAUSE")` | `bp_debug_control(action="wait")` | 一一对应 | 都等待 breakpoint/pause 事件。 |
-| `xdebug_control_session(action="STEP_OVER")` | `bp_debug_control(action="stepOver")` | 一一对应 | 语义对应。 |
-| `xdebug_control_session(action="STEP_INTO")` | `bp_debug_control(action="stepInto")` | 一一对应 | 语义对应。 |
-| `xdebug_control_session(action="STEP_OUT")` | `bp_debug_control(action="stepOut")` | 一一对应 | 语义对应。 |
-| `xdebug_control_session(action="STOP")` | `bp_debug_control(action="stop")` | 一一对应 | 语义对应。 |
-| `xdebug_control_session(action="PAUSE")` | `bp_debug_control(action="pause")` | 设计对应，运行需验证 | BreakPilot 代码已补 pause；当前实测旧服务端仍报不支持。 |
-| `xdebug_control_session(action="DRAIN_EVENTS")` | `bp_debug_control(action="drainEvents")` | 部分对应 | IDEA MCP 可返回 breakpoint errors / tracepoint outputs；BreakPilot 当前默认返回空事件结构。 |
+能力矩阵目前覆盖：
 
-结论：常用控制能力对应得比较完整，最大缺口是 `pause` 的运行时加载状态和
-`drainEvents` 的事件内容。
+- `pause`、`stepping`、`runToLine`
+- `variableReferences`、`setValue`
+- `breakpointUpdate`
+- `conditionalBreakpoints`、`hitConditionalBreakpoints`、`tracepoints`
+- `eventDrain`
 
-### 4. 线程列表
+这比返回一组松散布尔值更适合 agent，因为 `native`、`fallback`、`unsupported` 能直接
+驱动操作选择。不过当前矩阵还没有解释“为什么 unsupported”、能力来自 client 还是
+session override、以及某项 native 能力的版本来源，这些是后续可增强的诊断信息。
 
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_get_threads(limit, offset)` | `bp_debug_threads(limit)` | 部分对应 | BreakPilot 没有 offset；线程 id 类型也不同。IDEA MCP 返回更贴近 IDE 线程 UI 的字段。 |
+### 3. 线程、调用栈与现场读取
 
-BreakPilot 返回更紧凑，适合 agent 快速选择当前线程；但分页能力和 IDE 线程展示细节较少。
+旧结论称 BreakPilot 没有 offset、只接受 number thread id，已经不成立。线程和调用栈
+都支持 `offset + limit`，thread id schema 允许 number/string。BreakPilot frame 只保留
+`index/id/filePath/line/function` 等稳定字段，变量节点使用有序数组、结构化 `path` 和
+opaque `ref`，能避免同名变量覆盖，也方便跨 provider 归一化。
 
-### 5. 调用栈
+IDEA MCP 仍有更完整的 debugger presentation 和原生 frame identity。BreakPilot 的 IDE
+provider 在某些暂停状态只能得到 top frame，此时会返回 partial 语义；agent 不应把
+partial stack 当作完整调用链。后续应把“完整度、截断原因、可重试方式”都结构化。
 
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_get_stack(threadId, limit, offset)` | `bp_debug_call_stack(threadId, limit)` | 部分对应 | BreakPilot 没有 offset；IDEA MCP 的 `threadId` 是 string，BreakPilot 是 number。 |
+### 4. 变量修改
 
-BreakPilot 返回 frame 的 `index/id/filePath/line/function`，符合“少而关键”的目标。
-但 IDEA MCP 的分页和原始 frame presentation 更完整。
+`bp_debug_set_value(path,newValue)` 已存在，并在调用前检查 `setValue` capability：
 
-### 6. 栈帧变量
+- DAP adapter 明确声明 `supportsSetVariable` 时为 `native`。
+- 当前 IDEA/VS Code bridge 声明 `evaluateAssignment`，即通过当前 frame 中的赋值表达式
+  完成修改。
+- 不支持时返回 `UNSUPPORTED_CAPABILITY`。
 
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_get_frame_values(frameIndex, depth)` | `bp_debug_frame(frameIndex, depth, limit, expand)` | 一一对应，BreakPilot 更紧凑 | 都能读取当前 frame 的 locals/fields。BreakPilot 节点只保留 `name/value/path/type/ref/children` 等关键字段。 |
+`evaluateAssignment` 比“没有能力”更实用，但不等价于 IDEA 原生 setter：表达式可能受
+语言语法、作用域、setter 副作用和求值策略影响。agent 必须能看到该模式，并在修改后
+重新读取变量验证结果。
 
-BreakPilot 的 `bp_debug_frame` 更适合 agent，因为没有大量 UI presentation 和原始调试器字段。
+### 5. Run-to-line
 
-### 7. 按路径读取变量
+`bp_debug_run_to_line(filePath,line)` 已是原子公开工具。当前 IDEA 与 VS Code bridge
+声明 native；DAP provider 明确 unsupported。BreakPilot 当前不会自动组合
+“临时断点 + resume + wait + cleanup”，因此不会把可能失败的组合流程伪装成成功。
 
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_get_value_by_path(path, depth)` | `bp_debug_value(path, depth)` | 一一对应 | 都按路径读取嵌套变量。 |
-| 变量 ref 展开 | `bp_debug_value(ref, start, count)` | BreakPilot 额外/兼容 DAP 能力 | BreakPilot 同时支持按不透明 `ref` 展开变量，方便 headless DAP provider。 |
+下一步若引入 fallback，能力必须显示为 `fallback`，结果需要报告临时断点 id、是否命中
+目标行、cleanup 状态和中途停在其他断点的原因。
 
-### 8. 表达式求值
+### 6. 断点模型
 
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_evaluate_expression(expression, frameIndex, depth)` | `bp_debug_eval(expression, frameIndex, mode)` | 一一对应，但安全模型不同 | IDEA MCP 直接求值；BreakPilot 加了 `readonly/guarded/unsafe` 安全模式和确认策略。 |
-
-实测当前安装插件后，`bp_debug_eval("name.toUpperCase()")` 已返回真实值
-`ADA LOVELACE`，不再返回 `Collecting data…`。这说明 IDEA 插件侧 evaluate 结果读取已生效。
-
-### 9. 修改变量
-
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_set_variable(path, newValue)` | `bp_debug_set_value(path, newValue)` | 工具对应，provider 能力不完全 | BreakPilot 工具有对应入口，但 IDEA provider 当前返回“不支持变量 mutation”。headless DAP provider 支持度取决于 adapter。 |
-
-结论：工具层面对齐了，但 BreakPilot 对 IDEA provider 的 set value 还不是等价能力。
-
-### 10. 断点设置
-
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_set_breakpoint(filePath, line)` | `bp_debug_set_breakpoint(filePath, line)` | 一一对应 | 都能设置行断点。 |
-| `condition` | `condition` | 一一对应 | 都有条件断点字段。 |
-| `hitCondition` | `hitCondition` | 一一对应 | 都有 hit condition 字段。 |
-| `logMessage` / `isLogMessage` / `isLogStack` | `logMessage` | 部分对应 | BreakPilot schema 有 `logMessage`，但没有单独 `isLogMessage/isLogStack`。 |
-| `suspendPolicy` | 无完整对应 | 缺失 | BreakPilot 当前断点工具没有公开 suspend policy。 |
-| `temporary` | 无完整对应 | 缺失 | BreakPilot 当前没有临时断点字段。 |
-| `enabled` | 无完整对应 | 缺失 | BreakPilot 当前不支持设置时禁用或更新启用状态。 |
-| `breakpointId` 模式更新已有断点 | 无完整对应 | 缺失 | BreakPilot set 只创建 agent 断点，不支持按 id 更新/relocate。 |
-| `owner` 参数 | 默认 agent-owned | 部分对应 | BreakPilot 断点默认 agent-owned，不暴露 user/agent owner 管理为完整参数。 |
-
-结论：基础断点设置对应；高级断点能力 IDEA MCP 明显更完整。
-
-### 11. 断点列表
-
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_list_breakpoints(filePath?)` | `bp_debug_list_breakpoints(filePath?)` | 部分对应 | IDEA MCP 返回 IDE 中所有断点，包含 user/agent、enabled、type、suspendPolicy 等；BreakPilot 返回 BreakPilot 管理的紧凑断点。 |
-
-BreakPilot 的 list 更适合 agent 管理自己创建的断点，但不是完整 IDE breakpoint viewer。
-
-### 12. 断点删除
-
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_remove_breakpoint(breakpointId)` | `bp_debug_remove_breakpoint(breakpointId)` | 一一对应 | 都可按 id 删除。 |
-| `xdebug_remove_breakpoint(filePath, line)` | `bp_debug_remove_breakpoint(filePath, line)` | 一一对应 | 都可按位置删除。 |
-| `owner=user/agent` filter | 无完整对应 | 缺失 | BreakPilot 没有公开 owner filter。 |
-
-实测当前安装插件后，BreakPilot 创建的 21 行 agent 断点删除后不再命中；后续停在 24 行是用户断点。
-
-### 13. Run-to-line
-
-| IDEA MCP | BreakPilot MCP | 对应程度 | 说明 |
-|---|---|---:|---|
-| `xdebug_run_to_line(filePath, line)` | 无直接工具 | 缺失 | BreakPilot 当前可用“临时断点 + resume + remove”组合模拟，但没有一条原子工具。 |
-
-这是 IDEA MCP 目前比 BreakPilot 明确多出的一个调试操作。
-
-## IDEA MCP 有、BreakPilot 还没有或不完整的能力
-
-下面是最值得补的差距，按优先级排序。
-
-### P0：`pause` 的实际运行时一致性
-
-BreakPilot 代码已有：
-
-- `bp_debug_control(action="pause")`
-- `IdeRuntimeProvider.pause()`
-- `agent_pause` bridge 消息
-- IDEA / VS Code 插件处理 `agent_pause`
-
-但本轮实测中当前 BreakPilot MCP 服务端仍返回：
+`bp_debug_set_breakpoint` 现在有两个严格互斥分支：
 
 ```json
-{
-  "error": {
-    "code": "TOOL_FAILED",
-    "message": "Runtime provider does not support pause."
-  }
-}
+{"filePath":"src/App.java","line":42,"condition":"count > 3"}
 ```
 
-这说明运行中的服务端没有加载最新 `IdeRuntimeProvider.pause()`。这不是接口设计缺失，而是部署/重启状态问题。
-
-### P1：`xdebug_run_to_line`
-
-IDEA MCP 有原生 `run_to_line`。BreakPilot 没有直接对应工具。
-
-建议新增：
+用于按位置创建；以及：
 
 ```json
-bp_debug_run_to_line({
-  "filePath": "...",
-  "line": 42,
-  "timeout": 30000
-})
+{"breakpointId":"bp_123","enabled":false}
 ```
 
-内部可以先实现为：设置临时断点、resume、wait、自动删除临时断点。
+用于表达已有断点更新。未知字段、非法行号，或同时传 id 与 location 会在 dispatch 前
+返回带 issue 列表的 `INVALID_ARGUMENT`。
 
-### P1：高级断点模型
+契约存在不代表 update 已实现：当前 `breakpointUpdate` 对所有 provider 都是
+`unsupported`，update 分支会明确返回 `UNSUPPORTED_CAPABILITY`。创建分支虽然公开
+`condition`、`hitCondition`、`logMessage`、`enabled`、`temporary`、`suspendPolicy`、
+`isLogMessage`、`isLogStack` 和 `owner`，但实际 IDE 映射取决于 bridge capability：
+VS Code 已映射 condition/hit/log；IDEA 当前主要可靠创建行断点，不能把其他字段的存在
+理解为 IDEA 已完整应用。
 
-IDEA MCP 的断点模型更完整：
+`bp_debug_list_breakpoints` 已能请求 IDEA/VS Code 原生 breakpoint snapshot，并区分
+agent/user owner；这修正了“只读 BreakPilot store”的旧结论。仍需注意：没有可用 bridge
+target 时才可能使用 local store；已经选中的 native query 若失败会返回明确错误。IDEA
+MCP 返回的 breakpoint type、suspend policy、presentation 等字段也更完整。
 
-- update existing breakpoint by `breakpointId`
-- relocate breakpoint
-- `enabled`
-- `temporary`
-- `suspendPolicy`
-- `isLogMessage`
-- `isLogStack`
-- owner filter
+## BreakPilot 当前更好的地方
 
-BreakPilot 现在只提供简化 agent 断点。建议保留默认简洁输出，但补齐输入能力。
+1. **agent-first 的稳定输出**：默认直接返回 compact 顶层业务字段，没有
+   `ok/data/auditId` envelope，也不强迫 agent 理解 IDE UI 对象。
+2. **严格 typed contract**：15 个工具都有具体 input/output schema；未知字段、范围错误和
+   歧义 target 在 provider 调用前失败。
+3. **能力真值可编程**：start 总是返回 capability matrix，diagnostic status 可重新读取；
+   agent 可以停止试错式调用。
+4. **跨 provider**：同一控制面覆盖 IDEA、VS Code 与 headless DAP，而不是绑定单个 IDE。
+5. **变量证据模型**：有序节点、结构化 path、opaque ref、展开深度/数量/字符串限制更适合
+   大对象和复杂现场。
+6. **安全边界**：workspace、attach endpoint、production policy、redaction，以及
+   `readonly/guarded/unsafe` evaluate 模式比直接求值更适合自动化 agent。
+7. **可重复差异基线**：`HelloController.java:24` 的 sanitized fixture 同时保留 IDEA
+   frame presentation 与 BreakPilot 原始 path/value 证据，便于后续 E2E 防回归。
 
-### P1：真实 IDE breakpoint list/reconcile
+## IDEA MCP 当前更好的地方
 
-BreakPilot 当前 list 更像“BreakPilot store list”，不是完整 IDE breakpoint list。  
-如果目标是完全对齐 IDEA MCP，需要新增 bridge 查询：
+1. **IDE 原生保真度**：线程、frame、run configuration 和 breakpoint 对象直接来自 IDEA
+   debugger service，presentation 与 identity 更丰富。
+2. **高级断点操作**：已有 breakpoint id 的 update/relocate、enabled 切换、temporary、
+   suspend policy、日志/堆栈行为更成熟。
+3. **事件输出**：breakpoint error、tracepoint output 与 drain event 链路更完整。
+4. **原生变量 setter**：mutation 语义比 `evaluateAssignment` 更明确。
+5. **源码入口解析**：从 gutter/location 到可运行 configuration 的 IDE 语义更强。
 
-```json
-agent_list_breakpoints -> ide_breakpoints_snapshot
-```
+## 后续优化计划
 
-这样 `bp_debug_list_breakpoints` 才能返回 IDE 真实状态，而不只信本地 store。
+### P0：让 capability 与每次操作结果完全一致
 
-### P2：变量修改在 IDEA provider 中未实现
+- 为 condition、hit condition、tracepoint 等高级断点字段增加逐项 capability gate；
+  unsupported 时在 dispatch 前失败，不能由插件静默忽略后返回 verified。
+- capability 增加来源与原因诊断，例如 `source=client|session|adapter`、版本和 reason；
+  compact 保持不变，只在 diagnostic 暴露。
+- 建立 IDEA、VS Code、DAP 三类 provider 的 capability × operation E2E matrix，验证
+  声明为 native 的能力确实改变了运行时状态。
 
-BreakPilot 有 `bp_debug_set_value`，但 IDEA provider 当前不支持 mutation。  
-IDEA MCP 有 `xdebug_set_variable`。如果要对齐，需要 IDEA 插件实现对当前 frame 变量的 setter。
+### P0：完成 breakpoint update 与原生 reconcile
 
-### P2：事件/tracepoint 输出
+- 实现 `breakpointId` update/relocate，并保持 owner 保护和原子失败语义。
+- 对 `enabled`、`temporary`、`suspendPolicy`、condition/hit/log/stack 建立 IDE 双向映射。
+- list 结果报告 `source: "ide" | "local"`、同步时间和 reconcile warning，让 agent
+  明确知道看到的是 IDE 真值还是缓存。
 
-IDEA MCP 的 `DRAIN_EVENTS` 可以返回 breakpoint errors 和 tracepoint outputs。  
-BreakPilot 当前 `drainEvents` 默认是空结构，还没有完整 JVM tracepoint event buffer。
+### P1：补全事件与复杂控制流
 
-### P2：分页和 offset
+- 实现有界 event buffer，支持 breakpoint verification error、tracepoint output、
+  process/thread lifecycle，并让 `eventDrain` capability 变为 truthful native。
+- 若实现 DAP run-to-line fallback，必须处理其他断点先命中、超时、用户中断和临时断点
+  cleanup，且以 `fallback` 对外声明。
 
-IDEA MCP 的线程、栈支持 offset/limit。  
-BreakPilot 多数只支持 limit，不支持 offset。
+### P1：提高现场证据质量
 
-## BreakPilot 比 IDEA MCP 多出来的能力
-
-BreakPilot 不是单纯复制 IDEA MCP，它有一些额外定位：
-
-1. **IDE session adopt**
-   `bp_debug_start(mode="ide", ideSessionId)` 可以把已有 IDE session 纳入 BreakPilot。
-
-2. **Headless DAP launch/attach**
-   `bp_debug_start(mode="launch|attach", language, host, port, adapter...)` 支持非 IDE provider。
-
-3. **跨 IDE 设计**
-   BreakPilot bridge 同时面向 IDEA / VS Code，而 IDEA MCP 只面向 JetBrains IDE。
-
-4. **更 compact 的 agent 结果**
-   BreakPilot 默认不返回 `ok/data/auditId`，也不返回大量 presentation/capability/hub 细节。
-
-5. **evaluate 安全模型**
-   BreakPilot 有 `readonly/guarded/unsafe` 和确认策略，IDEA MCP 更偏直接执行。
+- stack/frame 返回 completeness、truncation reason 与 next offset；partial 不能只靠调用方猜。
+- set-value 结果增加 mutation mode，并在写入后自动读取验证；区分“表达式执行成功”和
+  “目标变量已变更”。
+- 把 sanitized differential fixture 升级为可选真实 Java E2E：同一断点同时采集 IDEA 与
+  BreakPilot 原始结果，再做 provider-independent semantic comparison。
 
 ## 最终判断
 
-如果按“能否完成一次常规 agent 调试闭环”判断：
-
-**BreakPilot 已经基本具备。**
-
-常规流程：
+按“agent 能否完成一次常规调试闭环”衡量，BreakPilot 已经具备可靠基础：
 
 ```text
-status -> start/adopt -> set_breakpoint -> wait/resume -> call_stack -> frame/value -> eval -> remove_breakpoint -> resume/stop
+status -> start/adopt -> inspect capabilities -> set breakpoint -> wait/resume
+       -> threads/stack -> frame/value -> eval/set-value -> remove -> resume/stop
 ```
 
-当前已可跑通。
+按“是否与 IDEA MCP 完全一一等价”衡量，答案仍是否定的；差距集中在 breakpoint
+update、高级断点映射、event drain、原生 mutation 与 IDE 栈保真度。
 
-如果按“是否与 IDEA MCP debugger 完全一一等价”判断：
-
-**还没有。**
-
-还缺这些关键等价能力：
-
-- `pause` 的运行时版本一致性需要解决
-- `run_to_line`
-- 完整 breakpoint update/temporary/enabled/suspendPolicy/log stack
-- 真实 IDE breakpoint list/reconcile
-- IDEA provider 的 set variable
-- drainEvents 的真实事件/tracepoint 输出
-- stack/thread offset 分页
-
-如果按“agent 友好程度”判断：
-
-**BreakPilot 的输出方向更合理。**
-
-BreakPilot 返回更少、更关键、更稳定的字段；IDEA MCP 更像 IDE 原生调试器对象视图，
-能力更全，但返回结构更偏工具内部视角。建议 BreakPilot 后续继续保持 compact 默认输出，
-只在显式参数下返回更多诊断细节。
+按“是否更适合自主 agent”衡量，BreakPilot 的方向更合理：它把 compact typed output、
+严格校验、能力真值和跨 provider 控制放在第一位。下一阶段最重要的不是继续增加工具名，
+而是让每个 capability 声明都能由真实运行证据验证，并让所有 unsupported 行为明确失败。

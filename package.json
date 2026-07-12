@@ -19,6 +19,7 @@
     "tsconfig.json"
   ],
   "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
     "start": "node --experimental-strip-types src/serve.ts",
     "serve:http": "node --experimental-strip-types src/serve.ts --http-port 57987",
     "cli": "node --experimental-strip-types src/cli.ts",

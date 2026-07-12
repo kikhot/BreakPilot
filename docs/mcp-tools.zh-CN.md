@@ -33,6 +33,45 @@ stdio adapter 接收按行分隔的 JSON-RPC：
 `{ "error": { "code": "...", "message": "...", "details": {} } }`。
 `warnings` 仅在存在非致命告警时出现。
 
+每个公开 output schema 都是具体的 success/error union。成功时直接返回当前工具
+定义的顶层业务字段，例如：
+
+```json
+{"activeSessionId":"bp_...","sessions":[],"ideConnected":true,"ideSessions":[]}
+```
+
+失败时返回：
+
+```json
+{"error":{"code":"INVALID_ARGUMENT","message":"Invalid arguments for bp_debug_...","details":{"issues":[]}}}
+```
+
+`error.code` 和 `error.message` 必定存在；有机器可读上下文时放入
+`error.details`。
+
+## 校验、默认值与 detail
+
+BreakPilot validates tool arguments before dispatch. Unknown fields, invalid
+ranges, and ambiguous target modes return INVALID_ARGUMENT with issue details.
+Successful payloads remain compact top-level objects. Each debug session reports
+a provider capability matrix; callers must treat unsupported as authoritative.
+
+公开输入对象采用封闭 schema。BreakPilot 在 session manager 和 provider 调用之前
+完成校验，不修改调用方传入的对象；校验问题统一放在
+`error.details.issues`，单项结构为 `{ "path", "keyword", "message" }`。
+带 `oneOf` 的目标必须且只能命中一个分支。
+
+默认值只在字段缺失时应用。重要默认值包括：`detail: "compact"`、
+`bp_debug_start.mode: "launch"`、attach host `127.0.0.1`、
+`frameIndex: 0`、线程/调用栈 `offset: 0`、断点 `enabled: true`、
+`temporary: false`、`owner: "agent"`。显式传入的值不会被默认值覆盖。
+
+`detail: "compact"` 是默认的 agent 视图。对 `bp_debug_status` 传入
+`detail: "diagnostic"`，会在 BreakPilot session 和 IDE session 摘要中增加
+`providerKind` 与 `capabilities`。`bp_debug_start` 总是返回这两个字段，便于 agent
+安全选择下一步操作。其他工具即使公开了 `detail`，也不会因此绕过参数校验、
+安全策略或 capability gate。
+
 ## 通用参数
 
 所有 session 级工具的 `sessionId` 都可以省略。省略时，BreakPilot 会自动选择唯一
@@ -43,7 +82,7 @@ live session，或者唯一 paused session。多个候选时返回 `SESSION_AMBI
 
 | 参数 | 含义 |
 |---|---|
-| `projectPath` | 可选项目路径；本轮预留给未来多项目路由。 |
+| `projectPath` | 可选 workspace/project selector，用于 hub 的多项目路由。 |
 | `filePath` | 源文件路径。 |
 | `timeout` | 超时时间，单位毫秒。 |
 | `ref` | frame/value 工具返回的不透明变量引用。 |
@@ -51,6 +90,30 @@ live session，或者唯一 paused session。多个候选时返回 `SESSION_AMBI
 | `limit` | 最大变量、栈帧或线程数量。 |
 | `maxString` | 字符串预览最大长度。 |
 | `expand` | `none`、`preview`、`shallow` 或 `deep`。 |
+
+## Provider 能力矩阵
+
+能力矩阵描述的是当前选中 live provider 的真实能力，而不是“公开工具是否存在”：
+
+| 字段 | 取值 | 含义 |
+|---|---|---|
+| `pause`、`stepping`、`runToLine` | `native`、`fallback`、`unsupported` | 执行控制能力。 |
+| `variableReferences` | `native`、`snapshot`、`unsupported` | 可使用 live reference 展开，或只能读取 IDE snapshot。 |
+| `setValue` | `native`、`evaluateAssignment`、`unsupported` | 原生 mutation、赋值表达式模拟或不支持修改。 |
+| `breakpointUpdate` | `native`、`fallback`、`unsupported` | 按已有 breakpoint id 更新/迁移。 |
+| `conditionalBreakpoints`、`hitConditionalBreakpoints`、`tracepoints` | `native`、`fallback`、`unsupported` | 高级断点保真度。 |
+| `eventDrain` | `native`、`fallback`、`unsupported` | 读取缓存的 debugger/tracepoint 事件。 |
+
+当前 DAP session 的 pause、stepping 和 variable reference 固定为 native；变量修改
+及高级断点只有在 adapter 明确声明时才是 native。DAP 的 run-to-line、
+breakpoint update 和 event drain 当前均为 unsupported。IDE 能力来自 live bridge；
+当前 IDEA 与 VS Code bridge 声明 native run-to-line，以及
+`evaluateAssignment` 形式的 set-value，其他能力必须由 bridge 明确声明。
+
+Phase 1 中由该矩阵直接 gate 的 run-to-line、set-value、event drain 和 breakpoint
+update，遇到 `unsupported` 时会返回 `UNSUPPORTED_CAPABILITY`，不会伪造成功。
+BreakPilot 也不会用临时断点静默模拟 run-to-line。调用方还必须避开 session 声明为
+unsupported 的其他操作；高级断点字段的 gate 目前仍取决于 provider，具体差距见对照报告。
 
 ## 推荐流程
 
@@ -86,6 +149,7 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 | 工具 | 用途 |
 |---|---|
 | `bp_debug_start` | 启动、附加或采纳调试会话。 |
+| `bp_debug_run_configurations` | 列出 IDE run configuration 或可运行源码位置。 |
 | `bp_debug_status` | 查看 active session、live sessions 和简短 IDE 状态。 |
 | `bp_debug_control` | pause、resume、wait、step、disconnect、stop、drainEvents。 |
 | `bp_debug_run_to_line` | 运行到指定源码行。 |
@@ -145,17 +209,23 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 }
 ```
 
-Phase 1 只公开契约。真正运行能力会在后续阶段通过 IDE bridge 原生命令或临时断点 fallback 实现。
+只有 session 的 `runToLine` capability 不是 `unsupported` 时才应调用。当前 IDEA
+与 VS Code bridge 提供 native 操作；DAP provider 明确返回 `unsupported`，且当前
+没有临时断点 fallback。
 
 ### `bp_debug_status`
 
 默认 status 是紧凑 agent 视图：当前项目 live sessions 和简短 IDE bridge 状态。
-它不返回 hub 诊断、语言能力明细、已结束 sessions、capabilities 或完整 IDE client 记录。
+它不返回 hub 诊断、语言能力明细、已结束 sessions、capabilities 或完整 IDE client
+记录。传入 `detail: "diagnostic"` 后，每个 live BreakPilot/IDE session 摘要会增加
+`providerKind` 与 capability matrix。
 
 ### `bp_debug_threads` / `bp_debug_call_stack`
 
-`bp_debug_threads` 返回 provider 线程列表。`bp_debug_call_stack` 接收可选
-`threadId` 和 `limit`，返回 frame 的 `index`、`id`、`filePath`、`line` 和 `function`。
+`bp_debug_threads` 与 `bp_debug_call_stack` 都支持 `offset` 和 `limit`。
+`threadId` 可以是 number，也可以是 opaque string。调用栈返回 frame 的
+`index`、`id`、`filePath`、`line` 和 `function`；IDE provider 只能提供栈顶快照时，
+结果可能标记为 `partial`。
 
 ### `bp_debug_frame`
 
@@ -198,15 +268,35 @@ Phase 1 只公开契约。真正运行能力会在后续阶段通过 IDE bridge 
 数组和 List 下标使用字符串路径，例如 `"0"`。`ref` 是不透明 token，不能解析，
 只能原样传回。
 
-### 断点工具
+### 断点设置、列表与删除
 
-设置断点：
+`bp_debug_set_breakpoint` 有且只有两个互斥 target mode。位置模式用于创建断点，
+必须传 `filePath`（或兼容别名 `file`）与 `line`：
 
 ```json
-{"filePath":"src/App.java","line":42,"condition":"count > 3"}
+{"filePath":"src/App.java","line":42,"condition":"count > 3","enabled":true,"owner":"agent"}
 ```
 
+位置模式还接受 `hitCondition`、`logMessage`、`temporary`、`suspendPolicy`、
+`isLogMessage`、`isLogStack` 和 `requireVerified`。这些字段属于 typed contract；
+实际保真度由 provider capability 与返回的 verification 状态决定。
+
+更新模式传 `breakpointId` 和待更新字段，但不能同时带 `filePath` 或 `line`：
+
+```json
+{"breakpointId":"bp_123","enabled":false}
+```
+
+该分支已经注册，以保证客户端可针对稳定契约做校验；但当前所有 provider 都声明
+`breakpointUpdate: "unsupported"`，因此调用会返回 `UNSUPPORTED_CAPABILITY`，
+不会假装更新成功。
+
 返回中包含 `breakpointId`、`filePath`、`line`、`verified`；源文件可读时包含 `lineText`。
+
+`bp_debug_list_breakpoints` 可以通过已连接 IDE 查询原生 breakpoint snapshot，并支持
+`filePath`、`owner`、`includeDisabled` filter。没有可用 IDE bridge target 时可能返回
+BreakPilot local project store；已经选中的 native query 若执行失败则仍返回明确错误。
+所有 provider-specific 字段都不保证具有 IDEA 原生对象的完整保真度。
 
 删除断点可以按 id：
 
