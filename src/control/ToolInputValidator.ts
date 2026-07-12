@@ -13,14 +13,25 @@ interface NodeValidationResult {
 const hasOwn = (value: object, key: PropertyKey): boolean =>
   Object.prototype.hasOwnProperty.call(value, key);
 
-function isObject(value: unknown): value is AnyRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function setOwn(value: AnyRecord, property: string, propertyValue: unknown): void {
+  Object.defineProperty(value, property, {
+    value: propertyValue,
+    writable: true,
+    enumerable: true,
+    configurable: true
+  });
+}
+
+function isRecord(value: unknown): value is AnyRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function matchesType(type: NonNullable<JsonSchema["type"]>, value: unknown): boolean {
   switch (type) {
     case "object":
-      return isObject(value);
+      return isRecord(value);
     case "array":
       return Array.isArray(value);
     case "string":
@@ -37,13 +48,12 @@ function matchesType(type: NonNullable<JsonSchema["type"]>, value: unknown): boo
 }
 
 function jsonEqual(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
     if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
     return left.every((value, index) => jsonEqual(value, right[index]));
   }
-  if (isObject(left) || isObject(right)) {
-    if (!isObject(left) || !isObject(right)) return false;
+  if (isRecord(left) || isRecord(right)) {
+    if (!isRecord(left) || !isRecord(right)) return false;
     const leftKeys = Object.keys(left).sort();
     const rightKeys = Object.keys(right).sort();
     if (leftKeys.length !== rightKeys.length) return false;
@@ -51,7 +61,13 @@ function jsonEqual(left: unknown, right: unknown): boolean {
       key === rightKeys[index] && jsonEqual(left[key], right[key])
     );
   }
-  return false;
+  if (
+    (typeof left === "object" && left !== null) ||
+    (typeof right === "object" && right !== null)
+  ) {
+    return false;
+  }
+  return left === right;
 }
 
 function propertyPath(path: string, property: string): string {
@@ -62,6 +78,196 @@ function propertyPath(path: string, property: string): string {
 
 function issue(path: string, keyword: string, message: string): ToolValidationIssue {
   return { path, keyword, message };
+}
+
+function jsonCompatibilityIssue(): ToolValidationIssue {
+  return issue("$", "type", "must be a JSON-compatible object");
+}
+
+function matchesSchemaWithoutDefaults(
+  schema: JsonSchema,
+  value: unknown,
+  active: WeakSet<object> = new WeakSet()
+): boolean {
+  if (schema.type && !matchesType(schema.type, value)) return false;
+  if (schema.enum && !schema.enum.some((candidate) => jsonEqual(candidate, value))) return false;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (schema.minimum !== undefined && value < schema.minimum) return false;
+    if (schema.maximum !== undefined && value > schema.maximum) return false;
+  }
+
+  if (Array.isArray(value)) {
+    if (schema.minItems !== undefined && value.length < schema.minItems) return false;
+    if (schema.items) {
+      if (active.has(value)) return false;
+      active.add(value);
+      try {
+        for (let index = 0; index < value.length; index += 1) {
+          const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+          if (
+            !descriptor ||
+            !("value" in descriptor) ||
+            !matchesSchemaWithoutDefaults(schema.items, descriptor.value, active)
+          ) {
+            return false;
+          }
+        }
+      } finally {
+        active.delete(value);
+      }
+    }
+  }
+
+  if (isRecord(value)) {
+    if (active.has(value)) return false;
+    active.add(value);
+    try {
+      for (const required of schema.required ?? []) {
+        if (!hasOwn(value, required)) return false;
+      }
+      const properties = schema.properties ?? {};
+      for (const property of Object.keys(properties)) {
+        const propertySchema = properties[property];
+        if (!propertySchema || !hasOwn(value, property)) continue;
+        const descriptor = Object.getOwnPropertyDescriptor(value, property);
+        if (
+          !descriptor ||
+          !("value" in descriptor) ||
+          !matchesSchemaWithoutDefaults(propertySchema, descriptor.value, active)
+        ) {
+          return false;
+        }
+      }
+      for (const property of Object.keys(value)) {
+        if (hasOwn(properties, property)) continue;
+        if (schema.additionalProperties === false) return false;
+        if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+          const descriptor = Object.getOwnPropertyDescriptor(value, property);
+          if (
+            !descriptor ||
+            !("value" in descriptor) ||
+            !matchesSchemaWithoutDefaults(schema.additionalProperties, descriptor.value, active)
+          ) {
+            return false;
+          }
+        }
+      }
+    } finally {
+      active.delete(value);
+    }
+  }
+
+  if (schema.oneOf) {
+    const matches = schema.oneOf.filter((branch) =>
+      matchesSchemaWithoutDefaults(branch, value)
+    );
+    if (matches.length !== 1) return false;
+  }
+  return true;
+}
+
+function incompatibleValueIssue(
+  schema: JsonSchema | undefined,
+  value: unknown,
+  path: string
+): ToolValidationIssue {
+  if (schema?.type && !matchesType(schema.type, value)) {
+    return issue(path, "type", `must be ${schema.type}`);
+  }
+  if (schema?.enum && !schema.enum.some((candidate) => jsonEqual(candidate, value))) {
+    return issue(path, "enum", `must be one of ${JSON.stringify(schema.enum)}`);
+  }
+  if (
+    schema?.oneOf &&
+    schema.oneOf.filter((branch) => matchesSchemaWithoutDefaults(branch, value)).length !== 1
+  ) {
+    return issue(path, "oneOf", "must match exactly one schema in oneOf");
+  }
+  return jsonCompatibilityIssue();
+}
+
+function childSchema(schema: JsonSchema | undefined, property: string): JsonSchema | undefined {
+  const properties = schema?.properties;
+  if (properties && hasOwn(properties, property)) return properties[property];
+  const additionalProperties = schema?.additionalProperties;
+  return additionalProperties && typeof additionalProperties === "object"
+    ? additionalProperties
+    : undefined;
+}
+
+function preflightJsonValue(
+  schema: JsonSchema | undefined,
+  value: unknown,
+  path: string,
+  active: WeakSet<object>
+): ToolValidationIssue | undefined {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return undefined;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? undefined : incompatibleValueIssue(schema, value, path);
+  }
+  if (typeof value === "function" || typeof value === "symbol") {
+    return jsonCompatibilityIssue();
+  }
+  if (typeof value !== "object") {
+    return incompatibleValueIssue(schema, value, path);
+  }
+
+  if (active.has(value)) return jsonCompatibilityIssue();
+  active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) {
+        return incompatibleValueIssue(schema, value, path);
+      }
+
+      const ownKeys = Reflect.ownKeys(value);
+      if (ownKeys.some((key) => typeof key === "symbol")) return jsonCompatibilityIssue();
+      const indexKeys = (ownKeys as string[]).filter((key) => key !== "length");
+      if (indexKeys.length !== value.length) return jsonCompatibilityIssue();
+
+      const itemSchema = schema?.items;
+      for (let index = 0; index < value.length; index += 1) {
+        const property = String(index);
+        if (!hasOwn(value, property)) return jsonCompatibilityIssue();
+        const descriptor = Object.getOwnPropertyDescriptor(value, property);
+        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+          return jsonCompatibilityIssue();
+        }
+        const childIssue = preflightJsonValue(
+          itemSchema,
+          descriptor.value,
+          `${path}[${index}]`,
+          active
+        );
+        if (childIssue) return childIssue;
+      }
+      return undefined;
+    }
+
+    if (!isRecord(value)) return incompatibleValueIssue(schema, value, path);
+
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.some((key) => typeof key === "symbol")) return jsonCompatibilityIssue();
+    const properties = (ownKeys as string[]).sort();
+    for (const property of properties) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, property);
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        return jsonCompatibilityIssue();
+      }
+      const childIssue = preflightJsonValue(
+        childSchema(schema, property),
+        descriptor.value,
+        propertyPath(path, property),
+        active
+      );
+      if (childIssue) return childIssue;
+    }
+    return undefined;
+  } finally {
+    active.delete(value);
+  }
 }
 
 function validateNode(
@@ -106,7 +312,7 @@ function validateNode(
     }
   }
 
-  if (isObject(value)) {
+  if (isRecord(value)) {
     const properties = schema.properties ?? {};
     for (const required of [...(schema.required ?? [])].sort()) {
       if (!hasOwn(value, required)) {
@@ -120,7 +326,7 @@ function validateNode(
       const childPath = propertyPath(path, property);
       if (hasOwn(value, property)) {
         const propertyResult = validateNode(propertySchema, value[property], childPath, applyDefaults);
-        value[property] = propertyResult.value;
+        setOwn(value, property, propertyResult.value);
         errors.push(...propertyResult.errors);
       } else if (applyDefaults && hasOwn(propertySchema, "default")) {
         const defaultResult = validateNode(
@@ -129,7 +335,7 @@ function validateNode(
           childPath,
           true
         );
-        value[property] = defaultResult.value;
+        setOwn(value, property, defaultResult.value);
         errors.push(...defaultResult.errors);
       }
     }
@@ -149,7 +355,7 @@ function validateNode(
           childPath,
           applyDefaults
         );
-        value[property] = propertyResult.value;
+        setOwn(value, property, propertyResult.value);
         errors.push(...propertyResult.errors);
       }
     }
@@ -187,8 +393,31 @@ function validateNode(
   return { value, errors };
 }
 
-export function validateToolInput(schema: JsonSchema, input: AnyRecord): ToolValidationResult {
-  const result = validateNode(schema, structuredClone(input), "$", true);
+export function validateToolInput(schema: JsonSchema, input: unknown): ToolValidationResult {
+  let compatibilityIssue: ToolValidationIssue | undefined;
+  try {
+    compatibilityIssue = preflightJsonValue(schema, input, "$", new WeakSet());
+  } catch {
+    compatibilityIssue = jsonCompatibilityIssue();
+  }
+  if (compatibilityIssue) {
+    return {
+      value: {},
+      errors: [compatibilityIssue]
+    };
+  }
+
+  let clonedInput: unknown;
+  try {
+    clonedInput = structuredClone(input);
+  } catch {
+    return {
+      value: {},
+      errors: [jsonCompatibilityIssue()]
+    };
+  }
+
+  const result = validateNode(schema, clonedInput, "$", true);
   return {
     value: result.value as AnyRecord,
     errors: result.errors

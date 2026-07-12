@@ -48,16 +48,15 @@ export class ToolRouter {
     return clone;
   }
 
-  async callTool(name: string, args: AnyRecord = {}): Promise<ToolResponse> {
+  async callTool(name: string, args: unknown = {}): Promise<ToolResponse> {
     const handler = this.handlers.get(name);
     if (!handler) {
       return fail(new Error(`Unknown tool: ${name}`), this.manager.audit.record("unknown_tool", { name }));
     }
     try {
       const definition = this.definitions.get(name);
-      const validation = definition
-        ? validateToolInput(this.#validationSchema(definition), args)
-        : { value: args, errors: [] };
+      if (!definition) throw new Error(`Missing tool definition: ${name}`);
+      const validation = validateToolInput(this.#validationSchema(definition), args);
       if (validation.errors.length > 0) {
         throw new BreakPilotError(
           ErrorCodes.INVALID_ARGUMENT,
