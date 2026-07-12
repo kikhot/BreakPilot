@@ -17,10 +17,6 @@ const fixture = JSON.parse(
   };
 };
 
-const breakpilotValues = Object.fromEntries(
-  fixture.breakpilot.values.map((item) => [item.path.join("."), item.value])
-);
-
 const canonicalSource = {
   fileSuffix: "src/main/java/com/example/demo/controller/HelloController.java",
   line: 24
@@ -48,6 +44,9 @@ assert.deepEqual(fixture.breakpilot.values, [
   { path: ["analysis", "balanced"], value: "true" },
   { path: ["analysis", "multiPart"], value: "true" }
 ]);
+const breakpilotValues = Object.fromEntries(
+  fixture.breakpilot.values.map((item) => [item.path.join("."), item.value])
+);
 assert.deepEqual(Object.keys(breakpilotValues).sort(), [
   "analysis.balanced",
   "analysis.multiPart",
