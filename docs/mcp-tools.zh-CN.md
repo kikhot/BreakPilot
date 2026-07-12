@@ -62,9 +62,11 @@ a provider capability matrix; callers must treat unsupported as authoritative.
 带 `oneOf` 的目标必须且只能命中一个分支。
 
 默认值只在字段缺失时应用。重要默认值包括：`detail: "compact"`、
-`bp_debug_start.mode: "launch"`、attach host `127.0.0.1`、
 `frameIndex: 0`、线程/调用栈 `offset: 0`、断点 `enabled: true`、
-`temporary: false`、`owner: "agent"`。显式传入的值不会被默认值覆盖。
+`temporary: false`、`owner: "agent"`。start 路由会保留字段“未传入”的语义：
+源码位置选择 IDE launch，host/port 选择 attach，其他情况选择 headless launch。
+attach 内部仍会在 host 缺失时使用 `127.0.0.1`。显式 `mode` 具有最高优先级，
+显式传入的值不会被 schema 默认值覆盖。
 
 `detail: "compact"` 是默认的 agent 视图。对 `bp_debug_status` 传入
 `detail: "diagnostic"`，会在 BreakPilot session 和 IDE session 摘要中增加

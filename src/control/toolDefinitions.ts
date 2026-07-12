@@ -160,7 +160,7 @@ export const toolDefinitions: ToolDefinition[] = [
       properties: {
         projectPath,
         workspace,
-        mode: { type: "string", enum: ["launch", "attach", "ide"], default: "launch" },
+        mode: { type: "string", enum: ["launch", "attach", "ide"] },
         language: { type: "string", description: "Registered debug language identifier." },
         lang: { type: "string", description: "CLI-compatible alias for language." },
         runConfigName: { type: "string", description: "IDE run configuration name to debug when IDE support is available." },
@@ -175,7 +175,7 @@ export const toolDefinitions: ToolDefinition[] = [
           type: "object",
           additionalProperties: { oneOf: [{ type: "string" }, { type: "null" }] }
         },
-        host: { type: "string", default: "127.0.0.1" },
+        host: { type: "string" },
         port: { type: "number" },
         owner: { type: "string" },
         clientId,

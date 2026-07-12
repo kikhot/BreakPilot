@@ -843,7 +843,8 @@ const acceptedDynamicLanguage = await dynamicRouter.callTool("bp_debug_start", {
 assert.equal(acceptedDynamicLanguage.error, undefined);
 assert.equal(startCalls, 1);
 assert.equal(dispatchedStart?.language, dynamicLanguage);
-assert.equal(dispatchedStart?.mode, "launch");
+assert.equal(dispatchedStart?.mode, undefined, "omitted routing mode must reach the manager unchanged");
+assert.equal(dispatchedStart?.host, undefined, "omitted attach host must reach the manager unchanged");
 
 const rejectedDynamicLanguage = await dynamicRouter.callTool("bp_debug_start", {
   language: "not-registered-after-router-construction"

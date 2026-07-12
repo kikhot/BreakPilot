@@ -137,7 +137,10 @@ export class DebugSessionManager {
     const normalized = this.#normalizeBpArgs(args);
     const auditId = this.audit.record("bp_debug_start_requested", { args: this.#safeArgs(normalized) });
 
-    if (normalized.runConfigName || (normalized.filePath && normalized.line && normalized.mode !== "launch" && normalized.mode !== "attach")) {
+    if (
+      (normalized.mode === undefined || normalized.mode === "ide") &&
+      (normalized.runConfigName || (normalized.filePath && normalized.line))
+    ) {
       return this.#startIdeDebug(normalized, auditId);
     }
 
@@ -149,7 +152,13 @@ export class DebugSessionManager {
       }, auditId, adopted.warnings);
     }
 
-    const mode = normalized.mode === "attach" || normalized.host || normalized.port ? "attach" : "launch";
+    const mode = normalized.mode === "attach"
+      ? "attach"
+      : normalized.mode === "launch"
+        ? "launch"
+        : normalized.host || normalized.port
+          ? "attach"
+          : "launch";
     const session = mode === "attach"
       ? await this.#attachDapSession({ ...normalized, mode: "headless" })
       : await this.#launchDapSession({
@@ -290,14 +299,21 @@ export class DebugSessionManager {
     }
 
     if (action === "pause") {
-      if (!session.provider.pause) {
-        throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support pause.", {
+      if (session.provider.capabilities.pause === "unsupported" || !session.provider.pause) {
+        throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support pause.", {
+          sessionId: session.sessionId,
+          providerKind: session.providerKind,
+          capability: "pause"
+        });
+      }
+      await session.provider.pause(normalized.threadId ?? session.provider.threadId);
+      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 5000);
+      if (!stopped || typeof stopped !== "object") {
+        throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider did not report a stop after pause.", {
           sessionId: session.sessionId,
           providerKind: session.providerKind
         });
       }
-      await session.provider.pause(normalized.threadId ?? session.provider.threadId);
-      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 5000).catch(() => null);
       session.state = SessionState.PAUSED;
       return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
     }
@@ -322,10 +338,24 @@ export class DebugSessionManager {
     }
 
     if (action === "stepOver" || action === "stepInto" || action === "stepOut") {
+      if (session.provider.capabilities.stepping === "unsupported") {
+        throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support stepping.", {
+          sessionId: session.sessionId,
+          providerKind: session.providerKind,
+          capability: "stepping"
+        });
+      }
       if (session.providerKind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, action);
       const kind = action === "stepInto" ? "into" : action === "stepOut" ? "out" : "over";
       await session.provider.step(kind, normalized.threadId ?? session.provider.threadId);
-      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 10000).catch(() => null);
+      session.state = SessionState.RUNNING;
+      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 10000);
+      if (!stopped || typeof stopped !== "object") {
+        throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider did not report a stop after stepping.", {
+          sessionId: session.sessionId,
+          providerKind: session.providerKind
+        });
+      }
       session.state = SessionState.PAUSED;
       return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
     }

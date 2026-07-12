@@ -63,10 +63,13 @@ issues as `{ "path", "keyword", "message" }` entries under
 `error.details.issues`. A `oneOf` target must match exactly one branch.
 
 Schema defaults are applied only when a property is absent. Important defaults
-include `detail: "compact"`, `bp_debug_start.mode: "launch"`, attach host
-`127.0.0.1`, `frameIndex: 0`, thread/stack `offset: 0`, breakpoint
-`enabled: true`, `temporary: false`, and `owner: "agent"`. An explicitly
-provided value is never replaced by its default.
+include `detail: "compact"`, `frameIndex: 0`, thread/stack `offset: 0`,
+breakpoint `enabled: true`, `temporary: false`, and `owner: "agent"`. Start
+routing preserves omitted fields: a source location selects IDE launch,
+host/port selects attach, and otherwise BreakPilot launches headlessly. Attach
+uses `127.0.0.1` internally when its host is omitted. An explicit start `mode`
+is authoritative, and an explicitly provided value is never replaced by a
+schema default.
 
 `detail: "compact"` is the default agent view. For `bp_debug_status`,
 `detail: "diagnostic"` adds `providerKind` and `capabilities` to BreakPilot and
