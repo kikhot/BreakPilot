@@ -10,6 +10,7 @@ import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import type { BridgeMessage } from "../src/types/ide.ts";
 import type { AnyRecord } from "../src/types/json.ts";
 import { ErrorCodes } from "../src/utils/errors.ts";
+import { dapProviderCapabilities } from "../src/runtime/ProviderCapabilities.ts";
 
 class FakeIdeBridge extends EventEmitter {
   registry = new IdeClientRegistry();
@@ -154,7 +155,7 @@ function addFakeSession(manager: DebugSessionManager, sessionId = "sess_existing
       sessionId,
       language: "python",
       workspaceRoot,
-      capabilities: {},
+      capabilities: dapProviderCapabilities(),
       threadId: null,
       setBreakpoints: async (_file: string, breakpoints: AnyRecord[]) =>
         breakpoints.map((breakpoint, index) => ({

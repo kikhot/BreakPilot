@@ -1,4 +1,5 @@
 import type { DapSession } from "../dap/DapSession.ts";
+import type { RuntimeProviderCapabilities } from "./capabilities.ts";
 import type { DapBreakpoint, StoppedEvent } from "./dap.ts";
 import type {
   DebugLanguage,
@@ -49,7 +50,7 @@ export interface RuntimeDebugProvider {
   sessionId: string;
   language: DebugLanguage;
   workspaceRoot: string;
-  capabilities: AnyRecord;
+  capabilities: RuntimeProviderCapabilities;
   threadId: ThreadId | null;
   setBreakpoints(filePath: string, breakpoints: BreakpointRecord[]): Promise<DapBreakpoint[]>;
   removeBreakpoint?(breakpoint: BreakpointRecord): Promise<AnyRecord>;
@@ -115,6 +116,8 @@ export interface SessionSummary {
   mode: DebugMode;
   state: SessionStateValue;
   ideSessionId?: string;
+  providerKind?: RuntimeProviderKind;
+  capabilities?: RuntimeProviderCapabilities;
 }
 
 export interface DebugSessionRecord {

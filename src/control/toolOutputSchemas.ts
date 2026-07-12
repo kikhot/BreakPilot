@@ -3,6 +3,7 @@ import {
   breakpointSchema,
   frameSchema,
   positionSchema,
+  providerCapabilitiesSchema,
   scalarValueSchema,
   scopeSchema,
   sessionSummarySchema,
@@ -55,7 +56,9 @@ const ideSessionSchema: JsonSchema = {
     name: { type: "string" },
     state: { type: "string" },
     active: { type: "boolean" },
-    position: nullablePositionSchema
+    position: nullablePositionSchema,
+    providerKind: { type: "string" },
+    capabilities: providerCapabilitiesSchema
   },
   required: ["ideSessionId", "state", "active", "position"]
 };

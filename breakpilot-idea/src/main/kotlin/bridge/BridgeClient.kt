@@ -95,6 +95,9 @@ class BridgeClient(private val project: Project) : Disposable {
                     "variableSnapshot" to true,
                     "threads" to true,
                     "stackTrace" to true,
+                    "runToLine" to true,
+                    "setVariable" to true,
+                    "setVariableMode" to "evaluateAssignment",
                     "provider" to "xdebugger"
                 )
             )

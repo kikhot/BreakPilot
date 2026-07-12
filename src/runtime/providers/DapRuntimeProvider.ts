@@ -9,6 +9,8 @@ import type { BreakpointRecord, RuntimeDebugProvider } from "../../types/session
 import { DapSession } from "../../dap/DapSession.ts";
 import { RuntimeSnapshotBuilder } from "../../inspection/SnapshotBuilder.ts";
 import { VariableSerializer } from "../../inspection/VariableSerializer.ts";
+import type { RuntimeProviderCapabilities } from "../../types/capabilities.ts";
+import { dapProviderCapabilities } from "../ProviderCapabilities.ts";
 
 export class DapRuntimeProvider implements RuntimeDebugProvider {
   kind = "dap";
@@ -30,8 +32,8 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     return this.dap.workspaceRoot;
   }
 
-  get capabilities(): AnyRecord {
-    return this.dap.capabilities;
+  get capabilities(): RuntimeProviderCapabilities {
+    return dapProviderCapabilities(this.dap.capabilities);
   }
 
   get threadId(): number | null {

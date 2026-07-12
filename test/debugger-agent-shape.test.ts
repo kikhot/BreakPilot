@@ -6,6 +6,7 @@ import { SessionOwner, SessionState } from "../src/sessions/SessionOwner.ts";
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import type { RuntimeDebugProvider, DebugSessionRecord } from "../src/types/sessions.ts";
 import type { AnyRecord } from "../src/types/json.ts";
+import { ideProviderCapabilities } from "../src/runtime/ProviderCapabilities.ts";
 
 const policy = loadPolicy();
 const manager = new DebugSessionManager({ policy });
@@ -61,7 +62,7 @@ const provider: RuntimeDebugProvider = {
   sessionId: "sess_shape",
   language: "idea",
   workspaceRoot: policy.workspace.root,
-  capabilities: { stackTrace: true, threads: true },
+  capabilities: ideProviderCapabilities({ debugCommands: true, variableSnapshot: true }),
   threadId: 1,
   async setBreakpoints() {
     return [];

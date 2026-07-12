@@ -18,6 +18,8 @@ import { IdeMessageTypes } from "../../ide/IdeProtocol.ts";
 import { BreakPilotError, ErrorCodes } from "../../utils/errors.ts";
 import { makeId } from "../../utils/ids.ts";
 import { createDeferred, withTimeout } from "../../utils/timeout.ts";
+import type { RuntimeProviderCapabilities } from "../../types/capabilities.ts";
+import { ideProviderCapabilities } from "../ProviderCapabilities.ts";
 
 type BridgeEvent = { clientId?: string; message: BridgeMessage };
 
@@ -57,8 +59,10 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     this.confirmationTimeoutMs = confirmationTimeoutMs;
   }
 
-  get capabilities(): AnyRecord {
-    return this.#sessionInfo()?.capabilities ?? this.bridge.registry.get(this.ideClientId)?.capabilities ?? {};
+  get capabilities(): RuntimeProviderCapabilities {
+    const client = this.bridge.registry.get(this.ideClientId)?.capabilities ?? {};
+    const session = this.#sessionInfo()?.capabilities ?? {};
+    return ideProviderCapabilities({ ...client, ...session });
   }
 
   get threadId(): number | null {

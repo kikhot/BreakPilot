@@ -163,7 +163,7 @@ export const sessionSummarySchema: JsonSchema = {
     providerKind: { type: "string" },
     capabilities: providerCapabilitiesSchema
   },
-  required: ["sessionId", "language", "mode", "state", "providerKind", "capabilities"]
+  required: ["sessionId", "language", "mode", "state"]
 };
 
 export const paginationMetadataSchema: JsonSchema = {

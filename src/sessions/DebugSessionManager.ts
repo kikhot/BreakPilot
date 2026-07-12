@@ -35,6 +35,7 @@ import { VariableSerializer } from "../inspection/VariableSerializer.ts";
 import { SessionCoordinator } from "./SessionCoordinator.ts";
 import { SessionOwner, SessionState } from "./SessionOwner.ts";
 import { SessionStore } from "./SessionStore.ts";
+import { ideProviderCapabilities } from "../runtime/ProviderCapabilities.ts";
 
 type DebugToolArgs = AnyRecord & {
   sessionId?: string;
@@ -143,7 +144,7 @@ export class DebugSessionManager {
     if (normalized.mode === "ide" || normalized.ideSessionId) {
       const adopted = await this.#adoptIdeSession(normalized);
       return ok(adopted.session.sessionId, {
-        ...this.#sessionSummary(adopted.session),
+        ...this.#sessionSummary(adopted.session, true),
         startMode: "ide"
       }, auditId, adopted.warnings);
     }
@@ -156,7 +157,7 @@ export class DebugSessionManager {
           mode: "headless",
           program: normalized.program ?? normalized.filePath
         });
-    return ok(session.sessionId, { ...this.#sessionSummary(session), startMode: mode }, auditId);
+    return ok(session.sessionId, { ...this.#sessionSummary(session, true), startMode: mode }, auditId);
   }
 
   async #startIdeDebug(args: DebugToolArgs, auditId: string): Promise<ToolResponse> {
@@ -205,7 +206,7 @@ export class DebugSessionManager {
       mode: "ide"
     });
     return ok(adopted.session.sessionId, {
-      ...this.#sessionSummary(adopted.session),
+      ...this.#sessionSummary(adopted.session, true),
       startMode: "ide"
     }, auditId, adopted.warnings);
   }
@@ -338,7 +339,15 @@ export class DebugSessionManager {
     }
 
     if (action === "drainEvents") {
-      return ok(session.sessionId, { status: session.state, events: this.#emptyEvents() }, auditId);
+      if (session.provider.capabilities.eventDrain === "unsupported" || !session.provider.drainEvents) {
+        throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support event drain.", {
+          sessionId: session.sessionId,
+          providerKind: session.providerKind,
+          capability: "eventDrain"
+        });
+      }
+      const events = await session.provider.drainEvents();
+      return ok(session.sessionId, { status: session.state, events }, auditId);
     }
 
     throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, `Unsupported debug control action: ${String(action)}`, { action });
@@ -356,7 +365,7 @@ export class DebugSessionManager {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_run_to_line requires filePath and line.", {});
     }
     const session = this.#resolveSession(normalized);
-    if (!session.provider.runToLine) {
+    if (session.provider.capabilities.runToLine === "unsupported" || !session.provider.runToLine) {
       throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support run-to-line.", {
         sessionId: session.sessionId,
         providerKind: session.providerKind
@@ -456,10 +465,11 @@ export class DebugSessionManager {
     if (normalized.ref !== undefined) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value does not accept ref; use path + newValue.", {});
     }
-    if (!session.provider.setVariable) {
-      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support variable mutation.", {
+    if (session.provider.capabilities.setValue === "unsupported" || !session.provider.setVariable) {
+      throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support variable mutation.", {
         sessionId: session.sessionId,
-        providerKind: session.providerKind
+        providerKind: session.providerKind,
+        capability: "setValue"
       });
     }
     const node = await this.#resolveNodeByPath(session, normalized, normalized.path);
@@ -1200,7 +1210,7 @@ export class DebugSessionManager {
         return false;
       }
       return true;
-    }).map((session) => this.#sessionSummary(session));
+    }).map((session) => this.#sessionSummary(session, args.detail === "diagnostic"));
   }
 
   #ideStatusView(args: DebugToolArgs = {}): AnyRecord {
@@ -1223,7 +1233,16 @@ export class DebugSessionManager {
         name: session.name,
         state: session.state,
         active: Boolean(session.active),
-        position: this.#positionFromTopFrame(session.topFrame)
+        position: this.#positionFromTopFrame(session.topFrame),
+        ...(args.detail === "diagnostic"
+          ? {
+              providerKind: "ide",
+              capabilities: ideProviderCapabilities({
+                ...(this.ideBridge?.registry.get(session.clientId)?.capabilities ?? {}),
+                ...(session.capabilities ?? {})
+              })
+            }
+          : {})
       }))
     };
   }
@@ -1359,10 +1378,6 @@ export class DebugSessionManager {
       filePath: source?.path ?? topFrame.filePath ?? null,
       line: topFrame.line ?? null
     };
-  }
-
-  #emptyEvents(): AnyRecord {
-    return { breakpointErrors: [], tracepoints: [] };
   }
 
   #filterBreakpointRecords<TBreakpoint extends BreakpointRecord | ProjectBreakpointRecord>(
@@ -1688,13 +1703,19 @@ export class DebugSessionManager {
     return record;
   }
 
-  #sessionSummary(session: DebugSessionRecord): SessionSummary {
+  #sessionSummary(session: DebugSessionRecord, diagnostic = false): SessionSummary {
     return {
       sessionId: session.sessionId,
       language: session.language,
       mode: session.mode,
       state: session.state,
-      ...(session.ideSessionId ? { ideSessionId: session.ideSessionId } : {})
+      ...(session.ideSessionId ? { ideSessionId: session.ideSessionId } : {}),
+      ...(diagnostic
+        ? {
+            providerKind: session.providerKind,
+            capabilities: session.provider.capabilities
+          }
+        : {})
     };
   }
 
