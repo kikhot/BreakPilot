@@ -104,7 +104,7 @@ class BreakpointSync(
             byAgentId.remove(agentId)
             true
         } else {
-            removeStoredAgentBreakpoint(manager, agentId, message.breakpoint)
+            removeStoredAgentBreakpoint(manager, agentId)
         }
         if (removed) notify("BreakPilot removed an agent breakpoint.")
         bridge.send(
@@ -119,8 +119,7 @@ class BreakpointSync(
 
     private fun removeStoredAgentBreakpoint(
         manager: com.intellij.xdebugger.breakpoints.XBreakpointManager,
-        agentId: String,
-        requested: AgentBreakpoint?
+        agentId: String
     ): Boolean {
         val all = manager.allBreakpoints.toList()
         val marked = all.firstOrNull { it.getUserData(agentBreakpointIdKey) == agentId }
@@ -128,14 +127,7 @@ class BreakpointSync(
             manager.removeBreakpoint(marked)
             return true
         }
-        if (requested == null) return false
-        val file = LocalFileSystem.getInstance().findFileByPath(requested.file) ?: return false
-        val match = all
-            .filterIsInstance<XLineBreakpoint<*>>()
-            .firstOrNull { it.fileUrl == file.url && it.line == requested.line - 1 }
-            ?: return false
-        manager.removeBreakpoint(match)
-        return true
+        return false
     }
 
     fun clearAgentBreakpoints(sessionId: String? = null, workspaceRoot: String? = null) {

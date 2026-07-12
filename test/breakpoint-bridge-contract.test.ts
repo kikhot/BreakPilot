@@ -28,4 +28,6 @@ test("IDE breakpoint remove handlers send their explicit removal result", () => 
   assert.match(vscodeSource, /breakpointId:\s*agentId,\s*removed/);
   assert.match(vscodeSource, /if \(entry\)[\s\S]*removed = true;/);
   assert.match(ideaSource, /removed\s*=\s*removed/);
+  assert.doesNotMatch(ideaSource, /requested:\s*AgentBreakpoint/);
+  assert.doesNotMatch(ideaSource, /requested\.file/);
 });
