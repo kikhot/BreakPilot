@@ -170,6 +170,19 @@ test("run-to-line does not reuse the paused snapshot that predates command dispa
   }));
 });
 
+test("run-to-line does not treat a stopped command acknowledgement as runtime evidence", async () => {
+  const { provider } = providerWith((message, bridge) => {
+    bridge.acknowledge(message, { status: "stopped" });
+  });
+
+  await expectBreakpointTimeout(provider.runToLine({
+    filePath: "/workspace/Hello.java",
+    line: 20,
+    threadId: 7,
+    timeoutMs: 25
+  }));
+});
+
 test("step accepts a fresh pause event delivered before its command result", async () => {
   const { provider } = providerWith((message, bridge) => {
     bridge.receive({

@@ -368,7 +368,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         threadId: args.threadId ?? this.threadId,
         timeoutMs: args.timeoutMs
       }, IdeMessageTypes.AGENT_RUN_TO_LINE);
-      if (result.status === "stopped" || result.status === "timeout") {
+      if (result.status === "timeout") {
         this.#clearStopTransition(transition);
         return result as RunToLineResult;
       }
