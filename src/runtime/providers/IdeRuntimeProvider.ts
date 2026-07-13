@@ -22,6 +22,7 @@ import type { RuntimeProviderCapabilities } from "../../types/capabilities.ts";
 import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../ProviderCapabilities.ts";
 
 type BridgeEvent = { clientId?: string; message: BridgeMessage };
+type StopTransitionBoundary = { operation: string; revision: number };
 
 export interface IdeRuntimeProviderOptions {
   sessionId: string;
@@ -41,6 +42,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   workspaceRoot: string;
   language: DebugLanguage;
   confirmationTimeoutMs: number;
+  pendingStopTransition: StopTransitionBoundary | null;
 
   constructor({
     sessionId,
@@ -57,6 +59,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     this.workspaceRoot = workspaceRoot;
     this.language = language;
     this.confirmationTimeoutMs = confirmationTimeoutMs;
+    this.pendingStopTransition = null;
   }
 
   get capabilities(): RuntimeProviderCapabilities {
@@ -127,21 +130,29 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async waitForBreakpoint(timeoutMs = 30000): Promise<StoppedEvent> {
+    const transition = this.pendingStopTransition;
     const current = this.#sessionInfo();
-    if (current?.state === "paused") {
+    if (
+      current?.state === "paused" &&
+      (!transition || this.#sessionRevision() > transition.revision)
+    ) {
+      this.#clearStopTransition(transition);
       return this.#stoppedFromSession(current);
     }
 
     const requestId = makeId("ide_wait");
     const deferred = createDeferred<StoppedEvent>();
-    const listener = ({ message }: BridgeEvent) => {
+    const listener = ({ clientId, message }: BridgeEvent) => {
+      if (clientId !== this.ideClientId) return;
       if (message.ideSessionId !== this.ideSessionId) return;
       if (
         message.type !== IdeMessageTypes.IDE_SESSION_PAUSED &&
+        message.type !== IdeMessageTypes.IDE_SESSION_STOPPED &&
         message.type !== IdeMessageTypes.IDE_BREAKPOINT_HIT
       ) {
         return;
       }
+      if (transition && this.#sessionRevision() <= transition.revision) return;
       this.bridge.off("message", listener);
       deferred.resolve({
         sessionId: this.sessionId,
@@ -155,14 +166,19 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       });
     };
     this.bridge.on("message", listener);
-    return withTimeout(deferred.promise, timeoutMs, () => {
-      this.bridge.off("message", listener);
-      return new BreakPilotError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for IDE breakpoint hit.", {
-        sessionId: this.sessionId,
-        ideSessionId: this.ideSessionId,
-        timeoutMs
+    try {
+      return await withTimeout(deferred.promise, timeoutMs, () => {
+        this.bridge.off("message", listener);
+        return new BreakPilotError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for IDE breakpoint hit.", {
+          sessionId: this.sessionId,
+          ideSessionId: this.ideSessionId,
+          timeoutMs
+        });
       });
-    });
+    } finally {
+      this.bridge.off("message", listener);
+      this.#clearStopTransition(transition);
+    }
   }
 
   async listThreads(): Promise<AnyRecord[]> {
@@ -329,7 +345,13 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
 
   async pause(threadId: number | null = this.threadId): Promise<AnyRecord> {
     await this.#confirm(debugControlConfirmationRequest("pause", { threadId }));
-    return this.#command("pause", { threadId }, IdeMessageTypes.AGENT_PAUSE);
+    const transition = this.#armStopTransition("pause");
+    try {
+      return await this.#command("pause", { threadId }, IdeMessageTypes.AGENT_PAUSE);
+    } catch (error) {
+      this.#clearStopTransition(transition);
+      throw error;
+    }
   }
 
   async runToLine(args: RunToLineArgs): Promise<RunToLineResult> {
@@ -338,21 +360,28 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       file: args.filePath,
       line: args.line
     }));
-    const result = await this.#command("run_to_line", {
-      filePath: args.filePath,
-      line: args.line,
-      threadId: args.threadId ?? this.threadId,
-      timeoutMs: args.timeoutMs
-    }, IdeMessageTypes.AGENT_RUN_TO_LINE);
-    if (result.status === "paused" || result.status === "stopped" || result.status === "timeout") {
-      return result as RunToLineResult;
+    const transition = this.#armStopTransition("run_to_line");
+    try {
+      const result = await this.#command("run_to_line", {
+        filePath: args.filePath,
+        line: args.line,
+        threadId: args.threadId ?? this.threadId,
+        timeoutMs: args.timeoutMs
+      }, IdeMessageTypes.AGENT_RUN_TO_LINE);
+      if (result.status === "stopped" || result.status === "timeout") {
+        this.#clearStopTransition(transition);
+        return result as RunToLineResult;
+      }
+      const stopped = await this.waitForBreakpoint(args.timeoutMs ?? 30000);
+      return {
+        status: "paused",
+        position: this.#positionFromStopped(stopped) ?? result.position,
+        frame: stopped.topFrame ?? result.frame
+      };
+    } catch (error) {
+      this.#clearStopTransition(transition);
+      throw error;
     }
-    const stopped = await this.waitForBreakpoint(args.timeoutMs ?? 30000);
-    return {
-      status: "paused",
-      position: this.#positionFromStopped(stopped),
-      frame: stopped.topFrame
-    };
   }
 
   async step(kind: RuntimeStepKind, threadId: number | null = this.threadId): Promise<AnyRecord> {
@@ -363,7 +392,13 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         : kind === "out"
           ? IdeMessageTypes.AGENT_STEP_OUT
           : IdeMessageTypes.AGENT_STEP_OVER;
-    return this.#command(`step_${kind}`, { threadId }, messageType);
+    const transition = this.#armStopTransition(`step_${kind}`);
+    try {
+      return await this.#command(`step_${kind}`, { threadId }, messageType);
+    } catch (error) {
+      this.#clearStopTransition(transition);
+      throw error;
+    }
   }
 
   async disconnect(options: { terminateDebuggee?: boolean; restart?: boolean } = {}): Promise<AnyRecord> {
@@ -504,6 +539,34 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
 
   #sessionInfo(): IdeDebugSessionInfo | undefined {
     return this.bridge.registry.findSession(this.ideSessionId, this.ideClientId);
+  }
+
+  #sessionRevision(): number {
+    return this.bridge.registry.getSessionRevision(this.ideSessionId, this.ideClientId);
+  }
+
+  #armStopTransition(operation: string): StopTransitionBoundary {
+    if (this.pendingStopTransition) {
+      throw new BreakPilotError(
+        ErrorCodes.TOOL_FAILED,
+        "An IDE control transition is already waiting for fresh stop evidence.",
+        {
+          sessionId: this.sessionId,
+          ideSessionId: this.ideSessionId,
+          pendingOperation: this.pendingStopTransition.operation,
+          requestedOperation: operation
+        }
+      );
+    }
+    const transition = { operation, revision: this.#sessionRevision() };
+    this.pendingStopTransition = transition;
+    return transition;
+  }
+
+  #clearStopTransition(transition: StopTransitionBoundary | null): void {
+    if (transition && this.pendingStopTransition === transition) {
+      this.pendingStopTransition = null;
+    }
   }
 
   #isPendingPresentation(result: AnyRecord): boolean {

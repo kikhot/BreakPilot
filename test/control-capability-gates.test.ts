@@ -149,21 +149,33 @@ test("step propagates stop timeout and leaves the session running", async () => 
   assert.deepEqual(counters, { pause: 0, step: 1, wait: 1 });
 });
 
-test("pause rejects an empty stop acknowledgement instead of reporting paused", async () => {
-  const counters = { pause: 0, step: 0, wait: 0 };
-  const { router, manager } = controlRouter({
-    capabilities: { ...unsupportedCapabilities, pause: "native" },
-    counters,
-    waitForBreakpoint: async () => null as never
-  });
+test("pause and step reject empty or mismatched stop evidence", async () => {
+  for (const { action, stopped } of [
+    { action: "pause", stopped: null },
+    { action: "pause", stopped: {} },
+    { action: "pause", stopped: { threadId: null } },
+    { action: "stepOver", stopped: { topFrame: {}, stopped: {} } },
+    { action: "stepOver", stopped: { sessionId: "another_session", reason: "step", threadId: 17 } }
+  ] as const) {
+    const counters = { pause: 0, step: 0, wait: 0 };
+    const { router, manager } = controlRouter({
+      capabilities: {
+        ...unsupportedCapabilities,
+        pause: "native",
+        stepping: "native"
+      },
+      counters,
+      waitForBreakpoint: async () => stopped as never
+    });
 
-  const response = await router.callTool("bp_debug_control", {
-    sessionId: "control_caps",
-    action: "pause"
-  });
+    const response = await router.callTool("bp_debug_control", {
+      sessionId: "control_caps",
+      action
+    });
 
-  assert.equal(response.error?.code, ErrorCodes.TOOL_FAILED);
-  assert.equal(manager.sessions.get("control_caps").state, "running");
+    assert.equal(response.error?.code, ErrorCodes.TOOL_FAILED, `${action}: ${JSON.stringify(stopped)}`);
+    assert.equal(manager.sessions.get("control_caps").state, "running");
+  }
 });
 
 test("pause and step report paused only after a stop result", async () => {

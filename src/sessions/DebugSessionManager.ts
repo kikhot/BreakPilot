@@ -308,13 +308,11 @@ export class DebugSessionManager {
         });
       }
       await session.provider.pause(normalized.threadId ?? session.provider.threadId);
-      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 5000);
-      if (!stopped || typeof stopped !== "object") {
-        throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider did not report a stop after pause.", {
-          sessionId: session.sessionId,
-          providerKind: session.providerKind
-        });
-      }
+      const stopped = this.#validatedStopEvidence(
+        session,
+        await session.provider.waitForBreakpoint(normalized.timeout ?? 5000),
+        "pause"
+      );
       session.state = SessionState.PAUSED;
       return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
     }
@@ -350,13 +348,11 @@ export class DebugSessionManager {
       const kind = action === "stepInto" ? "into" : action === "stepOut" ? "out" : "over";
       await session.provider.step(kind, normalized.threadId ?? session.provider.threadId);
       session.state = SessionState.RUNNING;
-      const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 10000);
-      if (!stopped || typeof stopped !== "object") {
-        throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider did not report a stop after stepping.", {
-          sessionId: session.sessionId,
-          providerKind: session.providerKind
-        });
-      }
+      const stopped = this.#validatedStopEvidence(
+        session,
+        await session.provider.waitForBreakpoint(normalized.timeout ?? 10000),
+        action
+      );
       session.state = SessionState.PAUSED;
       return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
     }
@@ -1263,6 +1259,64 @@ export class DebugSessionManager {
       ErrorCodes.SESSION_AMBIGUOUS,
       "Multiple debug sessions are active. Pass sessionId to choose one.",
       { sessions: candidates.map((session) => this.#sessionSummary(session)) }
+    );
+  }
+
+  #validatedStopEvidence(
+    session: DebugSessionRecord,
+    stopped: unknown,
+    operation: string
+  ): AnyRecord {
+    const evidence = stopped && typeof stopped === "object" && !Array.isArray(stopped)
+      ? stopped as AnyRecord
+      : null;
+    const mismatchedSession = Boolean(
+      evidence?.sessionId && evidence.sessionId !== session.sessionId
+    );
+    const mismatchedIdeSession = Boolean(
+      evidence?.ideSessionId &&
+      session.ideSessionId &&
+      evidence.ideSessionId !== session.ideSessionId
+    );
+    const nested = evidence?.stopped && typeof evidence.stopped === "object" && !Array.isArray(evidence.stopped)
+      ? evidence.stopped as AnyRecord
+      : null;
+    const hasStopDetail = this.#hasStopDetail(evidence) || this.#hasStopDetail(nested);
+    if (!evidence || mismatchedSession || mismatchedIdeSession || !hasStopDetail) {
+      throw new BreakPilotError(
+        ErrorCodes.TOOL_FAILED,
+        `Runtime provider did not report correlated stop evidence after ${operation}.`,
+        {
+          sessionId: session.sessionId,
+          ideSessionId: session.ideSessionId,
+          providerKind: session.providerKind,
+          reportedSessionId: evidence?.sessionId,
+          reportedIdeSessionId: evidence?.ideSessionId
+        }
+      );
+    }
+    return evidence;
+  }
+
+  #hasStopDetail(value: AnyRecord | null): boolean {
+    if (!value) return false;
+    const threadId = value.threadId;
+    const hasThread =
+      (typeof threadId === "number" && Number.isFinite(threadId)) ||
+      (typeof threadId === "string" && threadId.trim().length > 0);
+    const topFrame = value.topFrame;
+    const hasFrame = Boolean(
+      topFrame &&
+      typeof topFrame === "object" &&
+      !Array.isArray(topFrame) &&
+      Object.keys(topFrame).length > 0
+    );
+    return Boolean(
+      (typeof value.reason === "string" && value.reason.trim().length > 0) ||
+      (typeof value.description === "string" && value.description.trim().length > 0) ||
+      hasThread ||
+      hasFrame ||
+      value.allThreadsStopped === true
     );
   }
 

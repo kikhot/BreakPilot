@@ -10,10 +10,12 @@ export interface IdeClientRecord extends IdeClientInfo {
 export class IdeClientRegistry {
   clients: Map<string, IdeClientRecord>;
   sessions: Map<string, IdeDebugSessionInfo>;
+  sessionRevisions: Map<string, number>;
 
   constructor() {
     this.clients = new Map();
     this.sessions = new Map();
+    this.sessionRevisions = new Map();
   }
 
   add(socket: Socket, metadata: Partial<IdeClientInfo> = {}): IdeClientRecord {
@@ -42,7 +44,10 @@ export class IdeClientRegistry {
   remove(clientId: string): void {
     this.clients.delete(clientId);
     for (const [key, session] of this.sessions.entries()) {
-      if (session.clientId === clientId) this.sessions.delete(key);
+      if (session.clientId === clientId) {
+        this.sessions.delete(key);
+        this.sessionRevisions.delete(key);
+      }
     }
   }
 
@@ -87,13 +92,26 @@ export class IdeClientRegistry {
       startedAt: existing?.startedAt ?? message.startedAt ?? now,
       updatedAt: now
     };
-    this.sessions.set(this.#sessionKey(clientId, message.ideSessionId), session);
+    const key = this.#sessionKey(clientId, message.ideSessionId);
+    this.sessions.set(key, session);
+    this.sessionRevisions.set(key, (this.sessionRevisions.get(key) ?? 0) + 1);
     return session;
   }
 
   removeSession(clientId: string | undefined, ideSessionId: string | undefined): void {
     if (!clientId || !ideSessionId) return;
-    this.sessions.delete(this.#sessionKey(clientId, ideSessionId));
+    const key = this.#sessionKey(clientId, ideSessionId);
+    this.sessions.delete(key);
+    this.sessionRevisions.delete(key);
+  }
+
+  getSessionRevision(ideSessionId: string | undefined, clientId?: string): number {
+    if (!ideSessionId) return 0;
+    if (clientId) return this.sessionRevisions.get(this.#sessionKey(clientId, ideSessionId)) ?? 0;
+    const session = this.findSession(ideSessionId);
+    return session
+      ? this.sessionRevisions.get(this.#sessionKey(session.clientId, ideSessionId)) ?? 0
+      : 0;
   }
 
   listSessions(filter: { clientId?: string; workspaceRoot?: string } = {}): IdeDebugSessionInfo[] {

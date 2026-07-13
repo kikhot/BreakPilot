@@ -133,6 +133,26 @@ class FakeIdeBridge extends EventEmitter {
       }
 
       if (message.type === IdeMessageTypes.AGENT_RUN_TO_LINE) {
+        const topFrame = {
+          id: Number(message.line),
+          name: "run-to-line",
+          line: Number(message.line),
+          source: { path: message.filePath }
+        };
+        const paused: BridgeMessage = {
+          type: IdeMessageTypes.IDE_SESSION_PAUSED,
+          ideSessionId: message.ideSessionId,
+          reason: "breakpoint",
+          threadId: 123,
+          topFrame,
+          stopped: {
+            reason: "breakpoint",
+            threadId: 123,
+            topFrame
+          }
+        };
+        this.registry.upsertSession(String(clientId), paused, "paused");
+        this.emit("message", { clientId, message: paused });
         this.emit("message", {
           clientId,
           message: {
@@ -141,7 +161,7 @@ class FakeIdeBridge extends EventEmitter {
             ideSessionId: message.ideSessionId,
             command: "run_to_line",
             result: {
-              status: "paused",
+              status: "running",
               position: { filePath: message.filePath, line: message.line }
             }
           }
@@ -150,6 +170,17 @@ class FakeIdeBridge extends EventEmitter {
       }
 
       if (message.type === "agent_pause") {
+        const topFrame = { id: 1, name: "hello", line: 21, source: { path: "/workspace/Hello.java" } };
+        const paused: BridgeMessage = {
+          type: IdeMessageTypes.IDE_SESSION_PAUSED,
+          ideSessionId: message.ideSessionId,
+          reason: "pause",
+          threadId: 123,
+          topFrame,
+          stopped: { reason: "pause", threadId: 123, topFrame }
+        };
+        this.registry.upsertSession(String(clientId), paused, "paused");
+        this.emit("message", { clientId, message: paused });
         this.emit("message", {
           clientId,
           message: {
@@ -179,6 +210,7 @@ const provider = new IdeRuntimeProvider({
 const pauseResult = await provider.pause(123);
 assert.deepEqual(pauseResult, { ok: true });
 assert.equal(bridge.sent.some((message) => message.type === "agent_pause" && message.threadId === 123), true);
+assert.equal((await provider.waitForBreakpoint(1000)).reason, "pause");
 
 const evalResult = await provider.evaluate("name.toUpperCase()", { mode: "readonly", timeoutMs: 1000 });
 assert.equal(bridge.evaluateCalls, 2);
@@ -228,7 +260,13 @@ const runToLine = await provider.runToLine?.({
 });
 assert.deepEqual(runToLine, {
   status: "paused",
-  position: { filePath: "/workspace/Hello.java", line: 24 }
+  position: { filePath: "/workspace/Hello.java", line: 24 },
+  frame: {
+    id: 24,
+    name: "run-to-line",
+    line: 24,
+    source: { path: "/workspace/Hello.java" }
+  }
 });
 
 console.log("ide runtime provider tests ok");
