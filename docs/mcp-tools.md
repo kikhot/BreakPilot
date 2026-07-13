@@ -120,13 +120,16 @@ The current IDEA and VS Code bridges advertise native run-to-line and
 `evaluateAssignment` set-value; other IDE features are enabled only when the
 bridge advertises them.
 
-For the Phase 1 operations guarded by this matrix—run-to-line, set-value, event
-drain, and breakpoint update—`unsupported` produces
-`UNSUPPORTED_CAPABILITY` without a fabricated success. BreakPilot does not
-silently emulate run-to-line with a temporary breakpoint. Callers must also
-avoid every other operation that its session reports as unsupported; advanced
-breakpoint field gating remains provider-dependent and is called out in the
-comparison report.
+The manager enforces this matrix before dispatch. `unsupported` pause,
+stepping, run-to-line, variable-reference inspection, set-value, breakpoint
+update, and event drain produce `UNSUPPORTED_CAPABILITY` without invoking the
+provider or fabricating success. Breakpoint creation also gates `condition`,
+`hitCondition`, and `logMessage` against `conditionalBreakpoints`,
+`hitConditionalBreakpoints`, and `tracepoints`, respectively. Advanced
+semantics without an implemented capability (`enabled:false`, temporary,
+suspend policy, log-message mode, and log-stack mode) are rejected explicitly
+before mutation. BreakPilot does not silently emulate run-to-line with a
+temporary breakpoint.
 
 ## Recommended Flow
 
@@ -301,9 +304,13 @@ alias `file`) plus `line`:
 ```
 
 It also accepts `hitCondition`, `logMessage`, `temporary`, `suspendPolicy`,
-`isLogMessage`, `isLogStack`, and `requireVerified`. These fields are part of
-the typed contract; the provider capability matrix and returned verification
-state determine their runtime fidelity.
+`isLogMessage`, `isLogStack`, and `requireVerified`. `condition`,
+`hitCondition`, and `logMessage` dispatch only when the selected provider
+advertises the matching capability. The retained advanced semantic fields are
+validated by the typed contract but currently return `UNSUPPORTED_CAPABILITY`
+when their non-default behavior is requested; they are never silently ignored.
+Returned verification still describes the breakpoint the provider actually
+acknowledged.
 
 Update mode accepts `breakpointId` plus update fields, but cannot also contain
 `filePath` or `line`:

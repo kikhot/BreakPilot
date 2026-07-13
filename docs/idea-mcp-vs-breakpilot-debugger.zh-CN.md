@@ -140,11 +140,12 @@ partial stack 当作完整调用链。后续应把“完整度、截断原因、
 返回带 issue 列表的 `INVALID_ARGUMENT`。
 
 契约存在不代表 update 已实现：当前 `breakpointUpdate` 对所有 provider 都是
-`unsupported`，update 分支会明确返回 `UNSUPPORTED_CAPABILITY`。创建分支虽然公开
-`condition`、`hitCondition`、`logMessage`、`enabled`、`temporary`、`suspendPolicy`、
-`isLogMessage`、`isLogStack` 和 `owner`，但实际 IDE 映射取决于 bridge capability：
-VS Code 已映射 condition/hit/log；IDEA 当前主要可靠创建行断点，不能把其他字段的存在
-理解为 IDEA 已完整应用。
+`unsupported`，update 分支会明确返回 `UNSUPPORTED_CAPABILITY`。创建分支对
+`condition`、`hitCondition`、`logMessage` 已分别强制执行 conditional、hit-conditional、
+tracepoint capability gate；provider 未声明能力时会在 mutation 前失败。`enabled:false`、
+`temporary:true`、`suspendPolicy`、`isLogMessage:true`、`isLogStack:true` 等尚未实现的
+高级语义同样明确拒绝，不会静默忽略。VS Code 已映射 condition/hit/log；IDEA 当前主要
+可靠创建行断点，因此 capability 声明仍不能替代真实运行时 E2E 验证。
 
 `bp_debug_list_breakpoints` 已能请求 IDEA/VS Code 原生 breakpoint snapshot，并区分
 agent/user owner；这修正了“只读 BreakPilot store”的旧结论。仍需注意：没有可用 bridge
@@ -183,8 +184,8 @@ MCP 返回的 breakpoint type、suspend policy、presentation 等字段也更完
 
 ### P0：让 capability 与每次操作结果完全一致
 
-- 为 condition、hit condition、tracepoint 等高级断点字段增加逐项 capability gate；
-  unsupported 时在 dispatch 前失败，不能由插件静默忽略后返回 verified。
+- condition、hit condition、tracepoint 的逐项 dispatch gate 已完成；下一步让 bridge
+  acknowledgement 逐项报告实际应用语义，而不只返回笼统的 verified。
 - capability 增加来源与原因诊断，例如 `source=client|session|adapter`、版本和 reason；
   compact 保持不变，只在 diagnostic 暴露。
 - 建立 IDEA、VS Code、DAP 三类 provider 的 capability × operation E2E matrix，验证

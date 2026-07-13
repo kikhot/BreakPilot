@@ -112,10 +112,14 @@ breakpoint update 和 event drain 当前均为 unsupported。IDE 能力来自 li
 当前 IDEA 与 VS Code bridge 声明 native run-to-line，以及
 `evaluateAssignment` 形式的 set-value，其他能力必须由 bridge 明确声明。
 
-Phase 1 中由该矩阵直接 gate 的 run-to-line、set-value、event drain 和 breakpoint
-update，遇到 `unsupported` 时会返回 `UNSUPPORTED_CAPABILITY`，不会伪造成功。
-BreakPilot 也不会用临时断点静默模拟 run-to-line。调用方还必须避开 session 声明为
-unsupported 的其他操作；高级断点字段的 gate 目前仍取决于 provider，具体差距见对照报告。
+manager 会在 dispatch 前强制执行该矩阵。pause、stepping、run-to-line、
+variable-reference inspection、set-value、breakpoint update 和 event drain 为
+`unsupported` 时，会在调用 provider 前返回 `UNSUPPORTED_CAPABILITY`，不会伪造成功。
+创建断点时，`condition`、`hitCondition`、`logMessage` 也分别受
+`conditionalBreakpoints`、`hitConditionalBreakpoints`、`tracepoints` gate。
+尚无对应实现能力的高级语义（`enabled:false`、temporary、suspend policy、
+log-message mode、log-stack mode）会在 mutation 前明确拒绝，不会静默忽略。
+BreakPilot 也不会用临时断点静默模拟 run-to-line。
 
 ## 推荐流程
 
@@ -280,8 +284,10 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 ```
 
 位置模式还接受 `hitCondition`、`logMessage`、`temporary`、`suspendPolicy`、
-`isLogMessage`、`isLogStack` 和 `requireVerified`。这些字段属于 typed contract；
-实际保真度由 provider capability 与返回的 verification 状态决定。
+`isLogMessage`、`isLogStack` 和 `requireVerified`。只有 provider 声明相应 capability
+时才会 dispatch `condition`、`hitCondition` 与 `logMessage`。其余高级语义虽然保留在
+typed contract 中，但请求非默认行为时当前会返回 `UNSUPPORTED_CAPABILITY`，不会被
+静默忽略；返回的 verification 仍描述 provider 实际确认的断点。
 
 更新模式传 `breakpointId` 和待更新字段，但不能同时带 `filePath` 或 `line`：
 
