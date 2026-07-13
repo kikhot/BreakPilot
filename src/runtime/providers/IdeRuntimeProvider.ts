@@ -22,7 +22,12 @@ import type { RuntimeProviderCapabilities } from "../../types/capabilities.ts";
 import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../ProviderCapabilities.ts";
 
 type BridgeEvent = { clientId?: string; message: BridgeMessage };
-type StopTransitionBoundary = { operation: string; revision: number };
+type StopTransitionBoundary = {
+  operation: string;
+  revision: number;
+  capturedStop?: StoppedEvent;
+  listener?: (event: BridgeEvent) => void;
+};
 
 export interface IdeRuntimeProviderOptions {
   sessionId: string;
@@ -133,11 +138,22 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     const transition = this.pendingStopTransition;
     const current = this.#sessionInfo();
     if (
+      transition?.capturedStop &&
+      current?.state === "paused" &&
+      this.#sessionRevision() > transition.revision
+    ) {
+      const captured = transition.capturedStop;
+      this.#clearStopTransition(transition);
+      return captured;
+    }
+    const currentStopped =
       current?.state === "paused" &&
       (!transition || this.#sessionRevision() > transition.revision)
-    ) {
+        ? this.#stoppedFromSession(current)
+        : null;
+    if (currentStopped) {
       this.#clearStopTransition(transition);
-      return this.#stoppedFromSession(current);
+      return currentStopped;
     }
 
     const requestId = makeId("ide_wait");
@@ -153,17 +169,10 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         return;
       }
       if (transition && this.#sessionRevision() <= transition.revision) return;
+      const stopped = this.#stoppedFromMessage(message, requestId);
+      if (!stopped) return;
       this.bridge.off("message", listener);
-      deferred.resolve({
-        sessionId: this.sessionId,
-        reason: message.reason ?? message.stopped?.reason ?? "breakpoint",
-        threadId: message.threadId ?? message.stopped?.threadId ?? null,
-        description: message.description ?? message.stopped?.description ?? "IDE debug session paused.",
-        allThreadsStopped: true,
-        ideSessionId: this.ideSessionId,
-        requestId,
-        topFrame: message.topFrame ?? message.stopped?.topFrame
-      });
+      deferred.resolve(stopped);
     };
     this.bridge.on("message", listener);
     try {
@@ -558,13 +567,32 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         }
       );
     }
-    const transition = { operation, revision: this.#sessionRevision() };
+    const transition: StopTransitionBoundary = {
+      operation,
+      revision: this.#sessionRevision()
+    };
+    transition.listener = ({ clientId, message }: BridgeEvent) => {
+      if (clientId !== this.ideClientId) return;
+      if (message.ideSessionId !== this.ideSessionId) return;
+      if (
+        message.type !== IdeMessageTypes.IDE_SESSION_PAUSED &&
+        message.type !== IdeMessageTypes.IDE_SESSION_STOPPED &&
+        message.type !== IdeMessageTypes.IDE_BREAKPOINT_HIT
+      ) {
+        return;
+      }
+      if (this.#sessionRevision() <= transition.revision) return;
+      const stopped = this.#stoppedFromMessage(message);
+      if (stopped && !transition.capturedStop) transition.capturedStop = stopped;
+    };
     this.pendingStopTransition = transition;
+    this.bridge.on("message", transition.listener);
     return transition;
   }
 
   #clearStopTransition(transition: StopTransitionBoundary | null): void {
     if (transition && this.pendingStopTransition === transition) {
+      if (transition.listener) this.bridge.off("message", transition.listener);
       this.pendingStopTransition = null;
     }
   }
@@ -609,16 +637,60 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     };
   }
 
-  #stoppedFromSession(session: IdeDebugSessionInfo): StoppedEvent {
+  #stoppedFromSession(session: IdeDebugSessionInfo): StoppedEvent | null {
+    const stopped = session.stopped as AnyRecord | undefined;
+    return this.#makeStoppedEvent({
+      reason: stopped?.reason,
+      threadId: session.threadId ?? stopped?.threadId,
+      description: stopped?.description,
+      allThreadsStopped: stopped?.allThreadsStopped,
+      topFrame: session.topFrame ?? stopped?.topFrame
+    });
+  }
+
+  #stoppedFromMessage(message: BridgeMessage, requestId?: string): StoppedEvent | null {
+    const stopped = message.stopped as AnyRecord | undefined;
+    return this.#makeStoppedEvent({
+      reason: message.reason ?? stopped?.reason,
+      threadId: message.threadId ?? stopped?.threadId,
+      description: message.description ?? stopped?.description,
+      allThreadsStopped: message.allThreadsStopped ?? stopped?.allThreadsStopped,
+      topFrame: message.topFrame ?? stopped?.topFrame,
+      requestId
+    });
+  }
+
+  #makeStoppedEvent(raw: AnyRecord): StoppedEvent | null {
+    const reason = typeof raw.reason === "string" && raw.reason.trim().length > 0
+      ? raw.reason
+      : undefined;
+    const description = typeof raw.description === "string" && raw.description.trim().length > 0
+      ? raw.description
+      : undefined;
+    const threadId =
+      (typeof raw.threadId === "number" && Number.isFinite(raw.threadId)) ||
+      (typeof raw.threadId === "string" && raw.threadId.trim().length > 0)
+        ? raw.threadId
+        : undefined;
+    const topFrame = raw.topFrame && typeof raw.topFrame === "object" && !Array.isArray(raw.topFrame) && Object.keys(raw.topFrame).length > 0
+      ? raw.topFrame
+      : undefined;
+    const allThreadsStopped = typeof raw.allThreadsStopped === "boolean"
+      ? raw.allThreadsStopped
+      : undefined;
+    if (!reason && !description && threadId === undefined && !topFrame && allThreadsStopped === undefined) {
+      return null;
+    }
     return {
       sessionId: this.sessionId,
-      reason: session.stopped?.reason ?? "breakpoint",
-      threadId: session.threadId ?? session.stopped?.threadId ?? null,
-      description: session.stopped?.description ?? "IDE debug session is paused.",
-      allThreadsStopped: true,
+      reason,
+      threadId,
+      description,
+      allThreadsStopped,
       ideSessionId: this.ideSessionId,
-      topFrame: session.topFrame ?? (session.stopped as AnyRecord | undefined)?.topFrame
-    };
+      requestId: raw.requestId,
+      topFrame
+    } as StoppedEvent;
   }
 
   #positionFromStopped(stopped: AnyRecord): AnyRecord | undefined {

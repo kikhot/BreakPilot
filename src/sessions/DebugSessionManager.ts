@@ -1316,7 +1316,7 @@ export class DebugSessionManager {
       (typeof value.description === "string" && value.description.trim().length > 0) ||
       hasThread ||
       hasFrame ||
-      value.allThreadsStopped === true
+      typeof value.allThreadsStopped === "boolean"
     );
   }
 

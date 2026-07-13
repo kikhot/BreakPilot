@@ -77,6 +77,15 @@ export class IdeClientRegistry {
     const client = this.clients.get(clientId);
     const now = new Date().toISOString();
     const existing = this.sessions.get(this.#sessionKey(clientId, message.ideSessionId));
+    const paused = state === "paused";
+    const running = state === "running";
+    const stopped = paused
+      ? this.#stopDetails(message)
+      : running
+        ? undefined
+        : this.#stopDetails(message) ?? existing?.stopped;
+    const incomingThreadId = message.threadId ?? stopped?.threadId;
+    const incomingTopFrame = this.#meaningfulFrame(message.topFrame ?? stopped?.topFrame);
     const session: IdeDebugSessionInfo = {
       ideSessionId: message.ideSessionId,
       clientId,
@@ -85,9 +94,9 @@ export class IdeClientRegistry {
       language: message.language ?? existing?.language ?? "idea",
       state,
       active: message.active ?? existing?.active ?? true,
-      threadId: message.threadId ?? message.stopped?.threadId ?? existing?.threadId ?? null,
-      stopped: message.stopped ?? existing?.stopped,
-      topFrame: message.topFrame ?? message.stopped?.topFrame ?? existing?.topFrame,
+      threadId: incomingThreadId ?? (paused || running ? null : existing?.threadId ?? null),
+      stopped,
+      topFrame: incomingTopFrame ?? (paused || running ? undefined : existing?.topFrame),
       capabilities: message.capabilities ?? existing?.capabilities ?? {},
       startedAt: existing?.startedAt ?? message.startedAt ?? now,
       updatedAt: now
@@ -141,5 +150,34 @@ export class IdeClientRegistry {
 
   #sessionKey(clientId: string, ideSessionId: string): string {
     return `${clientId}:${ideSessionId}`;
+  }
+
+  #stopDetails(message: BridgeMessage): AnyRecord | undefined {
+    const raw = message.stopped && typeof message.stopped === "object" && !Array.isArray(message.stopped)
+      ? message.stopped as AnyRecord
+      : {};
+    const details: AnyRecord = {
+      ...raw,
+      reason: message.reason ?? raw.reason,
+      threadId: message.threadId ?? raw.threadId,
+      description: message.description ?? raw.description,
+      allThreadsStopped: message.allThreadsStopped ?? raw.allThreadsStopped,
+      topFrame: this.#meaningfulFrame(message.topFrame ?? raw.topFrame)
+    };
+    const threadId = details.threadId;
+    const meaningful =
+      (typeof details.reason === "string" && details.reason.trim().length > 0) ||
+      (typeof details.description === "string" && details.description.trim().length > 0) ||
+      (typeof threadId === "number" && Number.isFinite(threadId)) ||
+      (typeof threadId === "string" && threadId.trim().length > 0) ||
+      details.topFrame !== undefined ||
+      typeof details.allThreadsStopped === "boolean";
+    return meaningful ? details : undefined;
+  }
+
+  #meaningfulFrame(value: unknown): AnyRecord | undefined {
+    return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0
+      ? value as AnyRecord
+      : undefined;
   }
 }

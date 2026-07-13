@@ -183,6 +183,47 @@ test("run-to-line does not treat a stopped command acknowledgement as runtime ev
   }));
 });
 
+test("an empty fresh pause event cannot revive stale stop details", async () => {
+  const { provider, bridge } = providerWith((message, currentBridge) => {
+    currentBridge.receive({
+      type: IdeMessageTypes.IDE_SESSION_PAUSED,
+      ideSessionId: "idea_transition_session"
+    });
+    currentBridge.acknowledge(message);
+  });
+
+  await provider.step("over", 7);
+  await expectBreakpointTimeout(provider.waitForBreakpoint(25));
+
+  const session = bridge.registry.findSession("idea_transition_session", "idea_transition");
+  assert.equal(session?.threadId, null);
+  assert.equal(session?.stopped, undefined);
+  assert.equal(session?.topFrame, undefined);
+});
+
+test("a valid stop during command dispatch is not lost behind a later empty update", async () => {
+  const { provider } = providerWith((message, bridge) => {
+    bridge.receive({
+      type: IdeMessageTypes.IDE_SESSION_PAUSED,
+      ideSessionId: "idea_transition_session",
+      reason: "step",
+      threadId: 7,
+      topFrame: frame(13)
+    });
+    bridge.receive({
+      type: IdeMessageTypes.IDE_SESSION_PAUSED,
+      ideSessionId: "idea_transition_session"
+    });
+    bridge.acknowledge(message);
+  });
+
+  await provider.step("over", 7);
+  const stopped = await provider.waitForBreakpoint(25);
+
+  assert.equal(stopped.reason, "step");
+  assert.equal(stopped.topFrame?.line, 13);
+});
+
 test("step accepts a fresh pause event delivered before its command result", async () => {
   const { provider } = providerWith((message, bridge) => {
     bridge.receive({
