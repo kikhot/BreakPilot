@@ -145,7 +145,7 @@ export class DebugSessionManager {
       return this.#startIdeDebug(normalized, auditId);
     }
 
-    if (normalized.mode === "ide" || normalized.ideSessionId) {
+    if (normalized.mode === "ide" || (normalized.mode === undefined && normalized.ideSessionId)) {
       const adopted = await this.#adoptIdeSession(normalized);
       return ok(adopted.session.sessionId, {
         ...this.#sessionSummary(adopted.session, true),

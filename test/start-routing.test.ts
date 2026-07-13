@@ -206,3 +206,64 @@ test("omitted mode with only a source location routes through IDE launch", async
     true
   );
 });
+
+test("explicit launch remains authoritative when ideSessionId is present", async () => {
+  const { router, adapter } = dapRouter();
+
+  const response = await router.callTool("bp_debug_start", {
+    mode: "launch",
+    language: "routing-test",
+    program: "src/serve.ts",
+    ideSessionId: "stale_ide_session"
+  });
+
+  assert.equal(response.error, undefined);
+  assert.equal(response.startMode, "launch");
+  assert.equal(adapter.commands.some(({ command }) => command === "launch"), true);
+  assert.equal(adapter.commands.some(({ command }) => command === "attach"), false);
+});
+
+test("explicit attach remains authoritative when ideSessionId is present", async () => {
+  const { router, adapter } = dapRouter();
+
+  const response = await router.callTool("bp_debug_start", {
+    mode: "attach",
+    language: "routing-test",
+    host: "127.0.0.1",
+    port: 5678,
+    ideSessionId: "stale_ide_session"
+  });
+
+  assert.equal(response.error, undefined);
+  assert.equal(response.startMode, "attach");
+  assert.equal(adapter.commands.some(({ command }) => command === "attach"), true);
+  assert.equal(adapter.commands.some(({ command }) => command === "launch"), false);
+});
+
+test("omitted mode with ideSessionId still adopts the matching IDE session", async () => {
+  const policy = loadPolicy("breakpilot.yaml");
+  const bridge = new StartIdeBridge(policy.workspace.root);
+  bridge.registry.upsertSession("idea_start", {
+    type: IdeMessageTypes.IDE_SESSION_PAUSED,
+    ideSessionId: "idea_existing_session",
+    workspaceRoot: policy.workspace.root,
+    state: "paused",
+    active: true,
+    language: "java",
+    threadId: 7,
+    topFrame: { id: 11, name: "main", line: 1, source: { path: "src/serve.ts" } }
+  }, "paused");
+  const manager = new DebugSessionManager({
+    policy,
+    ideBridge: bridge as unknown as ConstructorParameters<typeof DebugSessionManager>[0]["ideBridge"]
+  });
+
+  const response = await new ToolRouter(manager).callTool("bp_debug_start", {
+    ideSessionId: "idea_existing_session"
+  });
+
+  assert.equal(response.error, undefined);
+  assert.equal(response.startMode, "ide");
+  assert.equal(response.ideSessionId, "idea_existing_session");
+  assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_START_DEBUG), false);
+});
