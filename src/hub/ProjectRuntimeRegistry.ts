@@ -78,7 +78,8 @@ export class ProjectRuntimeRegistry {
 
     if (typeof args.sessionId === "string" && args.sessionId) {
       const matches = [...this.runtimes.values()].filter((runtime) =>
-        runtime.manager.sessions.sessions.has(args.sessionId as string)
+        runtime.manager.sessions.sessions.has(args.sessionId as string) ||
+        (args.action === "drainEvents" && runtime.manager.hasArchivedRuntimeEvents(args.sessionId as string))
       );
       if (matches.length === 1) return matches[0]!;
       if (matches.length > 1) {

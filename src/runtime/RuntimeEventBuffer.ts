@@ -1,7 +1,9 @@
 import type {
   DrainEventsArgs,
   RuntimeEvent,
+  RuntimeEventInput,
   RuntimeEventKind,
+  RuntimeEventPosition,
   RuntimeEventPage
 } from "../types/sessions.ts";
 import type { AnyRecord } from "../types/json.ts";
@@ -50,19 +52,6 @@ function normalizeCapacity(capacity: number): number {
   return Math.min(DEFAULT_CAPACITY, Math.max(1, Math.trunc(capacity)));
 }
 
-function normalizeRecord(value: unknown): AnyRecord | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  try {
-    const encoded = JSON.stringify(value);
-    if (!encoded) return undefined;
-    const decoded: unknown = JSON.parse(encoded);
-    if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) return undefined;
-    return decoded as AnyRecord;
-  } catch {
-    return undefined;
-  }
-}
-
 function isJsonScalar(value: unknown): value is JsonScalar {
   return value === null || typeof value === "string" || typeof value === "boolean" ||
     (typeof value === "number" && Number.isFinite(value));
@@ -87,6 +76,24 @@ export function normalizeRuntimeEventMetadata(value: unknown): AnyRecord | undef
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+function ownValue(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+function normalizePosition(value: unknown): RuntimeEventPosition | undefined {
+  const rawFilePath = ownValue(value, "filePath") ?? ownValue(value, "file");
+  const rawLine = ownValue(value, "line");
+  const filePath = typeof rawFilePath === "string" ||
+    (typeof rawFilePath === "number" && Number.isFinite(rawFilePath))
+    ? rawFilePath
+    : null;
+  const line = typeof rawLine === "number" && Number.isFinite(rawLine) ? rawLine : null;
+  if (filePath === null && line === null) return undefined;
+  return { filePath, line };
+}
+
 function copyEvent(event: RuntimeEvent): RuntimeEvent {
   const copy: RuntimeEvent = {
     sequence: event.sequence,
@@ -98,7 +105,7 @@ function copyEvent(event: RuntimeEvent): RuntimeEvent {
   if (event.threadId !== undefined) copy.threadId = event.threadId;
   if (event.message !== undefined) copy.message = event.message;
   if (event.category !== undefined) copy.category = event.category;
-  if (event.position !== undefined) copy.position = normalizeRecord(event.position) ?? {};
+  if (event.position !== undefined) copy.position = { ...event.position };
   if (event.data !== undefined) {
     const data = normalizeRuntimeEventMetadata(event.data);
     if (data !== undefined) copy.data = data;
@@ -118,7 +125,7 @@ export class RuntimeEventBuffer {
     this.#capacity = normalizeCapacity(capacity);
   }
 
-  append(event: Omit<RuntimeEvent, "sequence" | "timestamp" | "sessionId">): RuntimeEvent {
+  append(event: RuntimeEventInput): RuntimeEvent {
     if (!runtimeEventKinds.includes(event.kind as RuntimeEventKind)) {
       throw new TypeError(`Unsupported runtime event kind: ${String(event.kind)}`);
     }
@@ -137,7 +144,7 @@ export class RuntimeEventBuffer {
     }
     if (typeof event.message === "string") normalized.message = event.message;
     if (typeof event.category === "string") normalized.category = event.category;
-    const position = normalizeRecord(event.position);
+    const position = normalizePosition(event.position);
     if (position !== undefined) normalized.position = position;
     const data = normalizeRuntimeEventMetadata(event.data);
     if (data !== undefined) normalized.data = data;

@@ -5,6 +5,8 @@ import type { Socket } from "node:net";
 import test from "node:test";
 
 import { ToolRouter } from "../src/control/ToolRouter.ts";
+import { validateToolOutput } from "../src/control/ToolInputValidator.ts";
+import { toolOutputSchemas } from "../src/control/toolOutputSchemas.ts";
 import type { DapSession } from "../src/dap/DapSession.ts";
 import { IdeClientRegistry } from "../src/ide/IdeClientRegistry.ts";
 import { IdeMessageTypes } from "../src/ide/IdeProtocol.ts";
@@ -329,6 +331,39 @@ test("public event drain forwards replay arguments and rebuilds legacy projectio
   assert.deepEqual(received, { cursor: 3, limit: 2 });
   assert.deepEqual((response.events as AnyRecord).breakpointErrors.map((event: AnyRecord) => event.sequence), [4]);
   assert.deepEqual((response.events as AnyRecord).tracepoints.map((event: AnyRecord) => event.sequence), [5]);
+});
+
+test("public event drain normalizes legacy positions before output validation", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    position: { file: "Foo.java", line: 20, column: 8 }
+  });
+  manager.appendRuntimeEvent("operation_caps", {
+    kind: "output",
+    position: { column: 9 }
+  });
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 2
+  });
+
+  assert.equal(response.error, undefined);
+  const items = (response.events as AnyRecord).items as AnyRecord[];
+  assert.deepEqual(items[0]?.position, { filePath: "Foo.java", line: 20 });
+  assert.equal("column" in (items[0]?.position ?? {}), false);
+  assert.equal("position" in (items[1] ?? {}), false);
+  const outputSchema = toolOutputSchemas.bp_debug_control;
+  assert.ok(outputSchema);
+  assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
 });
 
 const advancedCapabilityCases = [

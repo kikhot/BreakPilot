@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import { BreakPilotHub } from "../src/hub/HubServer.ts";
+import { RuntimeEventBuffer } from "../src/runtime/RuntimeEventBuffer.ts";
 
 const hub = new BreakPilotHub({ port: 0, idleTimeoutMs: 0 });
 const handle = await hub.start();
@@ -262,6 +263,37 @@ try {
   hub.projects.registerProject("/tmp/breakpilot-project-b");
   const ambiguous = await hub.callTool("bp_debug_context", {});
   assert.equal(ambiguous.error?.code, "PROJECT_AMBIGUOUS");
+
+  const archivedRuntime = hub.projects.getOrCreate("/tmp/breakpilot-archived-events");
+  const archivedEvents = new RuntimeEventBuffer("sess-archived");
+  archivedEvents.append({ kind: "terminated", message: "retained" });
+  archivedRuntime.manager.sessions.add({
+    sessionId: "sess-archived",
+    language: "java",
+    workspaceRoot: archivedRuntime.policy.workspace.root,
+    mode: "headless",
+    owner: "mcp",
+    state: "paused",
+    createdAt: new Date(0).toISOString(),
+    providerKind: "dap",
+    provider: {
+      async disconnect() {
+        return {};
+      }
+    } as never,
+    runtimeEvents: archivedEvents
+  });
+  await archivedRuntime.manager.bpDebugControl({ sessionId: "sess-archived", action: "stop" });
+  assert.equal(archivedRuntime.manager.sessions.maybeGet("sess-archived"), undefined);
+  assert.equal(archivedRuntime.manager.hasArchivedRuntimeEvents("sess-archived"), true);
+  const archivedDrain = await hub.callTool("bp_debug_control", {
+    action: "drainEvents",
+    sessionId: "sess-archived",
+    cursor: 0,
+    limit: 1
+  });
+  assert.equal(archivedDrain.error, undefined);
+  assert.deepEqual((archivedDrain.events as { items?: { sequence?: number }[] }).items?.map((event) => event.sequence), [1]);
 } finally {
   await handle.close();
 }

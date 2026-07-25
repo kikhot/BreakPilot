@@ -395,6 +395,7 @@ export const toolDefinitions: ToolDefinition[] = [
     name: "bp_debug_control",
     description: "Control a debug session: pause, resume, wait, step, disconnect, stop, or drain events.",
     inputSchema: {
+      type: "object",
       oneOf: [
         {
           type: "object",

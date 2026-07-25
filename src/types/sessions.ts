@@ -53,6 +53,11 @@ export type RuntimeEventKind =
   | "invalidated"
   | "terminated";
 
+export interface RuntimeEventPosition {
+  filePath: string | number | null;
+  line: number | null;
+}
+
 export interface RuntimeEvent extends AnyRecord {
   sequence: number;
   timestamp: string;
@@ -60,11 +65,15 @@ export interface RuntimeEvent extends AnyRecord {
   sessionId: string;
   breakpointId?: string;
   threadId?: ThreadId;
-  position?: AnyRecord;
+  position?: RuntimeEventPosition;
   message?: string;
   category?: string;
   data?: AnyRecord;
 }
+
+export type RuntimeEventInput = Omit<RuntimeEvent, "sequence" | "timestamp" | "sessionId" | "position"> & {
+  position?: unknown;
+};
 
 export interface DrainEventsArgs {
   cursor?: number;

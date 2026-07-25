@@ -128,6 +128,7 @@ assertHasProperties("bp_debug_control", [
 
 const control = tool("bp_debug_control");
 const controlInput = control.inputSchema as AnyRecord;
+assert.equal(controlInput.type, "object");
 assert.ok(Array.isArray(controlInput.oneOf), "bp_debug_control should separate drain events from ordinary actions");
 const drainBranch = (controlInput.oneOf as AnyRecord[]).find(
   (branch) => branch.properties?.action?.enum?.includes("drainEvents")

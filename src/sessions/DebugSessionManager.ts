@@ -21,6 +21,7 @@ import type {
   DrainEventsArgs,
   ProjectBreakpointRecord,
   RuntimeEvent,
+  RuntimeEventInput,
   RuntimeEventPage,
   SessionSummary,
   ThreadId
@@ -913,7 +914,7 @@ export class DebugSessionManager {
 
   appendRuntimeEvent(
     sessionId: string,
-    event: Omit<RuntimeEvent, "sequence" | "timestamp" | "sessionId">
+    event: RuntimeEventInput
   ): RuntimeEvent {
     return this.#runtimeEventsFor(sessionId).append(event);
   }
@@ -924,6 +925,10 @@ export class DebugSessionManager {
     const archived = this.#archivedRuntimeEvents.get(sessionId);
     if (archived) return archived.events.read(args);
     return this.#runtimeEventsFor(sessionId).read(args);
+  }
+
+  hasArchivedRuntimeEvents(sessionId: string): boolean {
+    return this.#archivedRuntimeEvents.has(sessionId);
   }
 
   async #adoptIdeSession(args: DebugToolArgs = {}): Promise<{ session: DebugSessionRecord; warnings: string[] }> {
