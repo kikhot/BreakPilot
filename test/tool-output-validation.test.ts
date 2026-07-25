@@ -192,4 +192,34 @@ assert.deepEqual(caughtErrorResponse, {
     message: "Expected failure."
   }
 });
+
+const { manager: nullRejectionManager, router: nullRejectionRouter } = createRouterWithHandler(
+  "bp_debug_status",
+  async () => {
+    throw null;
+  }
+);
+const nullRejectionAuditRecords: Array<{ type: string; payload: AnyRecord }> = [];
+nullRejectionManager.audit.record = (type: string, payload: AnyRecord = {}) => {
+  nullRejectionAuditRecords.push({ type, payload });
+  return "audit_null_rejection";
+};
+let nullRejectionResponse: ToolResponse | undefined;
+await assert.doesNotReject(async () => {
+  nullRejectionResponse = await nullRejectionRouter.callTool("bp_debug_status", {});
+}, "known tools must normalize non-Error rejections before audit extraction");
+assert.deepEqual(nullRejectionResponse, {
+  error: {
+    code: "TOOL_FAILED",
+    message: "null"
+  }
+});
+assert.deepEqual(nullRejectionAuditRecords, [{
+  type: "tool_failed",
+  payload: {
+    name: "bp_debug_status",
+    message: "null",
+    code: "TOOL_FAILED"
+  }
+}]);
 console.log("tool output validation tests ok");

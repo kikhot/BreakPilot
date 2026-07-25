@@ -1,7 +1,7 @@
 import type { ToolDefinition, ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
 import { DebugSessionManager } from "../sessions/DebugSessionManager.ts";
-import { BreakPilotError, ErrorCodes, fail } from "../utils/errors.ts";
+import { BreakPilotError, ErrorCodes, fail, toErrorPayload } from "../utils/errors.ts";
 import { validateToolInput } from "./ToolInputValidator.ts";
 import { operationKindForTool, ToolResponseFinalizer } from "./ToolResponseFinalizer.ts";
 import { toolDefinitions } from "./toolDefinitions.ts";
@@ -76,11 +76,11 @@ export class ToolRouter {
       const candidate = await handler(validation.value);
       return this.finalizer.finalize(definition, candidate, operation);
     } catch (error) {
-      const typedError = error as Error & { code?: string };
+      const errorPayload = toErrorPayload(error);
       const auditId = this.manager.audit.record("tool_failed", {
         name,
-        message: typedError.message,
-        code: typedError.code
+        message: errorPayload.message,
+        code: errorPayload.code
       });
       return this.finalizer.finalize(definition, fail(error, auditId), operation);
     }
