@@ -22,6 +22,22 @@ export const runtimeEventKinds = [
 const DEFAULT_CAPACITY = 256;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 256;
+const runtimeMetadataKeys = [
+  "reason",
+  "description",
+  "exitCode",
+  "processId",
+  "threadName",
+  "moduleName",
+  "sourceReference",
+  "allThreadsStopped",
+  "restart",
+  "hitBreakpointIds",
+  "areas"
+] as const;
+
+type RuntimeMetadataKey = (typeof runtimeMetadataKeys)[number];
+type JsonScalar = string | number | boolean | null;
 
 function normalizeLimit(limit: number | undefined): number {
   if (limit === undefined) return DEFAULT_LIMIT;
@@ -47,6 +63,30 @@ function normalizeRecord(value: unknown): AnyRecord | undefined {
   }
 }
 
+function isJsonScalar(value: unknown): value is JsonScalar {
+  return value === null || typeof value === "string" || typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value));
+}
+
+function normalizeMetadataValue(value: unknown): JsonScalar | JsonScalar[] | undefined {
+  if (isJsonScalar(value)) return value;
+  if (!Array.isArray(value)) return undefined;
+  return value.filter(isJsonScalar);
+}
+
+function normalizeMetadata(value: unknown): AnyRecord | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+
+  const normalized: Partial<Record<RuntimeMetadataKey, JsonScalar | JsonScalar[]>> = {};
+  for (const key of runtimeMetadataKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) continue;
+    const normalizedValue = normalizeMetadataValue(descriptor.value);
+    if (normalizedValue !== undefined) normalized[key] = normalizedValue;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 function copyEvent(event: RuntimeEvent): RuntimeEvent {
   const copy: RuntimeEvent = {
     sequence: event.sequence,
@@ -59,7 +99,10 @@ function copyEvent(event: RuntimeEvent): RuntimeEvent {
   if (event.message !== undefined) copy.message = event.message;
   if (event.category !== undefined) copy.category = event.category;
   if (event.position !== undefined) copy.position = normalizeRecord(event.position) ?? {};
-  if (event.data !== undefined) copy.data = normalizeRecord(event.data) ?? {};
+  if (event.data !== undefined) {
+    const data = normalizeMetadata(event.data);
+    if (data !== undefined) copy.data = data;
+  }
   return copy;
 }
 
@@ -96,7 +139,7 @@ export class RuntimeEventBuffer {
     if (typeof event.category === "string") normalized.category = event.category;
     const position = normalizeRecord(event.position);
     if (position !== undefined) normalized.position = position;
-    const data = normalizeRecord(event.data);
+    const data = normalizeMetadata(event.data);
     if (data !== undefined) normalized.data = data;
 
     this.#events.push(normalized);

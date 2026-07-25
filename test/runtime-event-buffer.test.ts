@@ -55,19 +55,66 @@ assert.equal(cappedHistory.oldestCursor, 2);
 assert.equal(cappedHistory.droppedCount, 1);
 assert.equal(cappedHistory.items.length, 256);
 
+// Catches an oversized configured capacity bypassing the 256-event retention ceiling.
+const oversizedCapacity = new RuntimeEventBuffer("debug-oversized", 999);
+for (let sequence = 1; sequence <= 257; sequence += 1) {
+  oversizedCapacity.append({ kind: "output", message: String(sequence) });
+}
+assert.equal(oversizedCapacity.read({ cursor: 0, limit: 999 }).oldestCursor, 2);
+
+// Catches raw DAP packets or nested metadata crossing the event-drain boundary.
+const metadata = new RuntimeEventBuffer("debug-metadata", 2);
+metadata.append({
+  kind: "stopped",
+  data: {
+    reason: "breakpoint",
+    description: "paused",
+    exitCode: 0,
+    processId: 42,
+    threadName: "main",
+    moduleName: "app",
+    sourceReference: 7,
+    allThreadsStopped: true,
+    restart: false,
+    hitBreakpointIds: ["bp-1", 2, { id: "drop" }],
+    areas: ["stacks", true, null, ["drop"]],
+    variables: [{ name: "token", value: "secret" }],
+    stackFrames: [{ name: "sensitive" }],
+    scopes: [{ name: "locals" }],
+    evaluate: "secret()",
+    result: "secret",
+    value: "secret",
+    arbitrary: "drop",
+    nested: { raw: "drop" }
+  }
+});
+assert.deepEqual(metadata.read({ cursor: 0 }).items[0]?.data, {
+  reason: "breakpoint",
+  description: "paused",
+  exitCode: 0,
+  processId: 42,
+  threadName: "main",
+  moduleName: "app",
+  sourceReference: 7,
+  allThreadsStopped: true,
+  restart: false,
+  hitBreakpointIds: ["bp-1", 2],
+  areas: ["stacks", true, null]
+});
+
 // Catches the buffer retaining raw top-level payloads instead of normalized event data.
 const normalized = new RuntimeEventBuffer("debug-normalized", 2);
 normalized.append({
   kind: "breakpointError",
   message: "unverified",
-  data: { breakpoint: "bp-1", nested: { retry: false }, callback: () => "ignored" },
+  data: { description: "unverified", nested: { retry: false }, callback: () => "ignored" },
   ignored: { arbitrary: true }
 });
 normalized.append({ kind: "tracepoint", message: "trace" });
 const normalizedPage = normalized.read({ cursor: 0 });
 assert.deepEqual(normalizedPage.breakpointErrors.map((event) => event.message), ["unverified"]);
 assert.deepEqual(normalizedPage.tracepoints.map((event) => event.message), ["trace"]);
-assert.deepEqual(normalizedPage.items[0]?.data, { breakpoint: "bp-1", nested: { retry: false } });
+assert.deepEqual(normalizedPage.items[0]?.data, { description: "unverified" });
 assert.equal("ignored" in (normalizedPage.items[0] ?? {}), false);
 
 console.log("runtime event buffer tests ok");
