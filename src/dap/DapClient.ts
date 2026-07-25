@@ -17,6 +17,7 @@ export class DapClient extends EventEmitter {
   buffer: Buffer;
   defaultTimeoutMs: number;
   stderr: string[];
+  readonly #transportListeners: Array<[event: string, listener: (...args: any[]) => void]>;
 
   constructor(transport: DapTransport, options: { defaultTimeoutMs?: number } = {}) {
     super();
@@ -26,21 +27,22 @@ export class DapClient extends EventEmitter {
     this.buffer = Buffer.alloc(0);
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 10000;
     this.stderr = [];
+    this.#transportListeners = [];
   }
 
   start(): void {
-    this.transport.on("data", (chunk: Buffer) => this.#onData(chunk));
-    this.transport.on("stderr", (text: string) => {
+    this.#listenToTransport("data", (chunk: Buffer) => this.#onData(chunk));
+    this.#listenToTransport("stderr", (text: string) => {
       this.stderr.push(text);
       this.emit("stderr", text);
     });
-    this.transport.on("error", (error: Error) => {
+    this.#listenToTransport("error", (error: Error) => {
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
       if (this.listenerCount("error") > 0) this.emit("error", error);
       this.emit("adapterError", error);
     });
-    this.transport.on("exit", (info: AnyRecord) => {
+    this.#listenToTransport("exit", (info: AnyRecord) => {
       const error = new BreakPilotError(
         ErrorCodes.TARGET_PROCESS_EXITED,
         "Debug adapter exited.",
@@ -50,7 +52,17 @@ export class DapClient extends EventEmitter {
       this.pending.clear();
       this.emit("exit", info);
     });
-    this.transport.start();
+    try {
+      this.transport.start();
+    } catch (error) {
+      this.#detachTransportListeners();
+      try {
+        this.transport.close();
+      } catch {
+        // A transport that failed synchronously may not have a closable handle.
+      }
+      throw error;
+    }
   }
 
   async request(command: string, args: AnyRecord = {}, timeoutMs = this.defaultTimeoutMs): Promise<AnyRecord> {
@@ -92,7 +104,27 @@ export class DapClient extends EventEmitter {
   }
 
   close(): void {
-    this.transport.close();
+    try {
+      this.transport.close();
+    } finally {
+      this.#detachTransportListeners();
+    }
+  }
+
+  #listenToTransport(event: string, listener: (...args: any[]) => void): void {
+    this.#transportListeners.push([event, listener]);
+    this.transport.on(event, listener);
+  }
+
+  #detachTransportListeners(): void {
+    for (const [event, listener] of this.#transportListeners.splice(0)) {
+      const transport = this.transport as DapTransport & {
+        off?: (event: string, listener: (...args: any[]) => void) => unknown;
+        removeListener?: (event: string, listener: (...args: any[]) => void) => unknown;
+      };
+      if (typeof transport.off === "function") transport.off(event, listener);
+      else transport.removeListener?.(event, listener);
+    }
   }
 
   #send(message: DapMessage): void {

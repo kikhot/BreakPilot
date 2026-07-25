@@ -175,6 +175,7 @@ export interface DebugSessionRecord {
   providerKind: RuntimeProviderKind;
   provider: RuntimeDebugProvider;
   runtimeEvents?: RuntimeEventBuffer;
+  disposeLifecycle?(): void;
   dap?: DapSession;
   ideClientId?: string;
   ideSessionId?: string;

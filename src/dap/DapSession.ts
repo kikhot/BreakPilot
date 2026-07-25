@@ -29,6 +29,7 @@ export class DapSession extends EventEmitter {
   stoppedQueue: StoppedEvent[];
   stoppedWaiters: ReturnType<typeof createDeferred<StoppedEvent>>[];
   readonly #runtimeEventListeners: Set<(event: DapEventMessage) => void>;
+  readonly #clientListeners: Array<[event: string, listener: (...args: any[]) => void]>;
   #runtimeEventSourceAttached: boolean;
   threadId: number | null;
   terminated: boolean;
@@ -58,13 +59,14 @@ export class DapSession extends EventEmitter {
     this.stoppedQueue = [];
     this.stoppedWaiters = [];
     this.#runtimeEventListeners = new Set();
+    this.#clientListeners = [];
     this.#runtimeEventSourceAttached = false;
     this.threadId = null;
     this.terminated = false;
   }
 
   startClient(): void {
-    this.client.on("event", (event: DapEventMessage) => {
+    this.#listenToClient("event", (event: DapEventMessage) => {
       for (const listener of [...this.#runtimeEventListeners]) {
         try {
           listener(structuredClone(event));
@@ -74,12 +76,12 @@ export class DapSession extends EventEmitter {
         }
       }
     });
-    this.client.on("initialized", () => {
+    this.#listenToClient("initialized", () => {
       this.initialized = true;
       for (const waiter of this.initializedWaiters.splice(0)) waiter.resolve();
       this.emit("initialized");
     });
-    this.client.on("stopped", (body: StoppedEvent) => {
+    this.#listenToClient("stopped", (body: StoppedEvent) => {
       this.threadId = body.threadId ?? this.threadId;
       const event = { sessionId: this.sessionId, ...body };
       const waiter = this.stoppedWaiters.shift();
@@ -87,27 +89,31 @@ export class DapSession extends EventEmitter {
       else this.stoppedQueue.push(event);
       this.emit("stopped", event);
     });
-    this.client.on("continued", (body: AnyRecord) => this.emit("continued", body));
-    this.client.on("terminated", (body: AnyRecord) => {
+    this.#listenToClient("continued", (body: AnyRecord) => this.emit("continued", body));
+    this.#listenToClient("terminated", (body: AnyRecord) => {
       this.terminated = true;
       this.#runtimeEventSourceAttached = false;
       this.emit("terminated", body);
     });
-    this.client.on("exited", (body: AnyRecord) => {
+    this.#listenToClient("exited", (body: AnyRecord) => {
       this.#runtimeEventSourceAttached = false;
       this.emit("exited", body);
     });
-    this.client.on("exit", () => {
+    this.#listenToClient("exit", () => {
       this.#runtimeEventSourceAttached = false;
+      this.emit("transportExit");
     });
-    this.client.on("adapterError", () => {
+    this.#listenToClient("adapterError", () => {
       this.#runtimeEventSourceAttached = false;
+      this.emit("adapterError");
     });
     this.#runtimeEventSourceAttached = true;
     try {
       this.client.start();
     } catch (error) {
       this.#runtimeEventSourceAttached = false;
+      this.#detachClientListeners();
+      this.#runtimeEventListeners.clear();
       throw error;
     }
   }
@@ -121,6 +127,17 @@ export class DapSession extends EventEmitter {
 
   hasRuntimeEventSource(): boolean {
     return this.#runtimeEventSourceAttached;
+  }
+
+  disposeClient(): void {
+    this.#runtimeEventSourceAttached = false;
+    this.#detachClientListeners();
+    this.#runtimeEventListeners.clear();
+    try {
+      this.client.close();
+    } catch {
+      // Cleanup must release manager state even if a failed transport cannot close.
+    }
   }
 
   async initialize(adapterId = this.language): Promise<AnyRecord> {
@@ -393,8 +410,18 @@ export class DapSession extends EventEmitter {
       }
       throw error;
     } finally {
-      this.#runtimeEventSourceAttached = false;
-      this.client.close();
+      this.disposeClient();
+    }
+  }
+
+  #listenToClient(event: string, listener: (...args: any[]) => void): void {
+    this.#clientListeners.push([event, listener]);
+    this.client.on(event, listener);
+  }
+
+  #detachClientListeners(): void {
+    for (const [event, listener] of this.#clientListeners.splice(0)) {
+      this.client.off(event, listener);
     }
   }
 

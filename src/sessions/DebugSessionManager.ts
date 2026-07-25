@@ -112,6 +112,13 @@ type ProjectIdeTarget = {
   session?: IdeDebugSessionInfo;
 };
 
+type ArchivedRuntimeEvents = {
+  events: RuntimeEventBuffer;
+};
+
+const MAX_ARCHIVED_RUNTIME_SESSIONS = 32;
+const DAP_TERMINATION_GRACE_MS = 100;
+
 export class DebugSessionManager {
   policy: BreakPilotPolicy;
   security: SecurityPolicy;
@@ -123,6 +130,8 @@ export class DebugSessionManager {
   coordinator: SessionCoordinator;
   ideBridge?: IdeBridgeServer | null;
   cleaningSessions: Set<string>;
+  readonly #archivedRuntimeEvents: Map<string, ArchivedRuntimeEvents>;
+  readonly #dapTerminationTimers: Map<string, ReturnType<typeof setTimeout>>;
 
   constructor({ policy, ideBridge }: { policy: BreakPilotPolicy; ideBridge?: IdeBridgeServer | null }) {
     this.policy = policy;
@@ -135,6 +144,8 @@ export class DebugSessionManager {
     this.coordinator = new SessionCoordinator();
     this.ideBridge = ideBridge;
     this.cleaningSessions = new Set();
+    this.#archivedRuntimeEvents = new Map();
+    this.#dapTerminationTimers = new Map();
     this.#wireIdeBridge();
   }
 
@@ -286,6 +297,15 @@ export class DebugSessionManager {
     const normalized = this.#normalizeBpArgs(args);
     const action = normalized.action;
     const auditId = this.audit.record("bp_debug_control_requested", { sessionId: normalized.sessionId, action });
+    if (action === "drainEvents" && normalized.sessionId) {
+      const archived = this.#archivedRuntimeEvents.get(normalized.sessionId);
+      if (archived) {
+        return ok(normalized.sessionId, {
+          status: SessionState.TERMINATED,
+          events: archived.events.read()
+        }, auditId);
+      }
+    }
     let session: DebugSessionRecord;
     try {
       session = this.#resolveSession(normalized);
@@ -880,6 +900,10 @@ export class DebugSessionManager {
   }
 
   readRuntimeEvents(sessionId: string, args?: DrainEventsArgs): RuntimeEventPage {
+    const active = this.sessions.maybeGet(sessionId);
+    if (active) return this.#runtimeEventsFor(sessionId).read(args);
+    const archived = this.#archivedRuntimeEvents.get(sessionId);
+    if (archived) return archived.events.read(args);
     return this.#runtimeEventsFor(sessionId).read(args);
   }
 
@@ -1905,19 +1929,56 @@ export class DebugSessionManager {
       runtimeEvents,
       dap
     };
-    dap.on("stopped", () => {
+    const onStopped = (): void => {
       record.state = SessionState.PAUSED;
-    });
-    dap.on("terminated", () => {
+    };
+    const onTerminated = (): void => {
       record.state = SessionState.TERMINATED;
       void this.#cleanupSession(record, { reason: "dap_terminated", disconnectProvider: false });
-    });
-    dap.on("exited", () => {
+    };
+    const onExited = (body: AnyRecord): void => {
       record.state = SessionState.TERMINATED;
-      void this.#cleanupSession(record, { reason: "dap_exited", disconnectProvider: false });
-    });
+      runtimeEvents.append({
+        kind: "terminated",
+        data: this.#dapExitedMetadata(body)
+      });
+      this.#archiveRuntimeEvents(record);
+      this.#scheduleDapTerminationCleanup(record);
+    };
+    const onAdapterError = (): void => {
+      record.state = SessionState.TERMINATED;
+      runtimeEvents.append({ kind: "terminated", data: { reason: "adapterError" } });
+      void this.#cleanupSession(record, { reason: "dap_adapter_error", disconnectProvider: false });
+    };
+    const onTransportExit = (): void => {
+      record.state = SessionState.TERMINATED;
+      runtimeEvents.append({ kind: "terminated", data: { reason: "transportExit" } });
+      void this.#cleanupSession(record, { reason: "dap_transport_exit", disconnectProvider: false });
+    };
+    dap.on("stopped", onStopped);
+    dap.on("terminated", onTerminated);
+    dap.on("exited", onExited);
+    dap.on("adapterError", onAdapterError);
+    dap.on("transportExit", onTransportExit);
+    record.disposeLifecycle = () => {
+      dap.off("stopped", onStopped);
+      dap.off("terminated", onTerminated);
+      dap.off("exited", onExited);
+      dap.off("adapterError", onAdapterError);
+      dap.off("transportExit", onTransportExit);
+    };
     this.sessions.add(record);
-    dap.startClient();
+    try {
+      dap.startClient();
+    } catch (error) {
+      record.state = SessionState.FAILED;
+      record.disposeLifecycle();
+      record.disposeLifecycle = undefined;
+      provider.disposeRuntimeEvents();
+      dap.disposeClient();
+      this.sessions.remove(record.sessionId);
+      throw error;
+    }
     return record;
   }
 
@@ -1951,6 +2012,7 @@ export class DebugSessionManager {
       disconnectProvider?: boolean;
     }
   ): Promise<AnyRecord> {
+    this.#clearDapTerminationTimer(session.sessionId);
     if (this.cleaningSessions.has(session.sessionId)) {
       return { acknowledged: true, alreadyCleaning: true, reason };
     }
@@ -1972,7 +2034,11 @@ export class DebugSessionManager {
         }
       }
       session.state = SessionState.TERMINATED;
+      this.#archiveRuntimeEvents(session);
+      session.disposeLifecycle?.();
+      session.disposeLifecycle = undefined;
       session.provider.disposeRuntimeEvents?.();
+      session.dap?.disposeClient();
       this.breakpoints.clear(session.sessionId);
       this.sessions.remove(session.sessionId);
       return result;
@@ -1987,6 +2053,45 @@ export class DebugSessionManager {
       session.runtimeEvents = new RuntimeEventBuffer(sessionId, this.policy.runtime.maxEventBuffer);
     }
     return session.runtimeEvents;
+  }
+
+  #dapExitedMetadata(body: AnyRecord): AnyRecord {
+    const metadata: AnyRecord = { reason: "dapExited" };
+    const descriptor = Object.getOwnPropertyDescriptor(body, "exitCode");
+    if (descriptor && "value" in descriptor && typeof descriptor.value === "number" && Number.isFinite(descriptor.value)) {
+      metadata.exitCode = descriptor.value;
+    }
+    return metadata;
+  }
+
+  #scheduleDapTerminationCleanup(session: DebugSessionRecord): void {
+    this.#clearDapTerminationTimer(session.sessionId);
+    const timer = setTimeout(() => {
+      this.#dapTerminationTimers.delete(session.sessionId);
+      void this.#cleanupSession(session, { reason: "dap_exited", disconnectProvider: false });
+    }, DAP_TERMINATION_GRACE_MS);
+    timer.unref?.();
+    this.#dapTerminationTimers.set(session.sessionId, timer);
+  }
+
+  #clearDapTerminationTimer(sessionId: string): void {
+    const timer = this.#dapTerminationTimers.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.#dapTerminationTimers.delete(sessionId);
+  }
+
+  #archiveRuntimeEvents(session: DebugSessionRecord): void {
+    if (session.providerKind !== "dap") return;
+    const events = session.runtimeEvents;
+    if (!events || events.read({ cursor: 0, limit: 1 }).items.length === 0) return;
+    this.#archivedRuntimeEvents.delete(session.sessionId);
+    this.#archivedRuntimeEvents.set(session.sessionId, { events });
+    while (this.#archivedRuntimeEvents.size > MAX_ARCHIVED_RUNTIME_SESSIONS) {
+      const oldestSessionId = this.#archivedRuntimeEvents.keys().next().value as string | undefined;
+      if (!oldestSessionId) break;
+      this.#archivedRuntimeEvents.delete(oldestSessionId);
+    }
   }
 
   async #recoverBreakpointHit(session: DebugSessionRecord): Promise<StoppedEvent | null> {
