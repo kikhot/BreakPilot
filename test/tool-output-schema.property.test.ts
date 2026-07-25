@@ -107,8 +107,6 @@ const allowedOpenOutputPaths = new Set<string>([
   ...toolDefinitions.map((tool) => `${tool.name}.error.details`),
   "bp_debug_run_configurations.success.configurations[]",
   "bp_debug_run_configurations.success.runPoints[]",
-  "bp_debug_control.success.events.breakpointErrors[]",
-  "bp_debug_control.success.events.tracepoints[]",
   "bp_debug_run_to_line.success.frame",
   "bp_debug_run_to_line.success.variables[]",
   "bp_debug_value.success.result",

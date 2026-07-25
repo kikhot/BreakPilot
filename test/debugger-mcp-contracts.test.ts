@@ -13,7 +13,14 @@ function tool(name: string): AnyRecord {
 }
 
 function properties(name: string): AnyRecord {
-  return ((tool(name).inputSchema as AnyRecord).properties ?? {}) as AnyRecord;
+  const inputSchema = tool(name).inputSchema as AnyRecord;
+  if (name === "bp_debug_control" && Array.isArray(inputSchema.oneOf)) {
+    const ordinary = inputSchema.oneOf.find(
+      (branch: AnyRecord) => !branch.properties?.action?.enum?.includes("drainEvents")
+    ) as AnyRecord | undefined;
+    return (ordinary?.properties ?? {}) as AnyRecord;
+  }
+  return (inputSchema.properties ?? {}) as AnyRecord;
 }
 
 function propertyNames(name: string): string[] {
@@ -119,12 +126,26 @@ assertHasProperties("bp_debug_control", [
   "detail"
 ]);
 
+const control = tool("bp_debug_control");
+const controlInput = control.inputSchema as AnyRecord;
+assert.ok(Array.isArray(controlInput.oneOf), "bp_debug_control should separate drain events from ordinary actions");
+const drainBranch = (controlInput.oneOf as AnyRecord[]).find(
+  (branch) => branch.properties?.action?.enum?.includes("drainEvents")
+);
+assert.deepEqual(drainBranch?.properties?.cursor?.type, "integer");
+assert.deepEqual(drainBranch?.properties?.cursor?.minimum, 0);
+assert.deepEqual(drainBranch?.properties?.limit?.maximum, 256);
+const serializedControlOutput = JSON.stringify(control.outputSchema);
+for (const field of ["items", "nextCursor", "oldestCursor", "overflowed", "droppedCount"]) {
+  assert.match(serializedControlOutput, new RegExp(field));
+}
+
 assertHasProperties("bp_debug_context", [
   "detail"
 ]);
 
 for (const definition of toolDefinitions) {
-  if (definition.name === "bp_debug_set_breakpoint") continue;
+  if (definition.name === "bp_debug_set_breakpoint" || definition.name === "bp_debug_control") continue;
   assert.equal(
     (definition.inputSchema as AnyRecord).additionalProperties,
     false,

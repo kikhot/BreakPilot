@@ -281,6 +281,56 @@ test("manager event seams remain session-local without enabling IDE event drain"
   assert.equal(response.error?.code, ErrorCodes.UNSUPPORTED_CAPABILITY);
 });
 
+test("public event drain forwards replay arguments and rebuilds legacy projections", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  let received: unknown = undefined;
+  provider.drainEvents = async (args) => {
+    received = args;
+    return {
+      items: [
+        {
+          sequence: 4,
+          timestamp: "2026-07-25T00:00:00.000Z",
+          kind: "breakpointError",
+          sessionId: "operation_caps",
+          message: "unverified"
+        },
+        {
+          sequence: 5,
+          timestamp: "2026-07-25T00:00:01.000Z",
+          kind: "tracepoint",
+          sessionId: "operation_caps",
+          message: "trace"
+        }
+      ],
+      cursor: 3,
+      nextCursor: 5,
+      oldestCursor: 4,
+      hasMore: false,
+      overflowed: false,
+      droppedCount: 0,
+      supportedKinds: [],
+      breakpointErrors: [],
+      tracepoints: []
+    };
+  };
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 3,
+    limit: 2
+  });
+
+  assert.deepEqual(received, { cursor: 3, limit: 2 });
+  assert.deepEqual((response.events as AnyRecord).breakpointErrors.map((event: AnyRecord) => event.sequence), [4]);
+  assert.deepEqual((response.events as AnyRecord).tracepoints.map((event: AnyRecord) => event.sequence), [5]);
+});
+
 const advancedCapabilityCases = [
   { field: "condition", value: "answer > 0", capability: "conditionalBreakpoints" },
   { field: "hitCondition", value: "2", capability: "hitConditionalBreakpoints" },

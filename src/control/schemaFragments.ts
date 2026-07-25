@@ -103,6 +103,109 @@ export const positionSchema: JsonSchema = {
   required: ["filePath", "line"]
 };
 
+const runtimeEventMetadataValueSchema: JsonSchema = {
+  oneOf: [
+    scalarValueSchema,
+    { type: "array", items: scalarValueSchema }
+  ]
+};
+
+export const runtimeEventMetadataSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    reason: runtimeEventMetadataValueSchema,
+    description: runtimeEventMetadataValueSchema,
+    exitCode: runtimeEventMetadataValueSchema,
+    processId: runtimeEventMetadataValueSchema,
+    threadName: runtimeEventMetadataValueSchema,
+    moduleName: runtimeEventMetadataValueSchema,
+    sourceReference: runtimeEventMetadataValueSchema,
+    allThreadsStopped: runtimeEventMetadataValueSchema,
+    restart: runtimeEventMetadataValueSchema,
+    hitBreakpointIds: runtimeEventMetadataValueSchema,
+    areas: runtimeEventMetadataValueSchema
+  }
+};
+
+export const runtimeEventSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    sequence: { type: "integer", minimum: 1 },
+    timestamp: { type: "string" },
+    kind: {
+      type: "string",
+      enum: [
+        "breakpoint",
+        "breakpointError",
+        "tracepoint",
+        "output",
+        "stopped",
+        "continued",
+        "thread",
+        "process",
+        "invalidated",
+        "terminated"
+      ]
+    },
+    sessionId: { type: "string" },
+    breakpointId: { type: "string" },
+    threadId: { oneOf: [{ type: "number" }, { type: "string" }] },
+    position: positionSchema,
+    message: { type: "string" },
+    category: { type: "string" },
+    data: runtimeEventMetadataSchema
+  },
+  required: ["sequence", "timestamp", "kind", "sessionId"]
+};
+
+export const runtimeEventPageSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    items: { type: "array", items: runtimeEventSchema },
+    cursor: { type: "integer", minimum: 0 },
+    nextCursor: { type: "integer", minimum: 0 },
+    oldestCursor: { type: "integer", minimum: 1 },
+    hasMore: { type: "boolean" },
+    overflowed: { type: "boolean" },
+    droppedCount: { type: "integer", minimum: 0 },
+    supportedKinds: {
+      type: "array",
+      items: {
+        type: "string",
+        enum: [
+          "breakpoint",
+          "breakpointError",
+          "tracepoint",
+          "output",
+          "stopped",
+          "continued",
+          "thread",
+          "process",
+          "invalidated",
+          "terminated"
+        ]
+      }
+    },
+    breakpointErrors: { type: "array", items: runtimeEventSchema },
+    tracepoints: { type: "array", items: runtimeEventSchema }
+  },
+  required: [
+    "items",
+    "cursor",
+    "nextCursor",
+    "oldestCursor",
+    "hasMore",
+    "overflowed",
+    "droppedCount",
+    "supportedKinds",
+    "breakpointErrors",
+    "tracepoints"
+  ]
+};
+
 export const frameSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,

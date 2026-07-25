@@ -395,33 +395,50 @@ export const toolDefinitions: ToolDefinition[] = [
     name: "bp_debug_control",
     description: "Control a debug session: pause, resume, wait, step, disconnect, stop, or drain events.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        action: {
-          type: "string",
-          enum: ["pause", "resume", "wait", "stepOver", "stepInto", "stepOut", "stop", "disconnect", "drainEvents"]
+      oneOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            projectPath,
+            workspace,
+            sessionId,
+            action: { type: "string", enum: ["drainEvents"] },
+            cursor: { type: "integer", minimum: 0 },
+            limit: { type: "integer", minimum: 1, maximum: 256 }
+          },
+          required: ["action"]
         },
-        threadId,
-        timeout,
-        timeoutMs,
-        terminateDebuggee: { type: "boolean", default: false },
-        includeFrame: { type: "boolean", default: false },
-        detail,
-        expand,
-        objectFields,
-        depth: expansionDepth,
-        maxDepth,
-        limit: { ...pageLimit, default: 10 },
-        maxItems,
-        maxString,
-        maxStringLength,
-        redactPatterns
-      },
-      required: ["action"]
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            projectPath,
+            workspace,
+            sessionId,
+            action: {
+              type: "string",
+              enum: ["pause", "resume", "wait", "stepOver", "stepInto", "stepOut", "stop", "disconnect"]
+            },
+            threadId,
+            timeout,
+            timeoutMs,
+            terminateDebuggee: { type: "boolean", default: false },
+            includeFrame: { type: "boolean", default: false },
+            detail,
+            expand,
+            objectFields,
+            depth: expansionDepth,
+            maxDepth,
+            limit: { ...pageLimit, default: 10 },
+            maxItems,
+            maxString,
+            maxStringLength,
+            redactPatterns
+          },
+          required: ["action"]
+        }
+      ]
     },
     outputSchema: toolOutputSchemas.bp_debug_control
   },

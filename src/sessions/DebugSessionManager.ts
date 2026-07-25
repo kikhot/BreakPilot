@@ -40,7 +40,7 @@ import { SessionOwner, SessionState } from "./SessionOwner.ts";
 import { SessionStore } from "./SessionStore.ts";
 import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../runtime/ProviderCapabilities.ts";
 import type { RuntimeProviderCapabilities } from "../types/capabilities.ts";
-import { RuntimeEventBuffer } from "../runtime/RuntimeEventBuffer.ts";
+import { RuntimeEventBuffer, runtimeEventKinds } from "../runtime/RuntimeEventBuffer.ts";
 
 type DebugToolArgs = AnyRecord & {
   sessionId?: string;
@@ -68,6 +68,7 @@ type DebugToolArgs = AnyRecord & {
   restart?: boolean;
   includeFrame?: boolean;
   offset?: number;
+  cursor?: number;
   detail?: DetailLevel;
   enabled?: boolean;
   temporary?: boolean;
@@ -302,7 +303,10 @@ export class DebugSessionManager {
       if (archived) {
         return ok(normalized.sessionId, {
           status: SessionState.TERMINATED,
-          events: archived.events.read()
+          events: this.#runtimeEventPageView(archived.events.read({
+            cursor: normalized.cursor,
+            limit: normalized.limit
+          }))
         }, auditId);
       }
     }
@@ -397,8 +401,21 @@ export class DebugSessionManager {
           capability: "eventDrain"
         });
       }
-      const events = await session.provider.drainEvents();
-      return ok(session.sessionId, { status: session.state, events }, auditId);
+      const page = await session.provider.drainEvents({
+        cursor: normalized.cursor,
+        limit: normalized.limit
+      });
+      if (!this.#isRuntimeEventPage(page)) {
+        throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support cursor event draining.", {
+          sessionId: session.sessionId,
+          providerKind: session.providerKind,
+          capability: "eventDrain"
+        });
+      }
+      return ok(session.sessionId, {
+        status: session.state,
+        events: this.#runtimeEventPageView(page)
+      }, auditId);
     }
 
     throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, `Unsupported debug control action: ${String(action)}`, { action });
@@ -1195,6 +1212,29 @@ export class DebugSessionManager {
       maxStringLength: args.maxStringLength ?? args.maxString,
       objectFields: args.objectFields ?? args.expand,
       expand: args.expand ?? args.objectFields
+    };
+  }
+
+  #isRuntimeEventPage(value: unknown): value is RuntimeEventPage {
+    return Boolean(
+      value &&
+      typeof value === "object" &&
+      Array.isArray((value as RuntimeEventPage).items) &&
+      typeof (value as RuntimeEventPage).cursor === "number" &&
+      typeof (value as RuntimeEventPage).nextCursor === "number" &&
+      typeof (value as RuntimeEventPage).oldestCursor === "number" &&
+      typeof (value as RuntimeEventPage).hasMore === "boolean" &&
+      typeof (value as RuntimeEventPage).overflowed === "boolean" &&
+      typeof (value as RuntimeEventPage).droppedCount === "number"
+    );
+  }
+
+  #runtimeEventPageView(page: RuntimeEventPage): RuntimeEventPage {
+    return {
+      ...page,
+      supportedKinds: [...runtimeEventKinds],
+      breakpointErrors: page.items.filter((item) => item.kind === "breakpointError"),
+      tracepoints: page.items.filter((item) => item.kind === "tracepoint")
     };
   }
 

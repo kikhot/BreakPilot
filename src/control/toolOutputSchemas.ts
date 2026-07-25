@@ -4,6 +4,7 @@ import {
   frameSchema,
   positionSchema,
   providerCapabilitiesSchema,
+  runtimeEventPageSchema,
   scalarValueSchema,
   scopeSchema,
   sessionSummarySchema,
@@ -63,15 +64,7 @@ const ideSessionSchema: JsonSchema = {
   required: ["ideSessionId", "state", "active", "position"]
 };
 
-const eventsSchema: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    breakpointErrors: providerPayloadArraySchema,
-    tracepoints: providerPayloadArraySchema
-  },
-  required: ["breakpointErrors", "tracepoints"]
-};
+const eventsSchema = runtimeEventPageSchema;
 
 const variableNodeProperties = variableNodeSchema.properties ?? {};
 const breakpointProperties = breakpointSchema.properties ?? {};

@@ -224,6 +224,13 @@ test("managed terminated history remains drainable by explicit id after automati
   assert.deepEqual(drained.events.items.map((event: AnyRecord) => event.kind), ["terminated"]);
   assert.deepEqual(drained.events.items[0].data, { exitCode: 0, restart: false });
   assert.doesNotMatch(JSON.stringify(drained), /"raw"|"drop"/);
+  const replay = await manager.bpDebugControl({
+    sessionId,
+    action: "drainEvents",
+    cursor: 0,
+    limit: 1
+  }) as AnyRecord;
+  assert.deepEqual(replay.events.items.map((event: AnyRecord) => event.sequence), [1]);
 });
 
 test("DAP exited grace captures the later terminated fact without selecting the pending record", async () => {

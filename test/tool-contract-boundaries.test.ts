@@ -182,7 +182,6 @@ test("public quantity schemas are bounded integers and invalid values never disp
     assertIntegerBoundary(tool, "limit", 1, MAX_LIMIT);
   }
   for (const tool of [
-    "bp_debug_control",
     "bp_debug_frame",
     "bp_debug_value",
     "bp_debug_set_value",
@@ -193,6 +192,12 @@ test("public quantity schemas are bounded integers and invalid values never disp
     assertIntegerBoundary(tool, "maxString", 1, MAX_STRING_LENGTH);
     assertIntegerBoundary(tool, "maxStringLength", 1, MAX_STRING_LENGTH);
   }
+  const controlLimitSchemas = propertySchemas(definition("bp_debug_control").inputSchema, "limit");
+  assert.deepEqual(
+    controlLimitSchemas.map((schema) => schema.maximum).sort((left, right) => Number(left) - Number(right)),
+    [256, MAX_LIMIT],
+    "bp_debug_control should bound drain pages to 256 while retaining ordinary action compatibility"
+  );
   for (const tool of ["bp_debug_frame", "bp_debug_value", "bp_debug_set_value", "bp_debug_eval", "bp_debug_context"]) {
     assertIntegerBoundary(tool, "frameIndex", 0, MAX_FRAME_INDEX);
   }

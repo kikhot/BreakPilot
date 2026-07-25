@@ -204,6 +204,50 @@ try {
     expectedOutputContractError
   );
 
+  hub.projects.getOrCreate().manager.bpDebugControl = async () => ({
+    status: "paused",
+    events: {
+      items: [{
+        sequence: 7,
+        timestamp: "2026-07-25T00:00:00.000Z",
+        kind: "breakpoint",
+        sessionId: "sess-overflow",
+        message: "retained"
+      }],
+      cursor: 0,
+      nextCursor: 7,
+      oldestCursor: 7,
+      hasMore: false,
+      overflowed: true,
+      droppedCount: 6,
+      supportedKinds: ["breakpoint"],
+      breakpointErrors: [],
+      tracepoints: []
+    }
+  });
+  const overflowDrainCall = await fetch(`${handle.url}/tools/call`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "bp_debug_control",
+      arguments: { action: "drainEvents", sessionId: "sess-overflow", cursor: 0, limit: 1 }
+    })
+  });
+  assert.equal(overflowDrainCall.status, 200);
+  const overflowDrainBody = await overflowDrainCall.json() as {
+    events?: { overflowed?: boolean; items?: { sequence?: number }[] };
+    error?: { code?: string };
+  };
+  assert.equal(overflowDrainBody.error?.code, undefined);
+  assert.equal(overflowDrainBody.events?.overflowed, true);
+  assert.deepEqual(overflowDrainBody.events?.items, [{
+    sequence: 7,
+    timestamp: "2026-07-25T00:00:00.000Z",
+    kind: "breakpoint",
+    sessionId: "sess-overflow",
+    message: "retained"
+  }]);
+
   const sse = await fetch(`${handle.url}/sse`);
   assert.equal(sse.status, 200);
   const reader = sse.body?.getReader();
