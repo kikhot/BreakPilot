@@ -40,9 +40,51 @@ export interface BreakpointFilter {
   includeDisabled?: boolean;
 }
 
+export type RuntimeEventKind =
+  | "breakpoint"
+  | "breakpointError"
+  | "tracepoint"
+  | "output"
+  | "stopped"
+  | "continued"
+  | "thread"
+  | "process"
+  | "invalidated"
+  | "terminated";
+
+export interface RuntimeEvent extends AnyRecord {
+  sequence: number;
+  timestamp: string;
+  kind: RuntimeEventKind;
+  sessionId: string;
+  breakpointId?: string;
+  threadId?: ThreadId;
+  position?: AnyRecord;
+  message?: string;
+  category?: string;
+  data?: AnyRecord;
+}
+
+export interface DrainEventsArgs {
+  cursor?: number;
+  limit?: number;
+}
+
+/** Compatibility projection retained for providers that only expose legacy event arrays. */
 export interface DebugEventBuffer {
   breakpointErrors: AnyRecord[];
   tracepoints: AnyRecord[];
+}
+
+export interface RuntimeEventPage extends DebugEventBuffer {
+  items: RuntimeEvent[];
+  cursor: number;
+  nextCursor: number;
+  oldestCursor: number;
+  hasMore: boolean;
+  overflowed: boolean;
+  droppedCount: number;
+  supportedKinds: RuntimeEventKind[];
 }
 
 export interface RuntimeDebugProvider {
@@ -58,7 +100,7 @@ export interface RuntimeDebugProvider {
   runToLine?(args: RunToLineArgs): Promise<RunToLineResult>;
   listBreakpoints?(filter?: BreakpointFilter): Promise<BreakpointRecord[]>;
   updateBreakpoint?(breakpoint: BreakpointRecord): Promise<BreakpointRecord>;
-  drainEvents?(): Promise<DebugEventBuffer>;
+  drainEvents?(args?: DrainEventsArgs): Promise<DebugEventBuffer | RuntimeEventPage>;
   listThreads?(args?: { offset?: number; limit?: number }): Promise<AnyRecord[]>;
   getCallStack?(threadId?: ThreadId | null, args?: number | { offset?: number; limit?: number }): Promise<AnyRecord>;
   getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot>;

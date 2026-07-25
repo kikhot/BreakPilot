@@ -37,6 +37,7 @@ export interface BreakPilotPolicy {
   };
   runtime: {
     maxPauseMs: number;
+    maxEventBuffer: number;
     autoContinue: boolean;
     forbidProduction: boolean;
   };

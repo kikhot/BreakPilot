@@ -50,6 +50,7 @@ const DEFAULT_POLICY: BreakPilotPolicy = {
   },
   runtime: {
     maxPauseMs: 30000,
+    maxEventBuffer: 256,
     autoContinue: true,
     forbidProduction: true
   },
