@@ -7,16 +7,24 @@ import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import type { DapTransport } from "../src/types/dap.ts";
 import type { AnyRecord } from "../src/types/json.ts";
+import type { RuntimeDebugProvider } from "../src/types/sessions.ts";
+import { ErrorCodes } from "../src/utils/errors.ts";
+
+type RejectCommand = "initialize" | "launch" | "attach";
 
 class LifecycleDapTransport extends EventEmitter implements DapTransport {
   #buffer = Buffer.alloc(0);
   #sequence = 1;
   readonly startFailure?: Error;
+  readonly rejectCommand?: RejectCommand;
+  readonly commands: string[] = [];
+  beforeResponse?: (command: string) => void;
   closed = false;
 
-  constructor(startFailure?: Error) {
+  constructor(startFailure?: Error, rejectCommand?: RejectCommand) {
     super();
     this.startFailure = startFailure;
+    this.rejectCommand = rejectCommand;
   }
 
   start(): void {
@@ -42,16 +50,20 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
         command: string;
       };
       this.#buffer = this.#buffer.subarray(bodyEnd);
+      this.commands.push(request.command);
       queueMicrotask(() => {
+        this.beforeResponse?.(request.command);
+        const success = request.command !== this.rejectCommand;
         this.#publishMessage({
           seq: this.#sequence++,
           type: "response",
           request_seq: request.seq,
-          success: true,
+          success,
           command: request.command,
+          ...(!success ? { message: `${request.command} rejected` } : {}),
           body: {}
         });
-        if (request.command === "initialize") this.publish("initialized");
+        if (request.command === "initialize" && success) this.publish("initialized");
       });
     }
   }
@@ -150,6 +162,17 @@ function assertSessionDetached(client: EventEmitter): void {
   }
 }
 
+function assertManagerLifecycleDetached(dap: EventEmitter): void {
+  for (const event of ["stopped", "terminated", "exited", "adapterError", "transportExit"]) {
+    assert.equal(dap.listenerCount(event), 0, event);
+  }
+}
+
+function assertErrorCode(error: unknown, code: string): boolean {
+  assert.equal((error as { code?: string }).code, code);
+  return true;
+}
+
 test("managed terminated history remains drainable by explicit id after automatic cleanup", async () => {
   const { manager, transport, sessionId } = await startManagedSession("terminated");
 
@@ -204,6 +227,81 @@ test("synchronous DAP client start failure rolls back the record and every trans
 
   assert.deepEqual(manager.sessions.list(), []);
   assertTransportDetached(transport);
+});
+
+for (const failure of [
+  { mode: "launch", command: "initialize", errorCode: ErrorCodes.LAUNCH_FAILED },
+  { mode: "launch", command: "launch", errorCode: ErrorCodes.LAUNCH_FAILED },
+  { mode: "attach", command: "attach", errorCode: ErrorCodes.ATTACH_FAILED }
+] as const) {
+  test(`${failure.mode} ${failure.command} rejection releases the failed managed session`, async () => {
+    const transport = new LifecycleDapTransport(undefined, failure.command);
+    const { manager, language } = createManager(`${failure.mode}-${failure.command}-failure`, transport);
+    let captured: {
+      sessionId: string;
+      dap: EventEmitter;
+      client: EventEmitter;
+      provider: RuntimeDebugProvider;
+    } | undefined;
+    transport.beforeResponse = () => {
+      const record = [...manager.sessions.sessions.values()][0];
+      if (!record?.dap) return;
+      captured = {
+        sessionId: record.sessionId,
+        dap: record.dap,
+        client: record.dap.client,
+        provider: record.provider
+      };
+    };
+
+    await assert.rejects(
+      manager.bpDebugStart({
+        mode: failure.mode,
+        language,
+        ...(failure.mode === "attach" ? { host: "127.0.0.1", port: 5678 } : {})
+      }),
+      (error: unknown) => {
+        assertErrorCode(error, failure.errorCode);
+        assert.match((error as Error).message, new RegExp(`${failure.command} rejected`));
+        return true;
+      }
+    );
+
+    assert.ok(captured);
+    assert.deepEqual(manager.sessions.list(), []);
+    assert.equal(captured.provider.capabilities.eventDrain, "unsupported");
+    assertManagerLifecycleDetached(captured.dap);
+    assertSessionDetached(captured.client);
+    assertTransportDetached(transport);
+    assert.equal(transport.closed, true);
+    await assert.rejects(
+      manager.bpDebugControl({ sessionId: captured.sessionId, action: "drainEvents" }),
+      (error: unknown) => assertErrorCode(error, ErrorCodes.SESSION_NOT_FOUND)
+    );
+  });
+}
+
+test("explicit terminal session ids reject resume during exited grace without state mutation", async () => {
+  const { manager, transport, sessionId } = await startManagedSession("exited-resume");
+  transport.publish("stopped", { reason: "breakpoint", threadId: 4 });
+  transport.publish("exited", { exitCode: 0 });
+  await nextTurn();
+  const commandsBefore = [...transport.commands];
+
+  await assert.rejects(
+    manager.bpDebugControl({ sessionId, action: "resume" }),
+    (error: unknown) => assertErrorCode(error, ErrorCodes.SESSION_NOT_FOUND)
+  );
+  await assert.rejects(
+    manager.bpDebugThreads({ sessionId }),
+    (error: unknown) => assertErrorCode(error, ErrorCodes.SESSION_NOT_FOUND)
+  );
+
+  assert.equal(manager.sessions.maybeGet(sessionId)?.state, "terminated");
+  assert.deepEqual(transport.commands, commandsBefore);
+  const stopped = await manager.bpDebugControl({ sessionId, action: "stop" }) as AnyRecord;
+  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.alreadyStopped, true);
 });
 
 for (const failure of ["adapterError", "transportExit"] as const) {

@@ -711,7 +711,7 @@ export class DebugSessionManager {
       return session;
     } catch (error) {
       const typedError = error as Error & { details?: AnyRecord };
-      session.state = SessionState.FAILED;
+      this.#discardFailedSession(session);
       throw new BreakPilotError(ErrorCodes.LAUNCH_FAILED, typedError.message, {
         sessionId: session.sessionId,
         cause: typedError.details ?? {}
@@ -791,7 +791,7 @@ export class DebugSessionManager {
       return session;
     } catch (error) {
       const typedError = error as Error & { details?: AnyRecord };
-      session.state = SessionState.FAILED;
+      this.#discardFailedSession(session);
       throw new BreakPilotError(ErrorCodes.ATTACH_FAILED, typedError.message, {
         sessionId: session.sessionId,
         cause: typedError.details ?? {}
@@ -1283,7 +1283,15 @@ export class DebugSessionManager {
   }
 
   #resolveSession(args: DebugToolArgs = {}): DebugSessionRecord {
-    if (args.sessionId) return this.sessions.get(args.sessionId);
+    if (args.sessionId) {
+      const session = this.sessions.get(args.sessionId);
+      if (session.state === SessionState.TERMINATED || session.state === SessionState.FAILED) {
+        throw new BreakPilotError(ErrorCodes.SESSION_NOT_FOUND, `Session not found: ${args.sessionId}`, {
+          sessionId: args.sessionId
+        });
+      }
+      return session;
+    }
     const workspaceRoot = args.projectPath || args.workspace
       ? resolveWorkspacePath(this.security.workspaceRoot(), String(args.projectPath ?? args.workspace))
       : undefined;
@@ -1971,15 +1979,21 @@ export class DebugSessionManager {
     try {
       dap.startClient();
     } catch (error) {
-      record.state = SessionState.FAILED;
-      record.disposeLifecycle();
-      record.disposeLifecycle = undefined;
-      provider.disposeRuntimeEvents();
-      dap.disposeClient();
-      this.sessions.remove(record.sessionId);
+      this.#discardFailedSession(record);
       throw error;
     }
     return record;
+  }
+
+  #discardFailedSession(session: DebugSessionRecord): void {
+    this.#clearDapTerminationTimer(session.sessionId);
+    session.state = SessionState.FAILED;
+    session.disposeLifecycle?.();
+    session.disposeLifecycle = undefined;
+    session.provider.disposeRuntimeEvents?.();
+    session.dap?.disposeClient();
+    this.breakpoints.clear(session.sessionId);
+    this.sessions.remove(session.sessionId);
   }
 
   #sessionSummary(session: DebugSessionRecord, diagnostic = false): SessionSummary {
