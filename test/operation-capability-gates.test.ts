@@ -427,6 +427,38 @@ test("hostile position proxies do not throw, leak, or create event sequence hole
   assert.equal("position" in (items[0] ?? {}), false);
 });
 
+test("revoked position proxies do not throw, leak, or create event sequence holes", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  const { proxy: revokedPosition, revoke } = Proxy.revocable({}, {});
+  revoke();
+
+  assert.doesNotThrow(() => manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    position: revokedPosition
+  }));
+  manager.appendRuntimeEvent("operation_caps", { kind: "continued" });
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 2
+  });
+
+  assert.equal(response.error, undefined);
+  const items = (response.events as AnyRecord).items as AnyRecord[];
+  assert.deepEqual(items.map((item) => item.sequence), [1, 2]);
+  assert.equal("position" in (items[0] ?? {}), false);
+  const outputSchema = toolOutputSchemas.bp_debug_control;
+  assert.ok(outputSchema);
+  assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
+});
+
 const advancedCapabilityCases = [
   { field: "condition", value: "answer > 0", capability: "conditionalBreakpoints" },
   { field: "hitCondition", value: "2", capability: "hitConditionalBreakpoints" },

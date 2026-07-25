@@ -77,8 +77,8 @@ export function normalizeRuntimeEventMetadata(value: unknown): AnyRecord | undef
 }
 
 function ownValue(value: unknown, key: string): unknown {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor && "value" in descriptor ? descriptor.value : undefined;
   } catch {
