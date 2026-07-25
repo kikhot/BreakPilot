@@ -35,6 +35,7 @@ interface FakeBehavior {
 class FakeTransport extends EventEmitter implements DapTransport {
   #behavior: FakeBehavior;
   #buffer = Buffer.alloc(0);
+  closeCount = 0;
 
   constructor(behavior: FakeBehavior) {
     super();
@@ -46,7 +47,7 @@ class FakeTransport extends EventEmitter implements DapTransport {
   }
 
   close(): void {
-    /* no-op */
+    this.closeCount += 1;
   }
 
   write(buffer: Buffer): void {
@@ -158,4 +159,43 @@ test("launch still succeeds via the initialized race when the adapter delays its
   await session.initialize("java");
   const result = await session.launch({ startGraceMs: 200 });
   assert.deepEqual(result, { initialized: true });
+});
+
+test("disposing a DAP session twice settles pending initialized and stopped waits once", async () => {
+  const session = makeSession({ responseDelayMs: { launch: 100 } });
+  const transport = session.client.transport as FakeTransport;
+  const launch = session.launch({
+    timeoutMs: 100,
+    initializedTimeoutMs: 100,
+    startGraceMs: 10
+  }).then(
+    () => ({ outcome: "resolved" as const }),
+    (error: unknown) => ({ outcome: "rejected" as const, error })
+  );
+  const stopped = session.waitForBreakpoint(100).then(
+    () => ({ outcome: "resolved" as const }),
+    (error: unknown) => ({ outcome: "rejected" as const, error })
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(session.initializedWaiters.length, 1);
+  assert.equal(session.stoppedWaiters.length, 1);
+  assert.equal(session.client.pending.size, 1);
+
+  session.disposeClient();
+  session.disposeClient();
+  const settled = await Promise.race([
+    Promise.all([launch, stopped]),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 25))
+  ]);
+
+  assert.ok(settled, "disposing should settle waits without waiting for their timeouts");
+  for (const result of settled) {
+    assert.equal(result.outcome, "rejected");
+    assert.ok(result.error instanceof BreakPilotError);
+    assert.equal(result.error.code, ErrorCodes.TARGET_PROCESS_EXITED);
+  }
+  assert.deepEqual(session.initializedWaiters, []);
+  assert.deepEqual(session.stoppedWaiters, []);
+  assert.equal(session.client.pending.size, 0);
+  assert.equal(transport.closeCount, 1);
 });

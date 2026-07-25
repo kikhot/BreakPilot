@@ -1963,17 +1963,22 @@ export class DebugSessionManager {
       runtimeEvents.append({ kind: "terminated", data: { reason: "transportExit" } });
       void this.#cleanupSession(record, { reason: "dap_transport_exit", disconnectProvider: false });
     };
+    const onStartFailed = (): void => {
+      this.#discardFailedSession(record);
+    };
     dap.on("stopped", onStopped);
     dap.on("terminated", onTerminated);
     dap.on("exited", onExited);
     dap.on("adapterError", onAdapterError);
     dap.on("transportExit", onTransportExit);
+    dap.on("startFailed", onStartFailed);
     record.disposeLifecycle = () => {
       dap.off("stopped", onStopped);
       dap.off("terminated", onTerminated);
       dap.off("exited", onExited);
       dap.off("adapterError", onAdapterError);
       dap.off("transportExit", onTransportExit);
+      dap.off("startFailed", onStartFailed);
     };
     this.sessions.add(record);
     try {
@@ -1986,6 +1991,7 @@ export class DebugSessionManager {
   }
 
   #discardFailedSession(session: DebugSessionRecord): void {
+    if (this.sessions.maybeGet(session.sessionId) !== session) return;
     this.#clearDapTerminationTimer(session.sessionId);
     session.state = SessionState.FAILED;
     session.disposeLifecycle?.();

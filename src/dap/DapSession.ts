@@ -31,6 +31,8 @@ export class DapSession extends EventEmitter {
   readonly #runtimeEventListeners: Set<(event: DapEventMessage) => void>;
   readonly #clientListeners: Array<[event: string, listener: (...args: any[]) => void]>;
   #runtimeEventSourceAttached: boolean;
+  #startGraceTimer: ReturnType<typeof setTimeout> | null;
+  #disposed: boolean;
   threadId: number | null;
   terminated: boolean;
 
@@ -61,6 +63,8 @@ export class DapSession extends EventEmitter {
     this.#runtimeEventListeners = new Set();
     this.#clientListeners = [];
     this.#runtimeEventSourceAttached = false;
+    this.#startGraceTimer = null;
+    this.#disposed = false;
     this.threadId = null;
     this.terminated = false;
   }
@@ -130,7 +134,22 @@ export class DapSession extends EventEmitter {
   }
 
   disposeClient(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
     this.#runtimeEventSourceAttached = false;
+    if (this.#startGraceTimer) {
+      clearTimeout(this.#startGraceTimer);
+      this.#startGraceTimer = null;
+    }
+    const error = this.startError ?? new BreakPilotError(
+      ErrorCodes.TARGET_PROCESS_EXITED,
+      "Debug session ended.",
+      { sessionId: this.sessionId }
+    );
+    for (const waiter of this.initializedWaiters.splice(0)) waiter.reject(error);
+    for (const waiter of this.stoppedWaiters.splice(0)) waiter.reject(error);
+    this.stoppedQueue = [];
+    this.startRequestPromise = null;
     this.#detachClientListeners();
     this.#runtimeEventListeners.clear();
     try {
@@ -209,6 +228,7 @@ export class DapSession extends EventEmitter {
   async #start(command: "launch" | "attach", args: AnyRecord): Promise<AnyRecord> {
     const startRequest = this.client.request(command, args, args.timeoutMs ?? 60000);
     this.startRequestPromise = startRequest;
+    let reportedReady = false;
 
     // Wrap the start request so its outcome can be inspected without an
     // unhandled rejection, and so a *late* failure is recorded on the session
@@ -219,7 +239,9 @@ export class DapSession extends EventEmitter {
       (error) => ({ outcome: "rejected" as const, error: error as Error })
     );
     void tracked.then((result) => {
-      if (result.outcome === "rejected") this.startError = result.error;
+      if (result.outcome !== "rejected") return;
+      this.startError = result.error;
+      if (reportedReady && !this.#disposed) this.emit("startFailed");
     });
 
     const initialized = this.#waitForInitialized(args.initializedTimeoutMs ?? 15000).then(
@@ -237,14 +259,20 @@ export class DapSession extends EventEmitter {
     // mainClass) must not be masked as success: give the start request a short
     // grace window to surface such an error before reporting the session ready.
     const graceMs = (args.startGraceMs as number | undefined) ?? 750;
-    const settled = await Promise.race([
-      tracked,
-      new Promise<{ outcome: "pending" }>((resolve) =>
-        setTimeout(() => resolve({ outcome: "pending" }), graceMs)
-      )
-    ]);
+    const grace = new Promise<{ outcome: "pending" }>((resolve) => {
+      this.#startGraceTimer = setTimeout(() => {
+        this.#startGraceTimer = null;
+        resolve({ outcome: "pending" });
+      }, graceMs);
+    });
+    const settled = await Promise.race([tracked, grace]);
+    if (this.#startGraceTimer) {
+      clearTimeout(this.#startGraceTimer);
+      this.#startGraceTimer = null;
+    }
     if (settled.outcome === "rejected") throw settled.error;
     if (settled.outcome === "resolved") return settled.value;
+    reportedReady = true;
     return { initialized: true };
   }
 

@@ -18,6 +18,7 @@ export class DapClient extends EventEmitter {
   defaultTimeoutMs: number;
   stderr: string[];
   readonly #transportListeners: Array<[event: string, listener: (...args: any[]) => void]>;
+  #closed: boolean;
 
   constructor(transport: DapTransport, options: { defaultTimeoutMs?: number } = {}) {
     super();
@@ -28,6 +29,7 @@ export class DapClient extends EventEmitter {
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 10000;
     this.stderr = [];
     this.#transportListeners = [];
+    this.#closed = false;
   }
 
   start(): void {
@@ -55,9 +57,8 @@ export class DapClient extends EventEmitter {
     try {
       this.transport.start();
     } catch (error) {
-      this.#detachTransportListeners();
       try {
-        this.transport.close();
+        this.close();
       } catch {
         // A transport that failed synchronously may not have a closable handle.
       }
@@ -104,6 +105,15 @@ export class DapClient extends EventEmitter {
   }
 
   close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    const error = new BreakPilotError(
+      ErrorCodes.TARGET_PROCESS_EXITED,
+      "Debug adapter client closed.",
+      {}
+    );
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
     try {
       this.transport.close();
     } finally {

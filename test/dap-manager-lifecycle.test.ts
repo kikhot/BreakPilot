@@ -17,14 +17,26 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
   #sequence = 1;
   readonly startFailure?: Error;
   readonly rejectCommand?: RejectCommand;
+  readonly responseDelayMs: Partial<Record<RejectCommand, number>>;
+  readonly terminateOnReject: boolean;
   readonly commands: string[] = [];
   beforeResponse?: (command: string) => void;
   closed = false;
+  closeCount = 0;
 
-  constructor(startFailure?: Error, rejectCommand?: RejectCommand) {
+  constructor(
+    startFailure?: Error,
+    rejectCommand?: RejectCommand,
+    options: {
+      responseDelayMs?: Partial<Record<RejectCommand, number>>;
+      terminateOnReject?: boolean;
+    } = {}
+  ) {
     super();
     this.startFailure = startFailure;
     this.rejectCommand = rejectCommand;
+    this.responseDelayMs = options.responseDelayMs ?? {};
+    this.terminateOnReject = options.terminateOnReject ?? false;
   }
 
   start(): void {
@@ -32,6 +44,7 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
   }
 
   close(): void {
+    this.closeCount += 1;
     this.closed = true;
   }
 
@@ -51,7 +64,7 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
       };
       this.#buffer = this.#buffer.subarray(bodyEnd);
       this.commands.push(request.command);
-      queueMicrotask(() => {
+      const respond = () => {
         this.beforeResponse?.(request.command);
         const success = request.command !== this.rejectCommand;
         this.#publishMessage({
@@ -64,7 +77,13 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
           body: {}
         });
         if (request.command === "initialize" && success) this.publish("initialized");
-      });
+        if (!success && this.terminateOnReject) {
+          this.publish("terminated", { restart: false, exitCode: 17 });
+        }
+      };
+      const delayMs = this.responseDelayMs[request.command as RejectCommand];
+      if (delayMs !== undefined) setTimeout(respond, delayMs);
+      else queueMicrotask(respond);
     }
   }
 
@@ -140,6 +159,14 @@ async function nextTurn(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+async function waitFor(check: () => boolean, timeoutMs = 250): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error("condition was not met before timeout");
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function assertTransportDetached(transport: LifecycleDapTransport): void {
   assert.equal(transport.listenerCount("data"), 0);
   assert.equal(transport.listenerCount("stderr"), 0);
@@ -163,7 +190,7 @@ function assertSessionDetached(client: EventEmitter): void {
 }
 
 function assertManagerLifecycleDetached(dap: EventEmitter): void {
-  for (const event of ["stopped", "terminated", "exited", "adapterError", "transportExit"]) {
+  for (const event of ["stopped", "terminated", "exited", "adapterError", "transportExit", "startFailed"]) {
     assert.equal(dap.listenerCount(event), 0, event);
   }
 }
@@ -303,6 +330,102 @@ test("explicit terminal session ids reject resume during exited grace without st
   assert.equal(stopped.status, "stopped");
   assert.equal(stopped.alreadyStopped, true);
 });
+
+for (const lateFailure of [
+  { mode: "launch", command: "launch" },
+  { mode: "attach", command: "attach" }
+] as const) {
+  test(`late ${lateFailure.command} rejection retires the already-started managed session`, async () => {
+    const transport = new LifecycleDapTransport(undefined, lateFailure.command, {
+      responseDelayMs: { [lateFailure.command]: 30 }
+    });
+    const { manager, language } = createManager(`late-${lateFailure.command}`, transport);
+    const started = await manager.bpDebugStart({
+      mode: lateFailure.mode,
+      language,
+      startGraceMs: 5,
+      ...(lateFailure.mode === "attach" ? { host: "127.0.0.1", port: 5678 } : {})
+    }) as AnyRecord;
+    const sessionId = String(started.sessionId);
+    const record = manager.sessions.get(sessionId);
+    const pendingStop = record.provider.waitForBreakpoint(200).then(
+      () => ({ outcome: "resolved" as const }),
+      (error: unknown) => ({ outcome: "rejected" as const, error })
+    );
+
+    await waitFor(() => manager.sessions.maybeGet(sessionId) === undefined, 100);
+
+    assert.equal(record.state, "failed");
+    assert.equal(record.provider.capabilities.eventDrain, "unsupported");
+    assertManagerLifecycleDetached(record.dap!);
+    assertSessionDetached(record.dap!.client);
+    assertTransportDetached(transport);
+    assert.equal(transport.closeCount, 1);
+    assert.equal(record.dap!.client.pending.size, 0);
+    assert.deepEqual(record.dap!.initializedWaiters, []);
+    assert.deepEqual(record.dap!.stoppedWaiters, []);
+    const stop = await pendingStop;
+    assert.equal(stop.outcome, "rejected");
+    assertErrorCode(stop.error, ErrorCodes.TOOL_FAILED);
+    assert.match((stop.error as Error).message, new RegExp(`${lateFailure.command} rejected`));
+    await assert.rejects(
+      manager.bpDebugControl({ sessionId, action: "resume" }),
+      (error: unknown) => assertErrorCode(error, ErrorCodes.SESSION_NOT_FOUND)
+    );
+    await assert.rejects(
+      manager.bpDebugControl({ sessionId, action: "drainEvents" }),
+      (error: unknown) => assertErrorCode(error, ErrorCodes.SESSION_NOT_FOUND)
+    );
+  });
+}
+
+for (const racedFailure of [
+  { mode: "launch", command: "launch", errorCode: ErrorCodes.LAUNCH_FAILED },
+  { mode: "attach", command: "attach", errorCode: ErrorCodes.ATTACH_FAILED }
+] as const) {
+  test(`${racedFailure.command} rejection racing with terminated preserves terminal history and closes once`, async () => {
+    const transport = new LifecycleDapTransport(undefined, racedFailure.command, {
+      terminateOnReject: true
+    });
+    const { manager, language } = createManager(`raced-${racedFailure.command}`, transport);
+    let record: ReturnType<DebugSessionManager["sessions"]["get"]> | undefined;
+    transport.beforeResponse = (command) => {
+      if (command !== racedFailure.command) return;
+      record = [...manager.sessions.sessions.values()][0];
+    };
+
+    await assert.rejects(
+      manager.bpDebugStart({
+        mode: racedFailure.mode,
+        language,
+        startGraceMs: 100,
+        ...(racedFailure.mode === "attach" ? { host: "127.0.0.1", port: 5678 } : {})
+      }),
+      (error: unknown) => {
+        assertErrorCode(error, racedFailure.errorCode);
+        assert.match((error as Error).message, new RegExp(`${racedFailure.command} rejected`));
+        return true;
+      }
+    );
+
+    assert.ok(record);
+    assert.equal(record.state, "terminated");
+    assert.equal(manager.sessions.maybeGet(record.sessionId), undefined);
+    assert.equal(transport.closeCount, 1);
+    assert.equal(record.provider.capabilities.eventDrain, "unsupported");
+    assertManagerLifecycleDetached(record.dap!);
+    assertSessionDetached(record.dap!.client);
+    assertTransportDetached(transport);
+    const drained = await manager.bpDebugControl({
+      sessionId: record.sessionId,
+      action: "drainEvents"
+    }) as AnyRecord;
+    assert.deepEqual(
+      drained.events.items.map((event: AnyRecord) => [event.kind, event.data]),
+      [["terminated", { exitCode: 17, restart: false }]]
+    );
+  });
+}
 
 for (const failure of ["adapterError", "transportExit"] as const) {
   test(`${failure} cleans the managed session and subscriptions with safe postmortem history`, async () => {
