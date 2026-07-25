@@ -294,6 +294,34 @@ try {
   });
   assert.equal(archivedDrain.error, undefined);
   assert.deepEqual((archivedDrain.events as { items?: { sequence?: number }[] }).items?.map((event) => event.sequence), [1]);
+
+  const collidingRuntime = hub.projects.getOrCreate("/tmp/breakpilot-colliding-archive");
+  const collidingEvents = new RuntimeEventBuffer("sess-archived");
+  collidingEvents.append({ kind: "terminated", message: "retained elsewhere" });
+  collidingRuntime.manager.sessions.add({
+    sessionId: "sess-archived",
+    language: "java",
+    workspaceRoot: collidingRuntime.policy.workspace.root,
+    mode: "headless",
+    owner: "mcp",
+    state: "paused",
+    createdAt: new Date(0).toISOString(),
+    providerKind: "dap",
+    provider: {
+      async disconnect() {
+        return {};
+      }
+    } as never,
+    runtimeEvents: collidingEvents
+  });
+  await collidingRuntime.manager.bpDebugControl({ sessionId: "sess-archived", action: "stop" });
+  const ambiguousArchivedDrain = await hub.callTool("bp_debug_control", {
+    action: "drainEvents",
+    sessionId: "sess-archived",
+    cursor: 0,
+    limit: 1
+  });
+  assert.equal(ambiguousArchivedDrain.error?.code, "SESSION_AMBIGUOUS");
 } finally {
   await handle.close();
 }

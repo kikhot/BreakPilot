@@ -366,6 +366,67 @@ test("public event drain normalizes legacy positions before output validation", 
   assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
 });
 
+test("public event drain falls back to a valid legacy file when filePath is malformed", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    position: { filePath: {}, file: "Foo.java", line: 20 }
+  });
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 1
+  });
+
+  assert.equal(response.error, undefined);
+  assert.deepEqual((response.events as AnyRecord).items[0]?.position, {
+    filePath: "Foo.java",
+    line: 20
+  });
+  const outputSchema = toolOutputSchemas.bp_debug_control;
+  assert.ok(outputSchema);
+  assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
+});
+
+test("hostile position proxies do not throw, leak, or create event sequence holes", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  const hostilePosition = new Proxy({}, {
+    getOwnPropertyDescriptor() {
+      throw new Error("hostile position");
+    }
+  });
+
+  assert.doesNotThrow(() => manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    position: hostilePosition
+  }));
+  manager.appendRuntimeEvent("operation_caps", { kind: "continued" });
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 2
+  });
+
+  assert.equal(response.error, undefined);
+  const items = (response.events as AnyRecord).items as AnyRecord[];
+  assert.deepEqual(items.map((item) => item.sequence), [1, 2]);
+  assert.equal("position" in (items[0] ?? {}), false);
+});
+
 const advancedCapabilityCases = [
   { field: "condition", value: "answer > 0", capability: "conditionalBreakpoints" },
   { field: "hitCondition", value: "2", capability: "hitConditionalBreakpoints" },

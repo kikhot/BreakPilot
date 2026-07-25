@@ -78,17 +78,23 @@ export function normalizeRuntimeEventMetadata(value: unknown): AnyRecord | undef
 
 function ownValue(value: unknown, key: string): unknown {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizePosition(value: unknown): RuntimeEventPosition | undefined {
-  const rawFilePath = ownValue(value, "filePath") ?? ownValue(value, "file");
+  const normalizedFilePath = (candidate: unknown): string | number | undefined =>
+    typeof candidate === "string" || (typeof candidate === "number" && Number.isFinite(candidate))
+      ? candidate
+      : undefined;
+  const filePath = normalizedFilePath(ownValue(value, "filePath")) ??
+    normalizedFilePath(ownValue(value, "file")) ??
+    null;
   const rawLine = ownValue(value, "line");
-  const filePath = typeof rawFilePath === "string" ||
-    (typeof rawFilePath === "number" && Number.isFinite(rawFilePath))
-    ? rawFilePath
-    : null;
   const line = typeof rawLine === "number" && Number.isFinite(rawLine) ? rawLine : null;
   if (filePath === null && line === null) return undefined;
   return { filePath, line };
