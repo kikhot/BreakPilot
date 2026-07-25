@@ -31,6 +31,7 @@ export const ErrorCodes = Object.freeze({
   INVALID_LANGUAGE_IDENTIFIER: "INVALID_LANGUAGE_IDENTIFIER",
   DUPLICATE_LANGUAGE: "DUPLICATE_LANGUAGE",
   INVALID_ARGUMENT: "INVALID_ARGUMENT",
+  OUTPUT_CONTRACT_VIOLATION: "OUTPUT_CONTRACT_VIOLATION",
   TOOL_FAILED: "TOOL_FAILED"
 } as const);
 
@@ -58,7 +59,10 @@ export function toErrorPayload(error: unknown): {
       code: error.code,
       message: error.message
     };
-    if (Object.keys(error.details).length > 0) payload.details = error.details;
+    const details = Object.fromEntries(
+      Object.entries(error.details).filter(([, value]) => value !== undefined)
+    );
+    if (Object.keys(details).length > 0) payload.details = details;
     return payload;
   }
   return {
@@ -82,4 +86,9 @@ export function fail(error: unknown, _auditId: string): ToolResponse {
   return {
     error: toErrorPayload(error)
   };
+}
+
+export function toolResponseHttpStatus(response: ToolResponse): number {
+  if (!response.error) return 200;
+  return response.error.code === ErrorCodes.OUTPUT_CONTRACT_VIOLATION ? 500 : 400;
 }

@@ -3,6 +3,7 @@ import type { AnyRecord } from "../types/json.ts";
 import { DebugSessionManager } from "../sessions/DebugSessionManager.ts";
 import { BreakPilotError, ErrorCodes, fail } from "../utils/errors.ts";
 import { validateToolInput } from "./ToolInputValidator.ts";
+import { operationKindForTool, ToolResponseFinalizer } from "./ToolResponseFinalizer.ts";
 import { toolDefinitions } from "./toolDefinitions.ts";
 
 type ToolHandler = (args: AnyRecord) => Promise<ToolResponse<unknown>> | ToolResponse<unknown>;
@@ -11,9 +12,11 @@ export class ToolRouter {
   manager: DebugSessionManager;
   handlers: Map<string, ToolHandler>;
   definitions: Map<string, ToolDefinition>;
+  finalizer: ToolResponseFinalizer;
 
   constructor(manager: DebugSessionManager) {
     this.manager = manager;
+    this.finalizer = new ToolResponseFinalizer(manager.audit);
     this.definitions = new Map(toolDefinitions.map((definition) => [definition.name, definition]));
     this.handlers = new Map<string, ToolHandler>([
       ["bp_debug_start", (args: AnyRecord) => this.manager.bpDebugStart(args)],
@@ -53,9 +56,15 @@ export class ToolRouter {
     if (!handler) {
       return fail(new Error(`Unknown tool: ${name}`), this.manager.audit.record("unknown_tool", { name }));
     }
+    const definition = this.definitions.get(name);
+    if (!definition) {
+      return fail(
+        new Error(`Missing tool definition: ${name}`),
+        this.manager.audit.record("tool_failed", { name, message: `Missing tool definition: ${name}` })
+      );
+    }
+    const operation = operationKindForTool(name);
     try {
-      const definition = this.definitions.get(name);
-      if (!definition) throw new Error(`Missing tool definition: ${name}`);
       const validation = validateToolInput(this.#validationSchema(definition), args);
       if (validation.errors.length > 0) {
         throw new BreakPilotError(
@@ -64,7 +73,8 @@ export class ToolRouter {
           { issues: validation.errors }
         );
       }
-      return await handler(validation.value);
+      const candidate = await handler(validation.value);
+      return this.finalizer.finalize(definition, candidate, operation);
     } catch (error) {
       const typedError = error as Error & { code?: string };
       const auditId = this.manager.audit.record("tool_failed", {
@@ -72,7 +82,7 @@ export class ToolRouter {
         message: typedError.message,
         code: typedError.code
       });
-      return fail(error, auditId);
+      return this.finalizer.finalize(definition, fail(error, auditId), operation);
     }
   }
 

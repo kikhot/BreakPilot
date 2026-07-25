@@ -71,7 +71,15 @@ test("live language enums apply equally to language and lang without mutating st
   let dispatches = 0;
   manager.bpDebugStart = async () => {
     dispatches += 1;
-    return { sessionId: "dynamic" };
+    return {
+      sessionId: "dynamic",
+      language: dynamicLanguage,
+      mode: "headless",
+      state: "running",
+      startMode: "launch",
+      providerKind: "dap",
+      capabilities: fullCapabilities
+    };
   };
   const router = new ToolRouter(manager);
   const advertisedStart = router.listTools().find((tool) => tool.name === "bp_debug_start");

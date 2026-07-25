@@ -149,6 +149,61 @@ try {
   assert.equal(streamUnknownPropertyBody.result?.content?.[0]?.text, expectedUnknownPropertyError.message);
   assert.deepEqual(streamUnknownPropertyBody.result?.structuredContent?.error, expectedUnknownPropertyError);
 
+  hub.projects.getOrCreate().manager.bpDebugStatus = async () => ({
+    activeSessionId: null,
+    sessions: "invalid",
+    ideConnected: false,
+    ideSessions: []
+  });
+  const expectedOutputContractError = {
+    code: "OUTPUT_CONTRACT_VIOLATION",
+    message: "Debugger tool returned a result that violates its published contract.",
+    details: {
+      tool: "bp_debug_status",
+      issues: [{ path: "$.sessions", keyword: "type" }],
+      issueCount: 1,
+      outcome: "failed",
+      retrySafe: true
+    }
+  };
+
+  const httpMalformedOutputCall = await fetch(`${handle.url}/tools/call`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "bp_debug_status", arguments: {} })
+  });
+  assert.equal(httpMalformedOutputCall.status, 500);
+  const httpMalformedOutputBody = await httpMalformedOutputCall.json() as { error?: unknown };
+  assert.deepEqual(httpMalformedOutputBody.error, expectedOutputContractError);
+
+  const streamMalformedOutputCall = await fetch(`${handle.url}/stream`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-session-id": sessionId
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: { name: "bp_debug_status", arguments: {} }
+    })
+  });
+  assert.equal(streamMalformedOutputCall.status, 200);
+  const streamMalformedOutputBody = await streamMalformedOutputCall.json() as {
+    result?: {
+      content?: { type: string; text: string }[];
+      structuredContent?: { error?: unknown };
+      isError?: boolean;
+    };
+  };
+  assert.equal(streamMalformedOutputBody.result?.isError, true);
+  assert.equal(streamMalformedOutputBody.result?.content?.[0]?.text, expectedOutputContractError.message);
+  assert.deepEqual(
+    streamMalformedOutputBody.result?.structuredContent?.error,
+    expectedOutputContractError
+  );
+
   const sse = await fetch(`${handle.url}/sse`);
   assert.equal(sse.status, 200);
   const reader = sse.body?.getReader();

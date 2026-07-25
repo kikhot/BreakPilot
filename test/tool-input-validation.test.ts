@@ -769,7 +769,26 @@ let dispatchedStart: AnyRecord | undefined;
 dynamicManager.bpDebugStart = async (args) => {
   startCalls += 1;
   dispatchedStart = args;
-  return { sessionId: "sess_dynamic" };
+  return {
+    sessionId: "sess_dynamic",
+    language: String(args?.language),
+    mode: "headless",
+    state: "running",
+    startMode: "launch",
+    providerKind: "dap",
+    capabilities: {
+      pause: "native",
+      stepping: "native",
+      runToLine: "native",
+      variableReferences: "native",
+      setValue: "native",
+      breakpointUpdate: "unsupported",
+      conditionalBreakpoints: "native",
+      hitConditionalBreakpoints: "native",
+      tracepoints: "native",
+      eventDrain: "native"
+    }
+  };
 };
 const dynamicRouter = new ToolRouter(dynamicManager);
 const dynamicLanguage = "task3dynamic";

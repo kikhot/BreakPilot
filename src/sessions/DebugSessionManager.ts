@@ -598,7 +598,10 @@ export class DebugSessionManager {
     const auditId = this.audit.record("bp_debug_set_breakpoint_requested", { sessionId: session.sessionId });
     const response = await this.#setSessionBreakpoint(session, { ...normalized, file: normalized.filePath });
     const lineText = response.filePath && response.line ? this.#readLine(String(response.filePath), Number(response.line)) : undefined;
-    return ok(session.sessionId, { ...response, lineText }, auditId);
+    return ok(session.sessionId, {
+      ...response,
+      ...(lineText !== undefined ? { lineText } : {})
+    }, auditId);
   }
 
   async bpDebugListBreakpoints(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -1006,7 +1009,7 @@ export class DebugSessionManager {
       const lineText = selected.file && selected.line ? this.#readLine(selected.file, selected.line) : undefined;
       return ok(null, {
         ...this.#projectBreakpointView(selected),
-        lineText
+        ...(lineText !== undefined ? { lineText } : {})
       }, auditId);
     } catch (error) {
       this.breakpoints.removeProject(breakpoint.id);
@@ -1288,10 +1291,10 @@ export class DebugSessionManager {
         `Runtime provider did not report correlated stop evidence after ${operation}.`,
         {
           sessionId: session.sessionId,
-          ideSessionId: session.ideSessionId,
           providerKind: session.providerKind,
-          reportedSessionId: evidence?.sessionId,
-          reportedIdeSessionId: evidence?.ideSessionId
+          ...(session.ideSessionId !== undefined ? { ideSessionId: session.ideSessionId } : {}),
+          ...(evidence?.sessionId !== undefined ? { reportedSessionId: evidence.sessionId } : {}),
+          ...(evidence?.ideSessionId !== undefined ? { reportedIdeSessionId: evidence.ideSessionId } : {})
         }
       );
     }
@@ -1677,9 +1680,9 @@ export class DebugSessionManager {
       owner: breakpoint.owner,
       enabled: breakpoint.enabled ?? true,
       temporary: breakpoint.temporary ?? false,
-      suspendPolicy: breakpoint.suspendPolicy,
-      isLogMessage: breakpoint.isLogMessage,
-      isLogStack: breakpoint.isLogStack,
+      ...(breakpoint.suspendPolicy !== undefined ? { suspendPolicy: breakpoint.suspendPolicy } : {}),
+      ...(breakpoint.isLogMessage !== undefined ? { isLogMessage: breakpoint.isLogMessage } : {}),
+      ...(breakpoint.isLogStack !== undefined ? { isLogStack: breakpoint.isLogStack } : {}),
       ...(breakpoint.message ? { message: breakpoint.message } : {})
     };
   }
@@ -1696,9 +1699,9 @@ export class DebugSessionManager {
       owner: breakpoint.owner,
       enabled: breakpoint.enabled ?? true,
       temporary: breakpoint.temporary ?? false,
-      suspendPolicy: breakpoint.suspendPolicy,
-      isLogMessage: breakpoint.isLogMessage,
-      isLogStack: breakpoint.isLogStack,
+      ...(breakpoint.suspendPolicy !== undefined ? { suspendPolicy: breakpoint.suspendPolicy } : {}),
+      ...(breakpoint.isLogMessage !== undefined ? { isLogMessage: breakpoint.isLogMessage } : {}),
+      ...(breakpoint.isLogStack !== undefined ? { isLogStack: breakpoint.isLogStack } : {}),
       ...(breakpoint.message ? { message: breakpoint.message } : {})
     };
   }

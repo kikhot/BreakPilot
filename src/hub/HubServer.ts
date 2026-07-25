@@ -7,7 +7,7 @@ import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
 import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
 import type { ToolDefinition, ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
-import { fail, ok } from "../utils/errors.ts";
+import { fail, ok, toolResponseHttpStatus } from "../utils/errors.ts";
 import { McpSessionRegistry, type McpSessionRecord } from "./McpSessionRegistry.ts";
 import { ProjectRuntimeRegistry } from "./ProjectRuntimeRegistry.ts";
 
@@ -176,7 +176,7 @@ export class BreakPilotHub {
       if (req.method === "POST" && pathname === "/tools/call") {
         const payload = JSON.parse((await readRequestBody(req)) || "{}") as AnyRecord;
         const result = await this.callTool(String(payload.name), (payload.arguments as AnyRecord | undefined) ?? {});
-        sendJson(res, result.error ? 400 : 200, result);
+        sendJson(res, toolResponseHttpStatus(result), result);
         return;
       }
       if (pathname === "/stream") {

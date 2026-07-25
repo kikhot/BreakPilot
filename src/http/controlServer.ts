@@ -3,6 +3,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { ToolRouter } from "../control/ToolRouter.ts";
 import type { ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
+import { toolResponseHttpStatus } from "../utils/errors.ts";
 import type { ClientLeaseManager } from "./ClientLeaseManager.ts";
 
 export interface ControlServerOptions {
@@ -70,7 +71,7 @@ export async function startHttp(
         const body = await readRequestBody(req);
         const payload = JSON.parse(body || "{}");
         const result: ToolResponse = await router.callTool(payload.name, payload.arguments ?? {});
-        sendJson(res, result.error ? 400 : 200, result);
+        sendJson(res, toolResponseHttpStatus(result), result);
         return;
       }
       if (req.method === "POST" && req.url === "/clients/acquire") {
