@@ -706,8 +706,9 @@ export class DebugSessionManager {
           workspaceRoot
         })
       );
-      session.state = SessionState.RUNNING;
-      this.audit.record("bp_debug_launch_session_succeeded", { sessionId: session.sessionId, language });
+      if (this.#markDapSessionRunning(session)) {
+        this.audit.record("bp_debug_launch_session_succeeded", { sessionId: session.sessionId, language });
+      }
       return session;
     } catch (error) {
       const typedError = error as Error & { details?: AnyRecord };
@@ -786,8 +787,9 @@ export class DebugSessionManager {
           workspaceRoot
         })
       );
-      session.state = SessionState.RUNNING;
-      this.audit.record("bp_debug_attach_session_succeeded", { sessionId: session.sessionId, language, host, port });
+      if (this.#markDapSessionRunning(session)) {
+        this.audit.record("bp_debug_attach_session_succeeded", { sessionId: session.sessionId, language, host, port });
+      }
       return session;
     } catch (error) {
       const typedError = error as Error & { details?: AnyRecord };
@@ -1992,6 +1994,7 @@ export class DebugSessionManager {
 
   #discardFailedSession(session: DebugSessionRecord): void {
     if (this.sessions.maybeGet(session.sessionId) !== session) return;
+    if (session.state === SessionState.TERMINATED) return;
     this.#clearDapTerminationTimer(session.sessionId);
     session.state = SessionState.FAILED;
     session.disposeLifecycle?.();
@@ -2000,6 +2003,13 @@ export class DebugSessionManager {
     session.dap?.disposeClient();
     this.breakpoints.clear(session.sessionId);
     this.sessions.remove(session.sessionId);
+  }
+
+  #markDapSessionRunning(session: DebugSessionRecord): boolean {
+    if (this.sessions.maybeGet(session.sessionId) !== session) return false;
+    if (session.state === SessionState.TERMINATED || session.state === SessionState.FAILED) return false;
+    session.state = SessionState.RUNNING;
+    return true;
   }
 
   #sessionSummary(session: DebugSessionRecord, diagnostic = false): SessionSummary {

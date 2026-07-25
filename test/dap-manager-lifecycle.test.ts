@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { LanguageAdapter } from "../src/debug-adapters/LanguageAdapter.ts";
+import { validateToolOutput } from "../src/control/ToolInputValidator.ts";
+import { bpDebugStartOutputSchema } from "../src/control/toolOutputSchemas.ts";
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import type { DapTransport } from "../src/types/dap.ts";
@@ -19,6 +21,7 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
   readonly rejectCommand?: RejectCommand;
   readonly responseDelayMs: Partial<Record<RejectCommand, number>>;
   readonly terminateOnReject: boolean;
+  readonly terminateOnSuccess: boolean;
   readonly commands: string[] = [];
   beforeResponse?: (command: string) => void;
   closed = false;
@@ -30,6 +33,7 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
     options: {
       responseDelayMs?: Partial<Record<RejectCommand, number>>;
       terminateOnReject?: boolean;
+      terminateOnSuccess?: boolean;
     } = {}
   ) {
     super();
@@ -37,6 +41,7 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
     this.rejectCommand = rejectCommand;
     this.responseDelayMs = options.responseDelayMs ?? {};
     this.terminateOnReject = options.terminateOnReject ?? false;
+    this.terminateOnSuccess = options.terminateOnSuccess ?? false;
   }
 
   start(): void {
@@ -79,6 +84,13 @@ class LifecycleDapTransport extends EventEmitter implements DapTransport {
         if (request.command === "initialize" && success) this.publish("initialized");
         if (!success && this.terminateOnReject) {
           this.publish("terminated", { restart: false, exitCode: 17 });
+        }
+        if (
+          success &&
+          this.terminateOnSuccess &&
+          (request.command === "launch" || request.command === "attach")
+        ) {
+          this.publish("terminated", { restart: false, exitCode: 23, raw: "drop" });
         }
       };
       const delayMs = this.responseDelayMs[request.command as RejectCommand];
@@ -331,6 +343,53 @@ test("explicit terminal session ids reject resume during exited grace without st
   assert.equal(stopped.alreadyStopped, true);
 });
 
+for (const terminalStart of [
+  { mode: "launch", command: "launch" },
+  { mode: "attach", command: "attach" }
+] as const) {
+  test(`successful ${terminalStart.command} response sharing a turn with terminated returns a terminal summary`, async () => {
+    const transport = new LifecycleDapTransport(undefined, undefined, {
+      terminateOnSuccess: true
+    });
+    const { manager, language } = createManager(`terminal-${terminalStart.command}-success`, transport);
+    let record: ReturnType<DebugSessionManager["sessions"]["get"]> | undefined;
+    transport.beforeResponse = (command) => {
+      if (command !== terminalStart.command) return;
+      record = [...manager.sessions.sessions.values()][0];
+    };
+
+    const started = await manager.bpDebugStart({
+      mode: terminalStart.mode,
+      language,
+      ...(terminalStart.mode === "attach" ? { host: "127.0.0.1", port: 5678 } : {})
+    }) as AnyRecord;
+
+    assert.ok(record);
+    assert.equal(started.sessionId, record.sessionId);
+    assert.equal(started.startMode, terminalStart.mode);
+    assert.equal(started.state, "terminated");
+    assert.deepEqual(validateToolOutput(bpDebugStartOutputSchema, started).errors, []);
+    assert.equal(record.state, "terminated");
+    assert.equal(manager.sessions.maybeGet(record.sessionId), undefined);
+    assert.deepEqual((await manager.bpDebugStatus({}) as AnyRecord).sessions, []);
+    assert.equal(transport.closeCount, 1);
+    assert.equal(record.provider.capabilities.eventDrain, "unsupported");
+    assertManagerLifecycleDetached(record.dap!);
+    assertSessionDetached(record.dap!.client);
+    assertTransportDetached(transport);
+
+    const drained = await manager.bpDebugControl({
+      sessionId: record.sessionId,
+      action: "drainEvents"
+    }) as AnyRecord;
+    assert.deepEqual(
+      drained.events.items.map((event: AnyRecord) => [event.kind, event.data]),
+      [["terminated", { exitCode: 23, restart: false }]]
+    );
+    assert.doesNotMatch(JSON.stringify({ started, drained }), /"raw"|"drop"/);
+  });
+}
+
 for (const lateFailure of [
   { mode: "launch", command: "launch" },
   { mode: "attach", command: "attach" }
@@ -378,6 +437,50 @@ for (const lateFailure of [
     );
   });
 }
+
+test("exited grace survives a late start rejection and retains the following terminated fact", async () => {
+  const transport = new LifecycleDapTransport(undefined, "launch", {
+    responseDelayMs: { launch: 35 }
+  });
+  const { manager, language } = createManager("exited-late-launch-failure", transport);
+  const started = await manager.bpDebugStart({
+    mode: "launch",
+    language,
+    startGraceMs: 5
+  }) as AnyRecord;
+  const sessionId = String(started.sessionId);
+  const record = manager.sessions.get(sessionId);
+
+  transport.publish("exited", { exitCode: 29, raw: "drop" });
+  await nextTurn();
+  assert.equal(manager.sessions.maybeGet(sessionId), record);
+  assert.equal(record.state, "terminated");
+
+  await waitFor(() => record.dap!.startError !== null, 100);
+
+  assert.equal(manager.sessions.maybeGet(sessionId), record);
+  assert.equal(record.state, "terminated");
+  assert.equal(transport.closeCount, 0);
+
+  transport.publish("terminated", { restart: false, secret: "drop" });
+  await nextTurn();
+
+  assert.equal(manager.sessions.maybeGet(sessionId), undefined);
+  assert.equal(record.state, "terminated");
+  assert.equal(transport.closeCount, 1);
+  assertManagerLifecycleDetached(record.dap!);
+  assertSessionDetached(record.dap!.client);
+  assertTransportDetached(transport);
+  const drained = await manager.bpDebugControl({ sessionId, action: "drainEvents" }) as AnyRecord;
+  assert.deepEqual(
+    drained.events.items.map((event: AnyRecord) => [event.kind, event.data]),
+    [
+      ["terminated", { reason: "dapExited", exitCode: 29 }],
+      ["terminated", { restart: false }]
+    ]
+  );
+  assert.doesNotMatch(JSON.stringify(drained), /"raw"|"secret"|"drop"/);
+});
 
 for (const racedFailure of [
   { mode: "launch", command: "launch", errorCode: ErrorCodes.LAUNCH_FAILED },
