@@ -49,25 +49,43 @@ export class BreakPilotError extends Error {
   }
 }
 
+const UNKNOWN_TOOL_FAILURE_MESSAGE = "Unknown tool failure.";
+
+function safeErrorMessage(error: unknown): string {
+  try {
+    if (error instanceof Error) {
+      const message = error.message;
+      return typeof message === "string" ? message : String(message);
+    }
+    return String(error);
+  } catch {
+    return UNKNOWN_TOOL_FAILURE_MESSAGE;
+  }
+}
+
 export function toErrorPayload(error: unknown): {
   code: string;
   message: string;
   details?: AnyRecord;
 } {
-  if (error instanceof BreakPilotError) {
-    const payload: { code: string; message: string; details?: AnyRecord } = {
-      code: error.code,
-      message: error.message
-    };
-    const details = Object.fromEntries(
-      Object.entries(error.details).filter(([, value]) => value !== undefined)
-    );
-    if (Object.keys(details).length > 0) payload.details = details;
-    return payload;
+  try {
+    if (error instanceof BreakPilotError) {
+      const payload: { code: string; message: string; details?: AnyRecord } = {
+        code: error.code,
+        message: error.message
+      };
+      const details = Object.fromEntries(
+        Object.entries(error.details).filter(([, value]) => value !== undefined)
+      );
+      if (Object.keys(details).length > 0) payload.details = details;
+      return payload;
+    }
+  } catch {
+    // Fall through to the non-throwing generic failure payload.
   }
   return {
     code: ErrorCodes.TOOL_FAILED,
-    message: error instanceof Error ? error.message : String(error)
+    message: safeErrorMessage(error)
   };
 }
 

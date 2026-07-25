@@ -222,4 +222,38 @@ assert.deepEqual(nullRejectionAuditRecords, [{
     code: "TOOL_FAILED"
   }
 }]);
+
+const hostileRejection = Object.assign(Object.create(null), {
+  secret: "must-not-reach-audit"
+});
+const { manager: hostileManager, router: hostileRouter } = createRouterWithHandler(
+  "bp_debug_status",
+  async () => {
+    throw hostileRejection;
+  }
+);
+const hostileAuditRecords: Array<{ type: string; payload: AnyRecord }> = [];
+hostileManager.audit.record = (type: string, payload: AnyRecord = {}) => {
+  hostileAuditRecords.push({ type, payload });
+  return "audit_hostile_rejection";
+};
+let hostileResponse: ToolResponse | undefined;
+await assert.doesNotReject(async () => {
+  hostileResponse = await hostileRouter.callTool("bp_debug_status", {});
+}, "known tools must contain failures from hostile display conversion");
+assert.deepEqual(hostileResponse, {
+  error: {
+    code: "TOOL_FAILED",
+    message: "Unknown tool failure."
+  }
+});
+assert.deepEqual(hostileAuditRecords, [{
+  type: "tool_failed",
+  payload: {
+    name: "bp_debug_status",
+    message: "Unknown tool failure.",
+    code: "TOOL_FAILED"
+  }
+}]);
+assert.equal(JSON.stringify(hostileAuditRecords).includes("must-not-reach-audit"), false);
 console.log("tool output validation tests ok");
