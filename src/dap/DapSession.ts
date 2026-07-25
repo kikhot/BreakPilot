@@ -1,5 +1,12 @@
 import { EventEmitter } from "node:events";
-import type { DapBreakpoint, DapScope, DapStackFrame, DapVariable, StoppedEvent } from "../types/dap.ts";
+import type {
+  DapBreakpoint,
+  DapEventMessage,
+  DapScope,
+  DapStackFrame,
+  DapVariable,
+  StoppedEvent
+} from "../types/dap.ts";
 import type { DebugLanguage } from "../types/debug.ts";
 import type { AnyRecord } from "../types/json.ts";
 import type { BreakpointRecord } from "../types/sessions.ts";
@@ -21,6 +28,8 @@ export class DapSession extends EventEmitter {
   startError: Error | null;
   stoppedQueue: StoppedEvent[];
   stoppedWaiters: ReturnType<typeof createDeferred<StoppedEvent>>[];
+  readonly #runtimeEventListeners: Set<(event: DapEventMessage) => void>;
+  #runtimeEventSourceAttached: boolean;
   threadId: number | null;
   terminated: boolean;
 
@@ -48,11 +57,23 @@ export class DapSession extends EventEmitter {
     this.startError = null;
     this.stoppedQueue = [];
     this.stoppedWaiters = [];
+    this.#runtimeEventListeners = new Set();
+    this.#runtimeEventSourceAttached = false;
     this.threadId = null;
     this.terminated = false;
   }
 
   startClient(): void {
+    this.client.on("event", (event: DapEventMessage) => {
+      for (const listener of [...this.#runtimeEventListeners]) {
+        try {
+          listener(structuredClone(event));
+        } catch {
+          // Runtime observation must never interfere with the named DAP event
+          // handlers below, especially stopped-queue and waiter delivery.
+        }
+      }
+    });
     this.client.on("initialized", () => {
       this.initialized = true;
       for (const waiter of this.initializedWaiters.splice(0)) waiter.resolve();
@@ -69,10 +90,37 @@ export class DapSession extends EventEmitter {
     this.client.on("continued", (body: AnyRecord) => this.emit("continued", body));
     this.client.on("terminated", (body: AnyRecord) => {
       this.terminated = true;
+      this.#runtimeEventSourceAttached = false;
       this.emit("terminated", body);
     });
-    this.client.on("exited", (body: AnyRecord) => this.emit("exited", body));
-    this.client.start();
+    this.client.on("exited", (body: AnyRecord) => {
+      this.#runtimeEventSourceAttached = false;
+      this.emit("exited", body);
+    });
+    this.client.on("exit", () => {
+      this.#runtimeEventSourceAttached = false;
+    });
+    this.client.on("adapterError", () => {
+      this.#runtimeEventSourceAttached = false;
+    });
+    this.#runtimeEventSourceAttached = true;
+    try {
+      this.client.start();
+    } catch (error) {
+      this.#runtimeEventSourceAttached = false;
+      throw error;
+    }
+  }
+
+  onRuntimeEvent(listener: (event: DapEventMessage) => void): () => void {
+    this.#runtimeEventListeners.add(listener);
+    return () => {
+      this.#runtimeEventListeners.delete(listener);
+    };
+  }
+
+  hasRuntimeEventSource(): boolean {
+    return this.#runtimeEventSourceAttached;
   }
 
   async initialize(adapterId = this.language): Promise<AnyRecord> {
@@ -345,6 +393,7 @@ export class DapSession extends EventEmitter {
       }
       throw error;
     } finally {
+      this.#runtimeEventSourceAttached = false;
       this.client.close();
     }
   }

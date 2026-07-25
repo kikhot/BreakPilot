@@ -1,23 +1,94 @@
 import type {
   DapBreakpoint,
+  DapEventMessage,
   StoppedEvent
 } from "../../types/dap.ts";
 import type { DebugLanguage, RuntimeStepKind } from "../../types/debug.ts";
 import type { InspectVariableResult, RuntimeSnapshot, VariableLimits } from "../../types/inspection.ts";
 import type { AnyRecord } from "../../types/json.ts";
-import type { BreakpointRecord, RuntimeDebugProvider } from "../../types/sessions.ts";
+import type {
+  BreakpointRecord,
+  DrainEventsArgs,
+  RuntimeDebugProvider,
+  RuntimeEvent,
+  RuntimeEventKind,
+  RuntimeEventPage,
+  ThreadId
+} from "../../types/sessions.ts";
 import { DapSession } from "../../dap/DapSession.ts";
 import { RuntimeSnapshotBuilder } from "../../inspection/SnapshotBuilder.ts";
 import { VariableSerializer } from "../../inspection/VariableSerializer.ts";
 import type { RuntimeProviderCapabilities } from "../../types/capabilities.ts";
 import { dapProviderCapabilities } from "../ProviderCapabilities.ts";
+import { RuntimeEventBuffer, normalizeRuntimeEventMetadata } from "../RuntimeEventBuffer.ts";
+
+const dapRuntimeEventKinds = new Set<RuntimeEventKind>([
+  "continued",
+  "stopped",
+  "output",
+  "thread",
+  "process",
+  "terminated"
+]);
+
+function ownValue(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+function normalizedThreadId(value: unknown): ThreadId | undefined {
+  if (typeof value === "string") return value;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizedDapMetadata(kind: RuntimeEventKind, body: unknown): AnyRecord | undefined {
+  const data = normalizeRuntimeEventMetadata(body) ?? {};
+  if (kind === "process" && data.processId === undefined) {
+    const systemProcessId = ownValue(body, "systemProcessId");
+    const alias = normalizeRuntimeEventMetadata({ processId: systemProcessId });
+    if (alias?.processId !== undefined) data.processId = alias.processId;
+  }
+  return Object.keys(data).length > 0 ? data : undefined;
+}
+
+function normalizeDapRuntimeEvent(
+  event: DapEventMessage
+): Omit<RuntimeEvent, "sequence" | "timestamp" | "sessionId"> | null {
+  const eventName = ownValue(event, "event");
+  if (typeof eventName !== "string" || !dapRuntimeEventKinds.has(eventName as RuntimeEventKind)) return null;
+
+  const kind = eventName as RuntimeEventKind;
+  const body = ownValue(event, "body");
+  const normalized: Omit<RuntimeEvent, "sequence" | "timestamp" | "sessionId"> = { kind };
+  const threadId = normalizedThreadId(ownValue(body, "threadId"));
+  if (threadId !== undefined) normalized.threadId = threadId;
+  if (kind === "output") {
+    const message = ownValue(body, "output");
+    const category = ownValue(body, "category");
+    if (typeof message === "string") normalized.message = message;
+    if (typeof category === "string") normalized.category = category;
+  }
+  const data = normalizedDapMetadata(kind, body);
+  if (data !== undefined) normalized.data = data;
+  return normalized;
+}
 
 export class DapRuntimeProvider implements RuntimeDebugProvider {
   kind = "dap";
   dap: DapSession;
+  events: RuntimeEventBuffer;
+  #unsubscribeRuntimeEvents: (() => void) | null = null;
 
-  constructor(dap: DapSession) {
+  constructor(dap: DapSession, events = new RuntimeEventBuffer(dap.sessionId)) {
     this.dap = dap;
+    this.events = events;
+    if (typeof dap.onRuntimeEvent === "function") {
+      this.#unsubscribeRuntimeEvents = dap.onRuntimeEvent((event) => {
+        const normalized = normalizeDapRuntimeEvent(event);
+        if (normalized) this.events.append(normalized);
+      });
+    }
   }
 
   get sessionId(): string {
@@ -33,7 +104,15 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
   }
 
   get capabilities(): RuntimeProviderCapabilities {
-    return dapProviderCapabilities(this.dap.capabilities);
+    const capabilities = dapProviderCapabilities(this.dap.capabilities);
+    if (
+      this.#unsubscribeRuntimeEvents &&
+      typeof this.dap.hasRuntimeEventSource === "function" &&
+      this.dap.hasRuntimeEventSource()
+    ) {
+      capabilities.eventDrain = "native";
+    }
+    return capabilities;
   }
 
   get threadId(): number | null {
@@ -46,6 +125,15 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
 
   async waitForBreakpoint(timeoutMs = 30000): Promise<StoppedEvent> {
     return this.dap.waitForBreakpoint(timeoutMs);
+  }
+
+  async drainEvents(args?: DrainEventsArgs): Promise<RuntimeEventPage> {
+    return this.events.read(args);
+  }
+
+  disposeRuntimeEvents(): void {
+    this.#unsubscribeRuntimeEvents?.();
+    this.#unsubscribeRuntimeEvents = null;
   }
 
   async listThreads(): Promise<AnyRecord[]> {
@@ -124,6 +212,10 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async disconnect(options: { terminateDebuggee?: boolean; restart?: boolean } = {}): Promise<AnyRecord> {
-    return this.dap.disconnect(options);
+    try {
+      return await this.dap.disconnect(options);
+    } finally {
+      this.disposeRuntimeEvents();
+    }
   }
 }

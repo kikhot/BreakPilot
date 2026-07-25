@@ -5,8 +5,11 @@ import type { Socket } from "node:net";
 import test from "node:test";
 
 import { ToolRouter } from "../src/control/ToolRouter.ts";
+import type { DapSession } from "../src/dap/DapSession.ts";
 import { IdeClientRegistry } from "../src/ide/IdeClientRegistry.ts";
 import { IdeMessageTypes } from "../src/ide/IdeProtocol.ts";
+import { RuntimeEventBuffer } from "../src/runtime/RuntimeEventBuffer.ts";
+import { DapRuntimeProvider } from "../src/runtime/providers/DapRuntimeProvider.ts";
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import type { RuntimeProviderCapabilities } from "../src/types/capabilities.ts";
@@ -222,6 +225,60 @@ test("frame, value, context, and set-value path resolution require variable refe
       wait: 0
     }, operation.tool);
   }
+});
+
+test("DAP event drain capability requires a live subscribed event source", () => {
+  let live = false;
+  let subscribed = false;
+  const dap = {
+    sessionId: "dap_event_caps",
+    language: "java",
+    workspaceRoot,
+    capabilities: {},
+    threadId: null,
+    onRuntimeEvent() {
+      subscribed = true;
+      return () => {
+        subscribed = false;
+      };
+    },
+    hasRuntimeEventSource() {
+      return live;
+    }
+  } as unknown as DapSession;
+  const provider = new DapRuntimeProvider(dap, new RuntimeEventBuffer(dap.sessionId));
+
+  assert.equal(subscribed, true);
+  assert.equal(provider.capabilities.eventDrain, "unsupported");
+  live = true;
+  assert.equal(provider.capabilities.eventDrain, "native");
+  provider.disposeRuntimeEvents();
+  assert.equal(subscribed, false);
+  assert.equal(provider.capabilities.eventDrain, "unsupported");
+
+  const withoutEventSource = new DapRuntimeProvider({
+    sessionId: "dap_without_events",
+    language: "java",
+    workspaceRoot,
+    capabilities: {},
+    threadId: null
+  } as unknown as DapSession);
+  assert.equal(withoutEventSource.capabilities.eventDrain, "unsupported");
+});
+
+test("manager event seams remain session-local without enabling IDE event drain", async () => {
+  const { router, manager } = sessionRouter(unsupportedCapabilities);
+  manager.appendRuntimeEvent("operation_caps", { kind: "continued", threadId: 7 });
+
+  assert.deepEqual(
+    manager.readRuntimeEvents("operation_caps", { cursor: 0 }).items.map((event) => event.kind),
+    ["continued"]
+  );
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents"
+  });
+  assert.equal(response.error?.code, ErrorCodes.UNSUPPORTED_CAPABILITY);
 });
 
 const advancedCapabilityCases = [

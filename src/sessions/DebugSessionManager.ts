@@ -18,7 +18,10 @@ import type {
   BreakpointRecord,
   DebugSessionRecord,
   DetailLevel,
+  DrainEventsArgs,
   ProjectBreakpointRecord,
+  RuntimeEvent,
+  RuntimeEventPage,
   SessionSummary,
   ThreadId
 } from "../types/sessions.ts";
@@ -37,6 +40,7 @@ import { SessionOwner, SessionState } from "./SessionOwner.ts";
 import { SessionStore } from "./SessionStore.ts";
 import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../runtime/ProviderCapabilities.ts";
 import type { RuntimeProviderCapabilities } from "../types/capabilities.ts";
+import { RuntimeEventBuffer } from "../runtime/RuntimeEventBuffer.ts";
 
 type DebugToolArgs = AnyRecord & {
   sessionId?: string;
@@ -868,6 +872,17 @@ export class DebugSessionManager {
     await Promise.allSettled(sessions.map((session) => this.#cleanupSession(session, { reason })));
   }
 
+  appendRuntimeEvent(
+    sessionId: string,
+    event: Omit<RuntimeEvent, "sequence" | "timestamp" | "sessionId">
+  ): RuntimeEvent {
+    return this.#runtimeEventsFor(sessionId).append(event);
+  }
+
+  readRuntimeEvents(sessionId: string, args?: DrainEventsArgs): RuntimeEventPage {
+    return this.#runtimeEventsFor(sessionId).read(args);
+  }
+
   async #adoptIdeSession(args: DebugToolArgs = {}): Promise<{ session: DebugSessionRecord; warnings: string[] }> {
     if (!this.ideBridge) {
       throw new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.");
@@ -895,6 +910,7 @@ export class DebugSessionManager {
     }
 
     const sessionId = makeSessionId();
+    const runtimeEvents = new RuntimeEventBuffer(sessionId, this.policy.runtime.maxEventBuffer);
     const provider = new IdeRuntimeProvider({
       sessionId,
       bridge: this.ideBridge,
@@ -913,6 +929,7 @@ export class DebugSessionManager {
       createdAt: new Date().toISOString(),
       providerKind: provider.kind,
       provider,
+      runtimeEvents,
       ideClientId: ideSession.clientId,
       ideSessionId: ideSession.ideSessionId
     };
@@ -1873,7 +1890,8 @@ export class DebugSessionManager {
     const transport = await adapter.createTransport(ctx);
     const client = new DapClient(transport);
     const dap = new DapSession({ sessionId, language, client, workspaceRoot });
-    const provider = new DapRuntimeProvider(dap);
+    const runtimeEvents = new RuntimeEventBuffer(sessionId, this.policy.runtime.maxEventBuffer);
+    const provider = new DapRuntimeProvider(dap, runtimeEvents);
     const record: DebugSessionRecord = {
       sessionId,
       language,
@@ -1884,6 +1902,7 @@ export class DebugSessionManager {
       createdAt: new Date().toISOString(),
       providerKind: provider.kind,
       provider,
+      runtimeEvents,
       dap
     };
     dap.on("stopped", () => {
@@ -1953,12 +1972,21 @@ export class DebugSessionManager {
         }
       }
       session.state = SessionState.TERMINATED;
+      session.provider.disposeRuntimeEvents?.();
       this.breakpoints.clear(session.sessionId);
       this.sessions.remove(session.sessionId);
       return result;
     } finally {
       this.cleaningSessions.delete(session.sessionId);
     }
+  }
+
+  #runtimeEventsFor(sessionId: string): RuntimeEventBuffer {
+    const session = this.sessions.get(sessionId);
+    if (!session.runtimeEvents) {
+      session.runtimeEvents = new RuntimeEventBuffer(sessionId, this.policy.runtime.maxEventBuffer);
+    }
+    return session.runtimeEvents;
   }
 
   async #recoverBreakpointHit(session: DebugSessionRecord): Promise<StoppedEvent | null> {

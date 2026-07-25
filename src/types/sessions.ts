@@ -1,4 +1,5 @@
 import type { DapSession } from "../dap/DapSession.ts";
+import type { RuntimeEventBuffer } from "../runtime/RuntimeEventBuffer.ts";
 import type { RuntimeProviderCapabilities } from "./capabilities.ts";
 import type { DapBreakpoint, StoppedEvent } from "./dap.ts";
 import type {
@@ -111,6 +112,7 @@ export interface RuntimeDebugProvider {
   continue(threadId?: ThreadId | null): Promise<AnyRecord>;
   step(kind: RuntimeStepKind, threadId?: ThreadId | null): Promise<AnyRecord>;
   disconnect(options?: { terminateDebuggee?: boolean; restart?: boolean }): Promise<AnyRecord>;
+  disposeRuntimeEvents?(): void;
 }
 
 export interface BreakpointInput {
@@ -172,6 +174,7 @@ export interface DebugSessionRecord {
   createdAt: string;
   providerKind: RuntimeProviderKind;
   provider: RuntimeDebugProvider;
+  runtimeEvents?: RuntimeEventBuffer;
   dap?: DapSession;
   ideClientId?: string;
   ideSessionId?: string;

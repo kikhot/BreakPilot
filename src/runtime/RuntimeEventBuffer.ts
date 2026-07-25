@@ -74,7 +74,7 @@ function normalizeMetadataValue(value: unknown): JsonScalar | JsonScalar[] | und
   return value.filter(isJsonScalar);
 }
 
-function normalizeMetadata(value: unknown): AnyRecord | undefined {
+export function normalizeRuntimeEventMetadata(value: unknown): AnyRecord | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
 
   const normalized: Partial<Record<RuntimeMetadataKey, JsonScalar | JsonScalar[]>> = {};
@@ -100,7 +100,7 @@ function copyEvent(event: RuntimeEvent): RuntimeEvent {
   if (event.category !== undefined) copy.category = event.category;
   if (event.position !== undefined) copy.position = normalizeRecord(event.position) ?? {};
   if (event.data !== undefined) {
-    const data = normalizeMetadata(event.data);
+    const data = normalizeRuntimeEventMetadata(event.data);
     if (data !== undefined) copy.data = data;
   }
   return copy;
@@ -139,7 +139,7 @@ export class RuntimeEventBuffer {
     if (typeof event.category === "string") normalized.category = event.category;
     const position = normalizeRecord(event.position);
     if (position !== undefined) normalized.position = position;
-    const data = normalizeMetadata(event.data);
+    const data = normalizeRuntimeEventMetadata(event.data);
     if (data !== undefined) normalized.data = data;
 
     this.#events.push(normalized);
