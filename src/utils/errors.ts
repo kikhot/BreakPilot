@@ -1,4 +1,6 @@
-import type { ToolResponse } from "../types/control.ts";
+import { types } from "node:util";
+import { validateToolOutput } from "../control/ToolInputValidator.ts";
+import type { JsonSchema, ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
 
 export const ErrorCodes = Object.freeze({
@@ -50,6 +52,42 @@ export class BreakPilotError extends Error {
 }
 
 const UNKNOWN_TOOL_FAILURE_MESSAGE = "Unknown tool failure.";
+const SAFE_ERROR_DETAILS_SCHEMA: JsonSchema = {
+  type: "object",
+  additionalProperties: true
+};
+
+function unknownToolFailurePayload(): { code: string; message: string } {
+  return {
+    code: ErrorCodes.TOOL_FAILED,
+    message: UNKNOWN_TOOL_FAILURE_MESSAGE
+  };
+}
+
+function normalizeErrorDetails(value: unknown): AnyRecord | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || types.isProxy(value)) {
+    return null;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+
+  const normalized: AnyRecord = {};
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return null;
+    if (descriptor.value === undefined) continue;
+    Object.defineProperty(normalized, key, {
+      value: descriptor.value,
+      writable: true,
+      enumerable: true,
+      configurable: true
+    });
+  }
+  return validateToolOutput(SAFE_ERROR_DETAILS_SCHEMA, normalized).errors.length === 0
+    ? normalized
+    : null;
+}
 
 function safeErrorMessage(error: unknown): string {
   try {
@@ -69,19 +107,32 @@ export function toErrorPayload(error: unknown): {
   details?: AnyRecord;
 } {
   try {
+    if (typeof error === "object" && error !== null && types.isProxy(error)) {
+      return unknownToolFailurePayload();
+    }
     if (error instanceof BreakPilotError) {
+      const code = Object.getOwnPropertyDescriptor(error, "code");
+      const message = Object.getOwnPropertyDescriptor(error, "message");
+      const details = Object.getOwnPropertyDescriptor(error, "details");
+      const normalizedDetails = details && "value" in details
+        ? normalizeErrorDetails(details.value)
+        : null;
+      if (
+        !code || !("value" in code) || typeof code.value !== "string" ||
+        !message || !("value" in message) || typeof message.value !== "string" ||
+        normalizedDetails === null
+      ) {
+        return unknownToolFailurePayload();
+      }
       const payload: { code: string; message: string; details?: AnyRecord } = {
-        code: error.code,
-        message: error.message
+        code: code.value,
+        message: message.value
       };
-      const details = Object.fromEntries(
-        Object.entries(error.details).filter(([, value]) => value !== undefined)
-      );
-      if (Object.keys(details).length > 0) payload.details = details;
+      if (Object.keys(normalizedDetails).length > 0) payload.details = normalizedDetails;
       return payload;
     }
   } catch {
-    // Fall through to the non-throwing generic failure payload.
+    return unknownToolFailurePayload();
   }
   return {
     code: ErrorCodes.TOOL_FAILED,

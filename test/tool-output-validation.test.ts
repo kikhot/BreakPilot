@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { ToolRouter } from "../src/control/ToolRouter.ts";
 import { validateToolInput, validateToolOutput } from "../src/control/ToolInputValidator.ts";
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
@@ -256,4 +259,70 @@ assert.deepEqual(hostileAuditRecords, [{
   }
 }]);
 assert.equal(JSON.stringify(hostileAuditRecords).includes("must-not-reach-audit"), false);
+
+const malformedBreakPilotAuditDirectory = fs.mkdtempSync(
+  path.join(os.tmpdir(), "breakpilot-malformed-error-")
+);
+try {
+  const auditFile = path.join(malformedBreakPilotAuditDirectory, "audit.jsonl");
+  const policy = loadPolicy("breakpilot.yaml");
+  policy.audit = { enabled: true, file: auditFile };
+  const manager = new DebugSessionManager({ policy });
+  const router = new ToolRouter(manager);
+  const malformedMessage = new BreakPilotError(
+    "PRIVATE_MESSAGE_CODE",
+    "must-not-reach-audit-message"
+  );
+  malformedMessage.message = 1n as unknown as string;
+  const malformedDetails = new BreakPilotError(
+    "PRIVATE_DETAILS_CODE",
+    "must-not-reach-audit-details",
+    {
+      secret: "must-not-reach-audit-secret",
+      nested: { value: 1n }
+    }
+  );
+
+  for (const malformedError of [malformedMessage, malformedDetails]) {
+    manager.bpDebugStatus = async () => {
+      throw malformedError;
+    };
+    let response: ToolResponse | undefined;
+    await assert.doesNotReject(async () => {
+      response = await router.callTool("bp_debug_status", {});
+    }, "malformed BreakPilotError fields must not escape the router boundary");
+    assert.deepEqual(response, {
+      error: {
+        code: "TOOL_FAILED",
+        message: "Unknown tool failure."
+      }
+    });
+  }
+
+  const auditText = fs.readFileSync(auditFile, "utf8");
+  const auditEntries = auditText.trim().split("\n").map((line) => JSON.parse(line) as AnyRecord);
+  assert.deepEqual(auditEntries.map(({ type, name, message, code }) => ({
+    type,
+    name,
+    message,
+    code
+  })), [
+    {
+      type: "tool_failed",
+      name: "bp_debug_status",
+      message: "Unknown tool failure.",
+      code: "TOOL_FAILED"
+    },
+    {
+      type: "tool_failed",
+      name: "bp_debug_status",
+      message: "Unknown tool failure.",
+      code: "TOOL_FAILED"
+    }
+  ]);
+  assert.equal(auditText.includes("must-not-reach-audit"), false);
+  assert.equal(auditText.includes("PRIVATE_"), false);
+} finally {
+  fs.rmSync(malformedBreakPilotAuditDirectory, { recursive: true, force: true });
+}
 console.log("tool output validation tests ok");

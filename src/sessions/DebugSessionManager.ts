@@ -1253,7 +1253,9 @@ export class DebugSessionManager {
     });
     if (candidates.length === 0) {
       throw new BreakPilotError(ErrorCodes.SESSION_NOT_FOUND, "No active debug session is available.", {
-        projectPath: args.projectPath ?? args.workspace
+        ...(args.projectPath ?? args.workspace
+          ? { projectPath: args.projectPath ?? args.workspace }
+          : {})
       });
     }
     const selected = this.#selectSessionCandidate(candidates);
