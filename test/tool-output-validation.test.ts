@@ -52,4 +52,28 @@ assert.deepEqual(
   nonJsonOutputs.map(() => [jsonCompatibleObjectIssue])
 );
 assert.equal(accessorReads, 0, "output validation must not invoke accessors");
+
+let proxyAccessorReads = 0;
+const proxyAccessorTarget = {};
+Object.defineProperty(proxyAccessorTarget, "unsafe", {
+  get() {
+    proxyAccessorReads += 1;
+    return "accessed";
+  },
+  enumerable: true,
+  configurable: true
+});
+const accessorConcealingProxy = new Proxy(proxyAccessorTarget, {
+  getOwnPropertyDescriptor(target, property) {
+    if (property === "unsafe") {
+      return { value: "safe", writable: true, enumerable: true, configurable: true };
+    }
+    return Reflect.getOwnPropertyDescriptor(target, property);
+  }
+});
+assert.deepEqual(
+  validateToolOutput({ type: "object", enum: [{ unsafe: "accessed" }] }, accessorConcealingProxy).errors,
+  [jsonCompatibleObjectIssue]
+);
+assert.equal(proxyAccessorReads, 0, "output validation must reject proxies before property reads");
 console.log("tool output validation tests ok");

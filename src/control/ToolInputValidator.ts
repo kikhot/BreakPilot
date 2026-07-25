@@ -3,6 +3,7 @@ import type {
   ToolValidationIssue,
   ToolValidationResult
 } from "../types/control.ts";
+import { types } from "node:util";
 import type { AnyRecord } from "../types/json.ts";
 
 interface NodeValidationResult {
@@ -273,6 +274,7 @@ function preflightOutputSafety(
     return Number.isFinite(value) ? undefined : jsonCompatibilityIssue();
   }
   if (typeof value !== "object") return jsonCompatibilityIssue();
+  if (types.isProxy(value)) return jsonCompatibilityIssue();
 
   if (active.has(value)) return jsonCompatibilityIssue();
   if (seen.has(value)) return undefined;
