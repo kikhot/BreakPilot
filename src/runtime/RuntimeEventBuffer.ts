@@ -24,6 +24,7 @@ export const runtimeEventKinds = [
 const DEFAULT_CAPACITY = 256;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 256;
+const MAX_METADATA_ARRAY_ITEMS = 256;
 const runtimeMetadataKeys = [
   "reason",
   "description",
@@ -59,19 +60,42 @@ function isJsonScalar(value: unknown): value is JsonScalar {
 
 function normalizeMetadataValue(value: unknown): JsonScalar | JsonScalar[] | undefined {
   if (isJsonScalar(value)) return value;
-  if (!Array.isArray(value)) return undefined;
-  return value.filter(isJsonScalar);
+  try {
+    if (!Array.isArray(value)) return undefined;
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (!lengthDescriptor || !("value" in lengthDescriptor) ||
+      typeof lengthDescriptor.value !== "number" || !Number.isInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0) {
+      return undefined;
+    }
+
+    const normalized: JsonScalar[] = [];
+    const length = Math.min(lengthDescriptor.value, MAX_METADATA_ARRAY_ITEMS);
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor) || !isJsonScalar(descriptor.value)) continue;
+      normalized.push(descriptor.value);
+    }
+    return normalized;
+  } catch {
+    return undefined;
+  }
 }
 
 export function normalizeRuntimeEventMetadata(value: unknown): AnyRecord | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (typeof value !== "object" || value === null) return undefined;
 
   const normalized: Partial<Record<RuntimeMetadataKey, JsonScalar | JsonScalar[]>> = {};
-  for (const key of runtimeMetadataKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor || !("value" in descriptor)) continue;
-    const normalizedValue = normalizeMetadataValue(descriptor.value);
-    if (normalizedValue !== undefined) normalized[key] = normalizedValue;
+  try {
+    if (Array.isArray(value)) return undefined;
+    for (const key of runtimeMetadataKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) continue;
+      const normalizedValue = normalizeMetadataValue(descriptor.value);
+      if (normalizedValue !== undefined) normalized[key] = normalizedValue;
+    }
+  } catch {
+    return undefined;
   }
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }

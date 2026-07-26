@@ -459,6 +459,179 @@ test("revoked position proxies do not throw, leak, or create event sequence hole
   assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
 });
 
+test("revoked metadata proxies do not throw, leak, or create event sequence holes", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  const { proxy: revokedData, revoke } = Proxy.revocable({}, {});
+  revoke();
+
+  assert.doesNotThrow(() => manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    data: revokedData
+  }));
+  manager.appendRuntimeEvent("operation_caps", { kind: "continued" });
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 2
+  });
+
+  assert.equal(response.error, undefined);
+  const items = (response.events as AnyRecord).items as AnyRecord[];
+  assert.deepEqual(items.map((item) => item.sequence), [1, 2]);
+  assert.equal("data" in (items[0] ?? {}), false);
+  const outputSchema = toolOutputSchemas.bp_debug_control;
+  assert.ok(outputSchema);
+  assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
+});
+
+test("metadata descriptor traps do not throw, leak, or create event sequence holes", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  const hostileData = new Proxy({}, {
+    getOwnPropertyDescriptor() {
+      throw new Error("hostile metadata");
+    }
+  });
+
+  assert.doesNotThrow(() => manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    data: hostileData
+  }));
+  manager.appendRuntimeEvent("operation_caps", { kind: "continued" });
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 2
+  });
+
+  assert.equal(response.error, undefined);
+  const items = (response.events as AnyRecord).items as AnyRecord[];
+  assert.deepEqual(items.map((item) => item.sequence), [1, 2]);
+  assert.equal("data" in (items[0] ?? {}), false);
+  const outputSchema = toolOutputSchemas.bp_debug_control;
+  assert.ok(outputSchema);
+  assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
+});
+
+test("metadata normalization skips accessors and retains allowlisted scalar data", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  let getterCalls = 0;
+  const data = {
+    description: "paused",
+    processId: 42,
+    hitBreakpointIds: ["bp-1", 2, false, null, { secret: true }],
+    areas: ["stacks", true],
+    arbitrary: "drop",
+    nested: { secret: true }
+  };
+  Object.defineProperty(data, "reason", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return "must-not-run";
+    }
+  });
+
+  manager.appendRuntimeEvent("operation_caps", { kind: "stopped", data });
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 1
+  });
+
+  assert.equal(getterCalls, 0);
+  assert.equal(response.error, undefined);
+  const item = (response.events as AnyRecord).items[0] as AnyRecord;
+  assert.deepEqual(item.data, {
+    description: "paused",
+    processId: 42,
+    hitBreakpointIds: ["bp-1", 2, false, null],
+    areas: ["stacks", true]
+  });
+  const outputSchema = toolOutputSchemas.bp_debug_control;
+  assert.ok(outputSchema);
+  assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
+});
+
+test("hostile inner metadata values are omitted without discarding safe metadata", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  const { proxy: revokedAreas, revoke } = Proxy.revocable([], {});
+  revoke();
+
+  assert.doesNotThrow(() => manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    data: { reason: "breakpoint", areas: revokedAreas }
+  }));
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 1
+  });
+
+  assert.equal(response.error, undefined);
+  assert.deepEqual((response.events as AnyRecord).items[0]?.data, { reason: "breakpoint" });
+});
+
+test("metadata arrays retain scalar values without invoking proxy property getters", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  let propertyReads = 0;
+  const guardedAreas = new Proxy(["stacks", true, null, { secret: true }], {
+    get() {
+      propertyReads += 1;
+      throw new Error("metadata array property read");
+    }
+  });
+
+  assert.doesNotThrow(() => manager.appendRuntimeEvent("operation_caps", {
+    kind: "invalidated",
+    data: { areas: guardedAreas }
+  }));
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 1
+  });
+
+  assert.equal(propertyReads, 0);
+  assert.equal(response.error, undefined);
+  assert.deepEqual((response.events as AnyRecord).items[0]?.data, {
+    areas: ["stacks", true, null]
+  });
+});
+
 const advancedCapabilityCases = [
   { field: "condition", value: "answer > 0", capability: "conditionalBreakpoints" },
   { field: "hitCondition", value: "2", capability: "hitConditionalBreakpoints" },
