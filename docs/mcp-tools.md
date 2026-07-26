@@ -256,6 +256,13 @@ be proved, the call fails with `RUN_TO_LINE_CLEANUP_FAILED` and
 `cleanupRequired:true`; agents should inspect/reconcile breakpoints before
 retrying.
 
+While run-to-line owns its execution lease, breakpoint mutations and mutating
+`bp_debug_control` actions (`pause`, `resume`, steps, `stop`, and `disconnect`)
+fail with `SESSION_OWNER_CONFLICT`. Wait for the run-to-line result before
+issuing another control command. DAP terminal state is authoritative even when
+a stop arrives first or the adapter exits while a request is pending: the
+result is `stopped + targetReached:false`, never a stale paused success.
+
 ### `bp_debug_status`
 
 Status defaults to a compact agent view: active BreakPilot sessions for the

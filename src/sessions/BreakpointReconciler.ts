@@ -50,6 +50,14 @@ export interface TemporaryBreakpointTransaction<T> {
   cleanedUp: true;
 }
 
+export interface TemporaryBreakpointTransactionOptions {
+  /**
+   * Called synchronously after the source lock is acquired and immediately
+   * before the temporary breakpoint is sent to the adapter.
+   */
+  assertCanApply?: () => void;
+}
+
 const sourceLocksByManager = new WeakMap<BreakpointManager, SourceLockMap>();
 const GENERIC_PROVIDER_FAILURE_CODE = "PROVIDER_REPLACEMENT_FAILED";
 const RETRY_RECOMMENDATION = "Retry the breakpoint update after confirming the debugger is responsive.";
@@ -109,7 +117,8 @@ export class BreakpointReconciler {
   async withTemporaryBreakpoint<T>(
     session: DebugSessionRecord,
     request: TemporaryBreakpointRequest,
-    callback: (context: TemporaryBreakpointExecutionContext) => Promise<T>
+    callback: (context: TemporaryBreakpointExecutionContext) => Promise<T>,
+    options: TemporaryBreakpointTransactionOptions = {}
   ): Promise<TemporaryBreakpointTransaction<T>> {
     const dap = session.dap;
     if (!dap) {
@@ -130,6 +139,11 @@ export class BreakpointReconciler {
       const desired = [...original.map((breakpoint) => this.#clone(breakpoint)), this.#clone(temporary)];
       const affectedIds = [...original.map((breakpoint) => breakpoint.id), temporary.id]
         .sort((left, right) => this.#compareSourceKeys(left, right));
+
+      // Lock acquisition may have waited while another control operation
+      // resumed the debuggee. The caller's precondition must hold immediately
+      // before the first temporary mutation, not just at API entry.
+      options.assertCanApply?.();
 
       let primaryError: unknown;
       let primaryFailed = false;

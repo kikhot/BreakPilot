@@ -453,11 +453,11 @@ export class DapSession extends EventEmitter {
     threadId: number | null = this.threadId,
     levels = 20
   ): Promise<{ threadId: number | null; stackFrames: DapStackFrame[]; totalFrames?: number }> {
-    if (!threadId) {
+    if (threadId == null) {
       const threads = await this.threads();
-      threadId = threads[0]?.id;
+      threadId = (threads[0]?.id as number | undefined) ?? null;
     }
-    if (!threadId) return { threadId: null, stackFrames: [] };
+    if (threadId == null) return { threadId: null, stackFrames: [] };
     const response = await this.client.request("stackTrace", {
       threadId,
       startFrame: 0,
@@ -510,19 +510,19 @@ export class DapSession extends EventEmitter {
   }
 
   async pause(threadId: number | null = this.threadId): Promise<AnyRecord> {
-    return this.client.request("pause", threadId ? { threadId } : {});
+    return this.client.request("pause", threadId === null ? {} : { threadId });
   }
 
   async continue(threadId: number | null = this.threadId): Promise<AnyRecord> {
     let resolved = threadId;
-    if (!resolved) {
+    if (resolved === null) {
       // No thread has been selected yet (e.g. attach to a VM suspended at
       // startup before any stopped event). Fall back to the first live thread
       // so the runtime can be resumed.
       const threads = await this.threads();
       resolved = (threads[0]?.id as number | undefined) ?? null;
     }
-    if (!resolved) {
+    if (resolved === null) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "threadId is required for continue.");
     }
     this.threadId = resolved;

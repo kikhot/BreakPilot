@@ -233,6 +233,12 @@ DAP 只有在 live adapter 可提供因果 target proof 时才使用原生 `goto
 `cleanedUp:true`。若无法证明恢复，调用会返回 `RUN_TO_LINE_CLEANUP_FAILED` 与
 `cleanupRequired:true`；Agent 应先检查/协调断点状态后再重试。
 
+run-to-line 持有执行租约期间，断点 mutation 以及会改变执行状态的
+`bp_debug_control` 动作（`pause`、`resume`、step、`stop`、`disconnect`）都会以
+`SESSION_OWNER_CONFLICT` 拒绝。Agent 应等待本次 run-to-line 返回后再发起下一条控制命令。
+对于 DAP，即使先收到 stopped，或 adapter 在请求等待期间退出，terminal 状态也始终优先：
+结果是 `stopped + targetReached:false`，不会保留过期的 paused 成功表述。
+
 ### `bp_debug_status`
 
 默认 status 是紧凑 agent 视图：当前项目 live sessions 和简短 IDE bridge 状态。

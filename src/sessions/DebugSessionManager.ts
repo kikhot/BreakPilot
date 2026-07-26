@@ -340,6 +340,18 @@ export class DebugSessionManager {
       throw error;
     }
 
+    if (
+      action === "pause" ||
+      action === "resume" ||
+      action === "stepOver" ||
+      action === "stepInto" ||
+      action === "stepOut" ||
+      action === "disconnect" ||
+      action === "stop"
+    ) {
+      this.#assertSessionMutationAllowed(session, action);
+    }
+
     if (action === "pause") {
       if (session.provider.capabilities.pause === "unsupported" || !session.provider.pause) {
         throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support pause.", {
@@ -485,7 +497,7 @@ export class DebugSessionManager {
       });
       return ok(session.sessionId, result as AnyRecord, auditId);
     } catch (error) {
-      this.#applyRunToLineFailureState(session, error);
+      this.#applyRunToLineFailureState(session);
       throw error;
     } finally {
       this.coordinator.endExecution(session);
@@ -852,7 +864,7 @@ export class DebugSessionManager {
     if (session.providerKind !== "ide") {
       this.coordinator.assertCanControl(session, SessionOwner.MCP, "set breakpoint");
     }
-    this.#assertBreakpointMutationAllowed(session, "set breakpoint");
+    this.#assertSessionMutationAllowed(session, "set breakpoint");
     this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.providerKind);
     const file = this.security.assertWorkspacePath(args.file);
     this.audit.record("bp_debug_session_set_breakpoint_requested", {
@@ -923,7 +935,7 @@ export class DebugSessionManager {
       this.#throwBreakpointUpdateUnsupported(session.sessionId, session.providerKind);
     }
     this.coordinator.assertCanControl(session, SessionOwner.MCP, "update breakpoint");
-    this.#assertBreakpointMutationAllowed(session, "update breakpoint");
+    this.#assertSessionMutationAllowed(session, "update breakpoint");
     this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.providerKind);
 
     const patch = this.#breakpointPatchRequest(session, args);
@@ -1009,7 +1021,7 @@ export class DebugSessionManager {
     if (!breakpointId) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "breakpointId is required.");
     }
-    this.#assertBreakpointMutationAllowed(session, "remove breakpoint");
+    this.#assertSessionMutationAllowed(session, "remove breakpoint");
     this.audit.record("bp_debug_session_remove_breakpoint_requested", {
       sessionId: session.sessionId,
       breakpointId
@@ -2299,12 +2311,12 @@ export class DebugSessionManager {
     this.#dapTerminationTimers.delete(sessionId);
   }
 
-  #assertBreakpointMutationAllowed(session: DebugSessionRecord, operation: string): void {
+  #assertSessionMutationAllowed(session: DebugSessionRecord, operation: string): void {
     const active = this.coordinator.executionLocks.get(session.sessionId);
     if (!active) return;
     throw new BreakPilotError(
       ErrorCodes.SESSION_OWNER_CONFLICT,
-      "Breakpoint mutation is not safe while an execution-control operation is in progress.",
+      "Session mutation is not safe while an execution-control operation is in progress.",
       {
         sessionId: session.sessionId,
         operation,
@@ -2313,8 +2325,8 @@ export class DebugSessionManager {
     );
   }
 
-  #applyRunToLineFailureState(session: DebugSessionRecord, error: unknown): void {
-    if (!(error instanceof BreakPilotError) || error.code !== ErrorCodes.RUN_TO_LINE_CLEANUP_FAILED) return;
+  #applyRunToLineFailureState(session: DebugSessionRecord): void {
+    if (session.providerKind !== "dap" || !session.dap) return;
     if (session.dap?.terminated || session.state === SessionState.TERMINATED) {
       session.state = SessionState.TERMINATED;
       return;

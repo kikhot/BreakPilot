@@ -37,6 +37,10 @@ class ScriptedDapClient extends EventEmitter {
   gotoFrame: DapStackFrame = frame("/workspace/Foo.java", 20, 5);
   continueFrame: DapStackFrame = frame("/workspace/Foo.java", 20, 5);
   setBreakpointFailures = new Map<number, Error>();
+  continuedBeforeResponse = new Set<string>();
+  exitBeforeResponse = new Set<string>();
+  deferGotoDispatch = false;
+  terminateAfterStop = false;
   continueFailure: Error | null = null;
   setBreakpointCalls = 0;
 
@@ -58,6 +62,11 @@ class ScriptedDapClient extends EventEmitter {
 
   async request(command: string, arguments_: AnyRecord = {}): Promise<AnyRecord> {
     this.requests.push({ command, arguments: structuredClone(arguments_) });
+    if (this.continuedBeforeResponse.has(command)) this.emit("continued", { threadId: 7 });
+    if (this.exitBeforeResponse.has(command)) {
+      this.emit("exit", { command });
+      throw new BreakPilotError(ErrorCodes.TARGET_PROCESS_EXITED, "Scripted adapter exited during request.", { command });
+    }
     if (command === "gotoTargets") return { targets: structuredClone(this.targets) };
     if (command === "threads") return { threads: structuredClone(this.threads) };
     if (command === "stackTrace") {
@@ -78,6 +87,10 @@ class ScriptedDapClient extends EventEmitter {
       };
     }
     if (command === "goto") {
+      if (this.deferGotoDispatch) {
+        setTimeout(() => this.#dispatch(this.gotoOutcome, this.gotoFrame), 0);
+        return {};
+      }
       this.#dispatch(this.gotoOutcome, this.gotoFrame);
       await Promise.resolve();
       return {};
@@ -103,6 +116,7 @@ class ScriptedDapClient extends EventEmitter {
     // This arrives synchronously before the request promise settles, exercising
     // the Task 4 causal boundary rather than a mock-only ordering assertion.
     this.emitStopped({ reason: outcome === "target" ? "goto" : "breakpoint", threadId: 7 });
+    if (this.terminateAfterStop) this.emitTerminated();
   }
 }
 
@@ -252,6 +266,7 @@ function createFixture(options: {
   dap: DapSession;
   provider: DapRuntimeProvider;
   breakpoints: BreakpointManager;
+  reconciler: BreakpointReconciler;
   record: DebugSessionRecord;
   highLevelSetBreakpoints: HighLevelBreakpointCall[];
 } {
@@ -312,7 +327,7 @@ function createFixture(options: {
     provider,
     dap
   };
-  return { client, dap, provider, breakpoints, record, highLevelSetBreakpoints };
+  return { client, dap, provider, breakpoints, reconciler, record, highLevelSetBreakpoints };
 }
 
 test("native run-to-line records a target stop emitted before the goto response", async () => {
@@ -417,6 +432,69 @@ test("native run-to-line ignores stale stops and truthfully returns unrelated, t
   assert.equal((timeout.dap as unknown as { isPaused?: boolean }).isPaused, false, "timeout must not leave a false paused state");
 });
 
+test("run-to-line gives terminal truth when a fresh stop is immediately followed by termination", async () => {
+  const native = createFixture();
+  native.client.deferGotoDispatch = true;
+  native.client.terminateAfterStop = true;
+
+  const nativeResult = await run(native.provider, {
+    filePath: "/workspace/Foo.java",
+    line: 20,
+    threadId: 7,
+    timeoutMs: 100
+  });
+  assert.equal(nativeResult.status, "stopped");
+  assert.equal(nativeResult.targetReached, false);
+  assert.equal(nativeResult.cleanedUp, true);
+  assert.equal(native.dap.terminated, true);
+  assert.equal(native.dap.isPaused, false);
+
+  const fallback = createFixture({ native: false, fallback: true });
+  fallback.client.continueOutcome = "target";
+  fallback.client.terminateAfterStop = true;
+  const fallbackResult = await run(fallback.provider, {
+    filePath: "/workspace/Foo.java",
+    line: 20,
+    threadId: 7,
+    timeoutMs: 100
+  });
+  assert.equal(fallbackResult.status, "stopped");
+  assert.equal(fallbackResult.targetReached, false);
+  assert.equal(fallbackResult.cleanedUp, true);
+  assert.equal(fallback.dap.terminated, true);
+  assert.equal(fallback.dap.isPaused, false);
+});
+
+test("run-to-line maps a terminal adapter request rejection after cleanup", async () => {
+  const native = createFixture();
+  native.client.exitBeforeResponse.add("goto");
+  const nativeResult = await run(native.provider, {
+    filePath: "/workspace/Foo.java",
+    line: 20,
+    threadId: 7,
+    timeoutMs: 100
+  });
+  assert.equal(nativeResult.status, "stopped");
+  assert.equal(nativeResult.targetReached, false);
+  assert.equal(nativeResult.cleanedUp, true);
+  assert.equal(native.dap.terminated, true);
+
+  const fallback = createFixture({ native: false, fallback: true });
+  fallback.client.exitBeforeResponse.add("continue");
+  const fallbackResult = await run(fallback.provider, {
+    filePath: "/workspace/Foo.java",
+    line: 20,
+    threadId: 7,
+    timeoutMs: 100
+  });
+  assert.equal(fallbackResult.status, "stopped");
+  assert.equal(fallbackResult.targetReached, false);
+  assert.equal(fallbackResult.cleanedUp, true);
+  assert.equal(fallback.dap.terminated, true);
+  assert.equal(fallback.client.setBreakpointCalls, 2, "fallback must restore before publishing terminal truth");
+  assert.deepEqual(fallback.breakpoints.listForSource(fallback.record.sessionId, "/workspace/Foo.java"), []);
+});
+
 test("DAP run-to-line rejects unsafe source, non-paused state, and nonnumeric thread before mutation", async () => {
   const unsafe = createFixture();
   await expectCode(
@@ -443,6 +521,69 @@ test("DAP run-to-line rejects unsafe source, non-paused state, and nonnumeric th
     ErrorCodes.INVALID_ARGUMENT
   );
   assert.equal(invalidThread.client.requests.length, 0);
+});
+
+test("fallback run-to-line preserves an explicit zero DAP thread id", async () => {
+  const { client, dap, provider } = createFixture({ native: false, fallback: true });
+  client.threads = [{ id: 99, name: "fallback-only" }];
+
+  const result = await run(provider, {
+    filePath: "/workspace/Foo.java",
+    line: 20,
+    threadId: 0,
+    timeoutMs: 100
+  });
+  assert.equal(result.status, "paused");
+  assert.deepEqual(requestCommands(client, "continue"), [{
+    command: "continue",
+    arguments: { threadId: 0 }
+  }]);
+  assert.equal(requestCommands(client, "threads").length, 0, "an explicit zero must not be replaced by another thread");
+
+  client.requests.length = 0;
+  await dap.stackTrace(0, 1);
+  assert.deepEqual(requestCommands(client, "stackTrace"), [{
+    command: "stackTrace",
+    arguments: { threadId: 0, startFrame: 0, levels: 1 }
+  }]);
+});
+
+test("DAP stack lookup returns an empty result when no fallback thread exists", async () => {
+  const { client, dap } = createFixture();
+  client.threads = [];
+  client.requests.length = 0;
+
+  const stack = await dap.stackTrace(null, 1);
+  assert.deepEqual(stack, { threadId: null, stackFrames: [] });
+  assert.equal(requestCommands(client, "threads").length, 1);
+  assert.equal(requestCommands(client, "stackTrace").length, 0);
+});
+
+test("native run-to-line rechecks pause state after thread and target lookup waits", async () => {
+  const afterThreadLookup = createFixture();
+  afterThreadLookup.dap.threadId = null;
+  afterThreadLookup.client.continuedBeforeResponse.add("threads");
+  await expectCode(
+    run(afterThreadLookup.provider, { filePath: "/workspace/Foo.java", line: 20, timeoutMs: 100 }),
+    ErrorCodes.INVALID_ARGUMENT
+  );
+  assert.equal(requestCommands(afterThreadLookup.client, "threads").length, 1);
+  assert.equal(requestCommands(afterThreadLookup.client, "gotoTargets").length, 0);
+  assert.equal(requestCommands(afterThreadLookup.client, "goto").length, 0);
+
+  const afterTargetLookup = createFixture();
+  afterTargetLookup.client.continuedBeforeResponse.add("gotoTargets");
+  await expectCode(
+    run(afterTargetLookup.provider, {
+      filePath: "/workspace/Foo.java",
+      line: 20,
+      threadId: 7,
+      timeoutMs: 100
+    }),
+    ErrorCodes.INVALID_ARGUMENT
+  );
+  assert.equal(requestCommands(afterTargetLookup.client, "gotoTargets").length, 1);
+  assert.equal(requestCommands(afterTargetLookup.client, "goto").length, 0);
 });
 
 test("concrete DAP fallback capability requires manager wiring when goto is unavailable", async () => {
@@ -511,6 +652,61 @@ test("fallback run-to-line preserves every source breakpoint, resumes once, and 
     [agent.id, user.id].sort(),
     "local desired state must be restored only after complete provider evidence"
   );
+});
+
+test("fallback run-to-line rechecks pause state before temporary mutation after a source-lock wait", async () => {
+  const { client, dap, provider, reconciler, record } = createFixture({ native: false, fallback: true });
+  let releaseHeld!: () => void;
+  let markHeld!: () => void;
+  const hold = new Promise<void>((resolve) => { releaseHeld = resolve; });
+  const held = new Promise<void>((resolve) => { markHeld = resolve; });
+  const incumbent = reconciler.withTemporaryBreakpoint(
+    record,
+    { filePath: "/workspace/Foo.java", line: 5 },
+    async () => {
+      markHeld();
+      await hold;
+      return undefined;
+    }
+  );
+  await held;
+
+  const contender = run(provider, {
+    filePath: "/workspace/Foo.java",
+    line: 20,
+    threadId: 7,
+    timeoutMs: 100
+  });
+  await Promise.resolve();
+  client.emit("continued", { threadId: 7 });
+  releaseHeld();
+  await incumbent;
+
+  await expectCode(contender, ErrorCodes.INVALID_ARGUMENT);
+  assert.equal(requestCommands(client, "continue").length, 0);
+  assert.equal(client.setBreakpointCalls, 2, "only the incumbent apply and restore may reach the adapter");
+  assert.equal(dap.isPaused, false);
+});
+
+test("fallback run-to-line rechecks pause state before its single continue", async () => {
+  const { client, provider, breakpoints, record, highLevelSetBreakpoints } = createFixture({
+    native: false,
+    fallback: true
+  });
+  client.continuedBeforeResponse.add("setBreakpoints");
+
+  await expectCode(
+    run(provider, {
+      filePath: "/workspace/Foo.java",
+      line: 20,
+      threadId: 7,
+      timeoutMs: 100
+    }),
+    ErrorCodes.INVALID_ARGUMENT
+  );
+  assert.equal(requestCommands(client, "continue").length, 0);
+  assert.equal(highLevelSetBreakpoints.length, 2, "the temporary mutation must still be restored");
+  assert.deepEqual(breakpoints.listForSource(record.sessionId, "/workspace/Foo.java"), []);
 });
 
 test("fallback returns real fresh outcomes and exposes indeterminate cleanup instead of fabricating success", async () => {
@@ -755,6 +951,75 @@ test("manager marks an indeterminate post-dispatch cleanup failure as running", 
   assert.equal(manager.sessions.get(record.sessionId).state, "running");
 });
 
+test("manager derives running state after a dispatched DAP request fails", async () => {
+  const policy = loadPolicy("breakpilot.yaml");
+  const manager = new DebugSessionManager({ policy });
+  const workspaceRoot = policy.workspace.root;
+  const dapState = { isPaused: true, terminated: false };
+  const provider: RuntimeDebugProvider = {
+    kind: "dap",
+    sessionId: "run_to_line_dispatch_failure_state",
+    language: "java",
+    workspaceRoot,
+    capabilities: {
+      pause: "native",
+      stepping: "native",
+      runToLine: "native",
+      variableReferences: "native",
+      setValue: "unsupported",
+      breakpointUpdate: "fallback",
+      conditionalBreakpoints: "unsupported",
+      hitConditionalBreakpoints: "unsupported",
+      tracepoints: "unsupported",
+      eventDrain: "unsupported"
+    },
+    threadId: 7,
+    async setBreakpoints() { return []; },
+    async waitForBreakpoint() { return { reason: "breakpoint", threadId: 7 }; },
+    async runToLine() {
+      // This models DapRuntimeProvider after it has called markRunning() but
+      // before the adapter rejects its dispatched `goto` request.
+      dapState.isPaused = false;
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP goto request failed after dispatch.");
+    },
+    async getRuntimeSnapshot() {
+      return {
+        sessionId: "run_to_line_dispatch_failure_state",
+        source: "headless" as const,
+        language: "java",
+        threadId: 7,
+        frameId: null,
+        stackFrames: [],
+        variables: {},
+        limits: { maxDepth: 1, maxItems: 1, maxStringLength: 1 }
+      };
+    },
+    async evaluate() { return {}; },
+    async continue() { return {}; },
+    async step() { return {}; },
+    async disconnect() { return {}; }
+  };
+  const record: DebugSessionRecord = {
+    sessionId: provider.sessionId,
+    language: provider.language,
+    workspaceRoot,
+    mode: "headless",
+    owner: "mcp",
+    state: "paused",
+    createdAt: new Date(0).toISOString(),
+    providerKind: "dap",
+    provider,
+    dap: dapState as unknown as DapSession
+  };
+  manager.sessions.add(record);
+
+  await expectCode(
+    manager.bpDebugRunToLine({ sessionId: record.sessionId, filePath: "src/Dispatch.java", line: 20 }),
+    ErrorCodes.TOOL_FAILED
+  );
+  assert.equal(manager.sessions.get(record.sessionId).state, "running");
+});
+
 test("manager rejects every breakpoint mutation while a run-to-line lease is active", async () => {
   const policy = loadPolicy("breakpilot.yaml");
   const manager = new DebugSessionManager({ policy });
@@ -866,6 +1131,86 @@ test("manager rejects every breakpoint mutation while a run-to-line lease is act
   });
   assert.equal(allowed.error, undefined);
   assert.equal(setBreakpointCalls, 1, "the lease must release after run-to-line completes");
+});
+
+test("manager rejects destructive debug controls while a run-to-line lease is active", async () => {
+  const actions = ["resume", "pause", "stepOver", "stop", "disconnect"] as const;
+  const policy = loadPolicy("breakpilot.yaml");
+
+  for (const action of actions) {
+    const manager = new DebugSessionManager({ policy });
+    const workspaceRoot = policy.workspace.root;
+    const controlCalls = { continue: 0, pause: 0, step: 0, disconnect: 0 };
+    const provider: RuntimeDebugProvider = {
+      kind: "dap",
+      sessionId: `run_to_line_control_lease_${action}`,
+      language: "java",
+      workspaceRoot,
+      capabilities: {
+        pause: "native",
+        stepping: "native",
+        runToLine: "native",
+        variableReferences: "native",
+        setValue: "unsupported",
+        breakpointUpdate: "fallback",
+        conditionalBreakpoints: "unsupported",
+        hitConditionalBreakpoints: "unsupported",
+        tracepoints: "unsupported",
+        eventDrain: "unsupported"
+      },
+      threadId: 7,
+      async setBreakpoints() { return []; },
+      async waitForBreakpoint() { return { reason: "breakpoint", threadId: 7 }; },
+      async runToLine() {
+        return {
+          status: "paused" as const,
+          targetReached: true,
+          requestedPosition: { filePath: `${workspaceRoot}/src/Lease.java`, line: 20 },
+          cleanedUp: true
+        };
+      },
+      async getRuntimeSnapshot() {
+        return {
+          sessionId: `run_to_line_control_lease_${action}`,
+          source: "headless" as const,
+          language: "java",
+          threadId: 7,
+          frameId: null,
+          stackFrames: [],
+          variables: {},
+          limits: { maxDepth: 1, maxItems: 1, maxStringLength: 1 }
+        };
+      },
+      async evaluate() { return {}; },
+      async pause() { controlCalls.pause += 1; return {}; },
+      async continue() { controlCalls.continue += 1; return {}; },
+      async step() { controlCalls.step += 1; return {}; },
+      async disconnect() { controlCalls.disconnect += 1; return {}; }
+    };
+    const record: DebugSessionRecord = {
+      sessionId: provider.sessionId,
+      language: provider.language,
+      workspaceRoot,
+      mode: "headless",
+      owner: "mcp",
+      state: "paused",
+      createdAt: new Date(0).toISOString(),
+      providerKind: "dap",
+      provider
+    };
+    manager.sessions.add(record);
+    manager.coordinator.beginExecution(record, "run-to-line");
+    try {
+      await expectCode(
+        manager.bpDebugControl({ sessionId: record.sessionId, action }),
+        ErrorCodes.SESSION_OWNER_CONFLICT
+      );
+      assert.deepEqual(controlCalls, { continue: 0, pause: 0, step: 0, disconnect: 0 });
+      assert.equal(manager.sessions.maybeGet(record.sessionId), record);
+    } finally {
+      manager.coordinator.endExecution(record);
+    }
+  }
 });
 
 test("manager defers terminal cleanup until fallback restoration has completed", async () => {

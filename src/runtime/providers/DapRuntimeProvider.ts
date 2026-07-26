@@ -32,7 +32,8 @@ import { RuntimeEventBuffer, normalizeRuntimeEventMetadata } from "../RuntimeEve
 import {
   BreakpointReconciler,
   type TemporaryBreakpointExecutionContext,
-  type TemporaryBreakpointTransaction
+  type TemporaryBreakpointTransaction,
+  type TemporaryBreakpointTransactionOptions
 } from "../../sessions/BreakpointReconciler.ts";
 import { BreakPilotError, ErrorCodes } from "../../utils/errors.ts";
 import { assertInsideWorkspace } from "../../utils/path.ts";
@@ -106,6 +107,21 @@ type StopEvidence = {
 
 type RunToLineTarget = RunToLineRequestedPosition;
 
+type RunToLineOutcomeOptions = {
+  requestedPosition: RunToLineRequestedPosition;
+  target: RunToLineTarget;
+  threadId: number;
+  cleanedUp: boolean;
+  resolvedPosition?: RunToLineRequestedPosition;
+  temporaryBreakpointId?: string;
+  warnings: string[];
+};
+
+type RunToLineTerminalOptions = Pick<
+  RunToLineOutcomeOptions,
+  "requestedPosition" | "cleanedUp" | "resolvedPosition" | "temporaryBreakpointId" | "warnings"
+>;
+
 export class DapRuntimeProvider implements RuntimeDebugProvider {
   kind = "dap";
   dap: DapSession;
@@ -172,6 +188,9 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     const requestedPosition = this.#requestedPosition(args);
     this.#assertPaused();
     const threadId = await this.#resolveThreadId(args.threadId);
+    // Thread discovery may have yielded while another controller resumed the
+    // debuggee. No run-to-line request is safe until pause is reconfirmed.
+    this.#assertPaused();
 
     if (this.#hasNativeRunToLine()) {
       return this.#runToLineNative(requestedPosition, threadId, args.timeoutMs);
@@ -380,6 +399,19 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
 
     const resolvedPosition = this.#targetPosition(requestedPosition.filePath, target);
     const targetWasResolved = this.#targetDiffersFromRequest(requestedPosition, resolvedPosition);
+    const outcomeOptions: RunToLineOutcomeOptions = {
+      requestedPosition,
+      target: resolvedPosition,
+      threadId,
+      cleanedUp: true,
+      ...(targetWasResolved ? { resolvedPosition } : {}),
+      warnings: targetWasResolved
+        ? ["Requested source position was resolved to the nearest executable target."]
+        : []
+    };
+    // gotoTargets is observational, but it can await adapter work. Recheck
+    // before transitioning state and dispatching the mutating goto request.
+    this.#assertPaused();
     this.dap.markRunning();
     const boundary = this.dap.captureStopBoundary();
     try {
@@ -388,17 +420,9 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
       // counts while any stale queued stop cannot.
       await this.dap.goto(threadId, target.id);
       const outcome = await this.dap.waitForStopOrTerminationAfter(boundary, timeoutMs ?? 30000);
-      return this.#resultFromOutcome(outcome, {
-        requestedPosition,
-        target: resolvedPosition,
-        threadId,
-        cleanedUp: true,
-        ...(targetWasResolved ? { resolvedPosition } : {}),
-        warnings: targetWasResolved
-          ? ["Requested source position was resolved to the nearest executable target."]
-          : []
-      });
+      return this.#resultFromOutcome(outcome, outcomeOptions);
     } catch (error) {
+      if (this.dap.terminated) return this.#terminalResult(outcomeOptions);
       return this.#timeoutOrThrow(error, requestedPosition, true, targetWasResolved ? resolvedPosition : undefined);
     }
   }
@@ -410,17 +434,31 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     timeoutMs?: number
   ): Promise<RunToLineResult> {
     let transaction: TemporaryBreakpointTransaction<FreshStopResult>;
+    const transactionOptions: TemporaryBreakpointTransactionOptions = {
+      assertCanApply: () => this.#assertPaused()
+    };
     try {
       transaction = await this.options.breakpointReconciler!.withTemporaryBreakpoint(
         session,
         requestedPosition,
         async (context: TemporaryBreakpointExecutionContext): Promise<FreshStopResult> => {
+          // The temporary apply itself may have yielded to a continued event.
+          // Do not issue a second continue unless the session is still paused.
+          this.#assertPaused();
           this.dap.markRunning();
           await this.dap.continue(threadId);
           return this.dap.waitForStopOrTerminationAfter(context.boundary, timeoutMs ?? 30000);
-        }
+        },
+        transactionOptions
       );
     } catch (error) {
+      if (this.dap.terminated && !this.#isCleanupFailure(error)) {
+        return this.#terminalResult({
+          requestedPosition,
+          cleanedUp: true,
+          warnings: []
+        });
+      }
       if (this.#isTimeout(error)) return this.#timeoutResult(requestedPosition, true);
       throw error;
     }
@@ -429,7 +467,7 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     const resolved = this.#targetDiffersFromRequest(requestedPosition, temporaryPosition)
       ? temporaryPosition
       : undefined;
-    return this.#resultFromOutcome(transaction.result, {
+    const outcomeOptions: RunToLineOutcomeOptions = {
       requestedPosition,
       target: temporaryPosition,
       threadId,
@@ -439,7 +477,8 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
       warnings: resolved
         ? ["Temporary breakpoint was resolved to a different executable source position."]
         : []
-    });
+    };
+    return this.#resultFromOutcome(transaction.result, outcomeOptions);
   }
 
   #timeoutOrThrow(
@@ -470,33 +509,18 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
 
   async #resultFromOutcome(
     outcome: FreshStopResult,
-    options: {
-      requestedPosition: RunToLineRequestedPosition;
-      target: RunToLineTarget;
-      threadId: number;
-      cleanedUp: boolean;
-      resolvedPosition?: RunToLineRequestedPosition;
-      temporaryBreakpointId?: string;
-      warnings: string[];
-    }
+    options: RunToLineOutcomeOptions
   ): Promise<RunToLineResult> {
-    if ("terminated" in outcome) {
-      return {
-        status: "stopped",
-        targetReached: false,
-        requestedPosition: options.requestedPosition,
-        cleanedUp: options.cleanedUp,
-        ...(options.resolvedPosition ? { resolvedPosition: options.resolvedPosition } : {}),
-        ...(options.temporaryBreakpointId ? { temporaryBreakpointId: options.temporaryBreakpointId } : {}),
-        message: "The debug session terminated before a fresh run-to-line stop was observed.",
-        warnings: [...options.warnings]
-      };
-    }
+    if ("terminated" in outcome || this.dap.terminated) return this.#terminalResult(options);
 
     const stoppedThread = typeof outcome.threadId === "number" && Number.isSafeInteger(outcome.threadId)
       ? outcome.threadId
       : options.threadId;
     const evidence = await this.#freshStopEvidence(stoppedThread);
+    // A stop waiter can resolve before a terminal event in the same transport
+    // turn, or termination can race the stack lookup. Terminal state wins over
+    // a stale paused presentation in both cases.
+    if (this.dap.terminated) return this.#terminalResult(options);
     const warnings = [...options.warnings];
     if (evidence.warning) warnings.push(evidence.warning);
     const targetReached = evidence.position
@@ -515,6 +539,19 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
       ...(evidence.frame ? { frame: evidence.frame } : {}),
       ...(options.temporaryBreakpointId ? { temporaryBreakpointId: options.temporaryBreakpointId } : {}),
       ...(warnings.length > 0 ? { warnings } : {})
+    };
+  }
+
+  #terminalResult(options: RunToLineTerminalOptions): RunToLineResult {
+    return {
+      status: "stopped",
+      targetReached: false,
+      requestedPosition: options.requestedPosition,
+      cleanedUp: options.cleanedUp,
+      ...(options.resolvedPosition ? { resolvedPosition: options.resolvedPosition } : {}),
+      ...(options.temporaryBreakpointId ? { temporaryBreakpointId: options.temporaryBreakpointId } : {}),
+      message: "The debug session terminated; no paused run-to-line result is available.",
+      ...(options.warnings.length > 0 ? { warnings: [...options.warnings] } : {})
     };
   }
 
@@ -618,5 +655,9 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
 
   #isTimeout(error: unknown): boolean {
     return error instanceof BreakPilotError && error.code === ErrorCodes.BREAKPOINT_TIMEOUT;
+  }
+
+  #isCleanupFailure(error: unknown): boolean {
+    return error instanceof BreakPilotError && error.code === ErrorCodes.RUN_TO_LINE_CLEANUP_FAILED;
   }
 }
