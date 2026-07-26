@@ -17,22 +17,22 @@ import type { DapSession } from "../src/dap/DapSession.ts";
 import type { AnyRecord } from "../src/types/json.ts";
 import type { RuntimeDebugProvider } from "../src/types/sessions.ts";
 
-const dapUnsupported = {
+const dapFallback = {
   pause: "native",
   stepping: "native",
   runToLine: "unsupported",
   variableReferences: "native",
   setValue: "unsupported",
-  breakpointUpdate: "unsupported",
+  breakpointUpdate: "fallback",
   conditionalBreakpoints: "unsupported",
   hitConditionalBreakpoints: "unsupported",
   tracepoints: "unsupported",
   eventDrain: "unsupported"
 };
 
-assert.deepEqual(dapProviderCapabilities(), dapUnsupported);
+assert.deepEqual(dapProviderCapabilities(), dapFallback);
 assert.deepEqual(dapProviderCapabilities({ supportsSetVariable: true }), {
-  ...dapUnsupported,
+  ...dapFallback,
   setValue: "native"
 });
 assert.deepEqual(dapProviderCapabilities({
@@ -41,7 +41,7 @@ assert.deepEqual(dapProviderCapabilities({
   supportsHitConditionalBreakpoints: true,
   supportsLogPoints: true
 }), {
-  ...dapUnsupported,
+  ...dapFallback,
   setValue: "native",
   conditionalBreakpoints: "native",
   hitConditionalBreakpoints: "native",
@@ -49,8 +49,8 @@ assert.deepEqual(dapProviderCapabilities({
 });
 assert.equal(
   dapProviderCapabilities({ supportsBreakpointUpdate: true }).breakpointUpdate,
-  "unsupported",
-  "unimplemented DAP breakpoint update must not be advertised as fallback"
+  "fallback",
+  "DAP source-list reconciliation must be available without a raw adapter update flag"
 );
 
 const ideUnsupported = {
@@ -119,10 +119,10 @@ const dap = {
   threadId: 7
 } as unknown as DapSession;
 const dapProvider = new DapRuntimeProvider(dap);
-assert.deepEqual(dapProvider.capabilities, dapUnsupported);
+assert.deepEqual(dapProvider.capabilities, dapFallback);
 dap.capabilities = { supportsSetVariable: true, supportsLogPoints: true };
 assert.deepEqual(dapProvider.capabilities, {
-  ...dapUnsupported,
+  ...dapFallback,
   setValue: "native",
   tracepoints: "native"
 });

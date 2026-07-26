@@ -41,7 +41,7 @@ export function dapProviderCapabilities(raw: AnyRecord = {}): RuntimeProviderCap
     runToLine: "unsupported",
     variableReferences: "native",
     setValue: enabled(raw, "supportsSetVariable") ? "native" : "unsupported",
-    breakpointUpdate: "unsupported",
+    breakpointUpdate: "fallback",
     conditionalBreakpoints: enabled(raw, "supportsConditionalBreakpoints")
       ? "native"
       : "unsupported",

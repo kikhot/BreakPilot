@@ -440,4 +440,20 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
   );
 }
 
+{
+  const bridge = new FakeIdeBridge();
+  bridge.addClient("idea_one", "idea", workspaceRoot);
+  const manager = managerWithBridge(bridge);
+  const created = await manager.bpDebugSetBreakpoint({ filePath, line: 51, ide: "idea" });
+  const breakpointId = String(created.breakpointId);
+  const sentBeforeUpdate = bridge.sent.length;
+
+  await assertRejectsWithCode(ErrorCodes.UNSUPPORTED_CAPABILITY, () =>
+    manager.bpDebugSetBreakpoint({ breakpointId, line: 52, ide: "idea" })
+  );
+
+  assert.equal(bridge.sent.length, sentBeforeUpdate, "project update must not send a create-style IDE bridge message");
+  assert.equal(manager.breakpoints.findProject(breakpointId)?.line, 51, "project update refusal must retain desired state");
+}
+
 console.log("project breakpoint routing tests ok");

@@ -20,10 +20,6 @@ const expectedSuccessFields: Record<string, string[]> = {
   bp_debug_set_value: ["path", "oldValue", "newValue", "applied", "result", "warnings"],
   bp_debug_eval: ["expression", "value", "type", "result", "warnings"],
   bp_debug_context: ["status", "position", "frames", "variables", "warnings"],
-  bp_debug_set_breakpoint: [
-    "breakpointId", "filePath", "line", "verified", "condition", "hitCondition", "logMessage",
-    "owner", "enabled", "temporary", "suspendPolicy", "isLogMessage", "isLogStack", "message", "lineText", "warnings"
-  ],
   bp_debug_list_breakpoints: ["breakpoints", "totalCount", "enabledCount", "source", "warnings"],
   bp_debug_remove_breakpoint: ["breakpointId", "removed", "protected", "message", "warnings"]
 };
@@ -41,7 +37,6 @@ const expectedRequiredFields: Record<string, string[]> = {
   bp_debug_set_value: ["path", "oldValue"],
   bp_debug_eval: ["expression"],
   bp_debug_context: ["status", "position", "frames", "variables"],
-  bp_debug_set_breakpoint: ["breakpointId", "filePath", "line", "verified", "owner", "enabled", "temporary"],
   bp_debug_list_breakpoints: ["breakpoints", "totalCount"],
   bp_debug_remove_breakpoint: ["removed"]
 };
@@ -55,6 +50,12 @@ const scalarValueSchema: AnyRecord = {
   ]
 };
 
+const publicBreakpointFields = [
+  "breakpointId", "filePath", "line", "column", "verified", "condition", "hitCondition", "logMessage",
+  "owner", "enabled", "temporary", "suspendPolicy", "isLogMessage", "isLogStack", "message"
+];
+const publicBreakpointRequired = ["breakpointId", "filePath", "line", "verified", "owner", "enabled", "temporary"];
+
 for (const tool of toolDefinitions) {
   const output = tool.outputSchema as AnyRecord;
   assert.equal(output.type, "object", `${tool.name} output must be an object`);
@@ -63,17 +64,55 @@ for (const tool of toolDefinitions) {
   const serialized = JSON.stringify(output);
   assert.match(serialized, /error/, `${tool.name} must describe structured errors`);
   const success = output.oneOf[0] as AnyRecord;
-  assert.equal(success.additionalProperties, false, `${tool.name} success must be closed`);
-  assert.deepEqual(
-    Object.keys(success.properties).sort(),
-    expectedSuccessFields[tool.name]?.slice().sort(),
-    `${tool.name} must publish its exact compact success fields`
-  );
-  assert.deepEqual(
-    (success.required ?? []).slice().sort(),
-    expectedRequiredFields[tool.name]?.slice().sort(),
-    `${tool.name} must publish its exact required success fields`
-  );
+  if (tool.name === "bp_debug_set_breakpoint") {
+    assert.equal(success.type, "object");
+    assert.ok(Array.isArray(success.oneOf), "breakpoint output must use a create-or-update success union");
+    assert.equal(success.oneOf.length, 2);
+    const create = success.oneOf[0] as AnyRecord;
+    const update = success.oneOf[1] as AnyRecord;
+    assert.equal(create.additionalProperties, false, "breakpoint create output must be closed");
+    assert.equal(update.additionalProperties, false, "breakpoint update output must be closed");
+    assert.deepEqual(
+      Object.keys(create.properties).sort(),
+      [...publicBreakpointFields, "lineText", "warnings"].sort(),
+      "breakpoint create must retain the flat compatibility view"
+    );
+    assert.deepEqual((create.required ?? []).slice().sort(), publicBreakpointRequired.slice().sort());
+    assert.deepEqual(
+      Object.keys(update.properties).sort(),
+      [...publicBreakpointFields, "operation", "previous", "current", "changedFields", "rollbackApplied", "warnings"].sort(),
+      "breakpoint update must add an explicit reconciliation result"
+    );
+    assert.deepEqual(
+      (update.required ?? []).slice().sort(),
+      [...publicBreakpointRequired, "operation", "previous", "current", "changedFields"].sort()
+    );
+    assert.deepEqual(update.properties.operation.enum, ["updated", "relocated"]);
+    assert.equal(update.properties.changedFields.type, "array");
+    assert.equal(update.properties.changedFields.items.type, "string");
+    assert.deepEqual(update.properties.changedFields.items.enum, [
+      "filePath", "line", "column", "condition", "hitCondition", "logMessage", "enabled"
+    ]);
+    assert.equal(update.properties.rollbackApplied.type, "boolean");
+    for (const field of ["previous", "current"]) {
+      const nested = update.properties[field] as AnyRecord;
+      assert.equal(nested.additionalProperties, false, `${field} must remain a closed public breakpoint view`);
+      assert.deepEqual(Object.keys(nested.properties).sort(), publicBreakpointFields.slice().sort());
+      assert.deepEqual((nested.required ?? []).slice().sort(), publicBreakpointRequired.slice().sort());
+    }
+  } else {
+    assert.equal(success.additionalProperties, false, `${tool.name} success must be closed`);
+    assert.deepEqual(
+      Object.keys(success.properties).sort(),
+      expectedSuccessFields[tool.name]?.slice().sort(),
+      `${tool.name} must publish its exact compact success fields`
+    );
+    assert.deepEqual(
+      (success.required ?? []).slice().sort(),
+      expectedRequiredFields[tool.name]?.slice().sort(),
+      `${tool.name} must publish its exact required success fields`
+    );
+  }
 
   const error = output.oneOf[1] as AnyRecord;
   assert.equal(error.type, "object", `${tool.name} error must be an object`);

@@ -239,6 +239,7 @@ export const breakpointSchema: JsonSchema = {
     breakpointId: { type: "string" },
     filePath: { type: "string" },
     line: { type: "number" },
+    column: { type: "number" },
     verified: { type: "boolean" },
     condition: { oneOf: [{ type: "string" }, { type: "null" }] },
     hitCondition: { oneOf: [{ type: "string" }, { type: "null" }] },

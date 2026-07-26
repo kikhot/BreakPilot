@@ -234,7 +234,7 @@ export const contextSuccessSchema: JsonSchema = {
   required: ["status", "position", "frames", "variables"]
 };
 
-export const setBreakpointSuccessSchema: JsonSchema = {
+const setBreakpointCreateSuccessSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -243,6 +243,32 @@ export const setBreakpointSuccessSchema: JsonSchema = {
     warnings: warningsSchema
   },
   required: breakpointSchema.required
+};
+
+const setBreakpointUpdateSuccessSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...breakpointProperties,
+    operation: { type: "string", enum: ["updated", "relocated"] },
+    previous: breakpointSchema,
+    current: breakpointSchema,
+    changedFields: {
+      type: "array",
+      items: {
+        type: "string",
+        enum: ["filePath", "line", "column", "condition", "hitCondition", "logMessage", "enabled"]
+      }
+    },
+    rollbackApplied: { type: "boolean" },
+    warnings: warningsSchema
+  },
+  required: [...(breakpointSchema.required ?? []), "operation", "previous", "current", "changedFields"]
+};
+
+export const setBreakpointSuccessSchema: JsonSchema = {
+  type: "object",
+  oneOf: [setBreakpointCreateSuccessSchema, setBreakpointUpdateSuccessSchema]
 };
 
 export const listBreakpointsSuccessSchema: JsonSchema = {

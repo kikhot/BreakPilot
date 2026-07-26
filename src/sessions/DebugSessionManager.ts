@@ -15,6 +15,7 @@ import type { VariableNode, VariableScopeView } from "../types/inspection.ts";
 import type { AnyRecord } from "../types/json.ts";
 import type { BreakPilotPolicy, EvaluateMode } from "../types/policy.ts";
 import type {
+  BreakpointPatchRequest,
   BreakpointRecord,
   DebugSessionRecord,
   DetailLevel,
@@ -32,6 +33,7 @@ import { BreakPilotError, ErrorCodes, ok } from "../utils/errors.ts";
 import { makeId, makeSessionId } from "../utils/ids.ts";
 import { resolveWorkspacePath } from "../utils/path.ts";
 import { BreakpointManager } from "./BreakpointManager.ts";
+import { BreakpointReconciler } from "./BreakpointReconciler.ts";
 import { LanguageResolver } from "./LanguageResolver.ts";
 import { DapRuntimeProvider } from "../runtime/providers/DapRuntimeProvider.ts";
 import { IdeRuntimeProvider } from "../runtime/providers/IdeRuntimeProvider.ts";
@@ -129,6 +131,7 @@ export class DebugSessionManager {
   languageResolver: LanguageResolver;
   sessions: SessionStore;
   breakpoints: BreakpointManager;
+  breakpointReconciler: BreakpointReconciler;
   coordinator: SessionCoordinator;
   ideBridge?: IdeBridgeServer | null;
   cleaningSessions: Set<string>;
@@ -143,6 +146,7 @@ export class DebugSessionManager {
     this.languageResolver = new LanguageResolver(this.adapters);
     this.sessions = new SessionStore();
     this.breakpoints = new BreakpointManager();
+    this.breakpointReconciler = new BreakpointReconciler(this.breakpoints);
     this.coordinator = new SessionCoordinator();
     this.ideBridge = ideBridge;
     this.cleaningSessions = new Set();
@@ -617,24 +621,7 @@ export class DebugSessionManager {
 
   async bpDebugSetBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
-    if (normalized.breakpointId) {
-      this.audit.record("bp_debug_set_breakpoint_update_requested", {
-        sessionId: normalized.sessionId,
-        breakpointId: normalized.breakpointId,
-        filePath: normalized.filePath,
-        line: normalized.line
-      });
-      return {
-        error: {
-          code: ErrorCodes.UNSUPPORTED_CAPABILITY,
-          message: "bp_debug_set_breakpoint update/relocate is registered, but not implemented in Phase 1.",
-          details: {
-            phase: "contract",
-            breakpointId: normalized.breakpointId
-          }
-        }
-      };
-    }
+    if (normalized.breakpointId !== undefined) return this.#updateSessionBreakpoint(normalized);
     const session = this.#resolveBreakpointSession(normalized);
     if (!session) return this.#setProjectBreakpoint(normalized);
     const auditId = this.audit.record("bp_debug_set_breakpoint_requested", { sessionId: session.sessionId });
@@ -875,6 +862,106 @@ export class DebugSessionManager {
       breakpoint: selected
     });
     return this.#breakpointView(selected);
+  }
+
+  async #updateSessionBreakpoint(args: DebugToolArgs): Promise<ToolResponse> {
+    const auditId = this.audit.record("bp_debug_set_breakpoint_update_requested", {
+      sessionId: args.sessionId,
+      breakpointId: args.breakpointId,
+      filePath: args.filePath,
+      line: args.line
+    });
+    if (!args.sessionId && (args.clientId || args.ide)) {
+      this.#throwBreakpointUpdateUnsupported(args.sessionId ?? null, "project");
+    }
+
+    // Updates intentionally use normal live-session routing. Unlike create,
+    // an unresolved session must not silently fall through to project-level
+    // IDE breakpoint creation.
+    const session = this.#resolveSession(args);
+    if (session.providerKind !== "dap" || session.provider.capabilities.breakpointUpdate === "unsupported") {
+      this.#throwBreakpointUpdateUnsupported(session.sessionId, session.providerKind);
+    }
+    this.coordinator.assertCanControl(session, SessionOwner.MCP, "update breakpoint");
+    this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.providerKind);
+
+    const patch = this.#breakpointPatchRequest(session, args);
+    const result = await this.breakpointReconciler.update(session, patch);
+    const previous = this.#breakpointView(result.previous);
+    const current = this.#breakpointView(result.current);
+    const response: AnyRecord = {
+      ...current,
+      operation: result.operation,
+      breakpointId: result.breakpointId,
+      previous,
+      current,
+      changedFields: [...result.changedFields],
+      verified: result.verified,
+      ...(result.rollbackApplied !== undefined ? { rollbackApplied: result.rollbackApplied } : {})
+    };
+
+    // The reconciliation is complete even when requireVerified rejects the
+    // result afterward; keep a finish audit event for that acknowledged state.
+    this.audit.record("bp_debug_set_breakpoint_update_finished", {
+      sessionId: session.sessionId,
+      breakpointId: result.breakpointId,
+      operation: result.operation,
+      changedFields: result.changedFields,
+      verified: result.verified,
+      ...(result.rollbackApplied !== undefined ? { rollbackApplied: result.rollbackApplied } : {})
+    });
+
+    if (!result.verified && args.requireVerified) {
+      throw new BreakPilotError(
+        ErrorCodes.BREAKPOINT_NOT_VERIFIED,
+        "Breakpoint was not verified by debug adapter.",
+        {
+          breakpoint: current,
+          operation: result.operation,
+          changedFields: result.changedFields
+        }
+      );
+    }
+
+    return ok(session.sessionId, response, auditId, result.warnings ?? []);
+  }
+
+  #breakpointPatchRequest(session: DebugSessionRecord, args: DebugToolArgs): BreakpointPatchRequest {
+    const breakpointId = args.breakpointId;
+    if (typeof breakpointId !== "string") {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "breakpointId is required for breakpoint updates.", {});
+    }
+
+    const patch: BreakpointPatchRequest = { breakpointId };
+    const target = this.breakpoints.get(session.sessionId, breakpointId);
+    if (args.filePath !== undefined) {
+      const candidate = path.resolve(this.security.workspaceRoot(), args.filePath);
+      const changesSource = target !== undefined && path.resolve(target.file) !== candidate;
+      patch.filePath = changesSource
+        ? this.security.assertWorkspacePath(args.filePath)
+        : candidate;
+    }
+    if (args.line !== undefined) patch.line = args.line;
+    if (args.column !== undefined) patch.column = args.column;
+    if (args.condition !== undefined) patch.condition = args.condition;
+    if (args.hitCondition !== undefined) patch.hitCondition = args.hitCondition;
+    if (args.logMessage !== undefined) patch.logMessage = args.logMessage;
+    if (args.enabled !== undefined) patch.enabled = args.enabled;
+    const owner = this.#breakpointOwnerFilter(args.owner);
+    if (owner !== undefined) patch.owner = owner;
+    return patch;
+  }
+
+  #throwBreakpointUpdateUnsupported(sessionId: string | null, providerKind: string): never {
+    throw new BreakPilotError(
+      ErrorCodes.UNSUPPORTED_CAPABILITY,
+      "Runtime provider does not support breakpoint updates.",
+      {
+        sessionId,
+        providerKind,
+        capability: "breakpointUpdate"
+      }
+    );
   }
 
   async #removeSessionBreakpoint(session: DebugSessionRecord, breakpointId: string): Promise<AnyRecord> {
@@ -1771,6 +1858,7 @@ export class DebugSessionManager {
       breakpointId: breakpoint.id,
       filePath: breakpoint.file,
       line: breakpoint.line,
+      ...(breakpoint.column !== undefined ? { column: breakpoint.column } : {}),
       verified: breakpoint.verified,
       ...(breakpoint.condition !== undefined ? { condition: breakpoint.condition } : {}),
       ...(breakpoint.hitCondition !== undefined ? { hitCondition: breakpoint.hitCondition } : {}),
@@ -1781,7 +1869,7 @@ export class DebugSessionManager {
       ...(breakpoint.suspendPolicy !== undefined ? { suspendPolicy: breakpoint.suspendPolicy } : {}),
       ...(breakpoint.isLogMessage !== undefined ? { isLogMessage: breakpoint.isLogMessage } : {}),
       ...(breakpoint.isLogStack !== undefined ? { isLogStack: breakpoint.isLogStack } : {}),
-      ...(breakpoint.message ? { message: breakpoint.message } : {})
+      ...(breakpoint.message !== undefined ? { message: breakpoint.message } : {})
     };
   }
 
@@ -1790,6 +1878,7 @@ export class DebugSessionManager {
       breakpointId: breakpoint.id,
       filePath: breakpoint.file,
       line: breakpoint.line,
+      ...(breakpoint.column !== undefined ? { column: breakpoint.column } : {}),
       verified: breakpoint.verified,
       ...(breakpoint.condition !== undefined ? { condition: breakpoint.condition } : {}),
       ...(breakpoint.hitCondition !== undefined ? { hitCondition: breakpoint.hitCondition } : {}),
@@ -1800,7 +1889,7 @@ export class DebugSessionManager {
       ...(breakpoint.suspendPolicy !== undefined ? { suspendPolicy: breakpoint.suspendPolicy } : {}),
       ...(breakpoint.isLogMessage !== undefined ? { isLogMessage: breakpoint.isLogMessage } : {}),
       ...(breakpoint.isLogStack !== undefined ? { isLogStack: breakpoint.isLogStack } : {}),
-      ...(breakpoint.message ? { message: breakpoint.message } : {})
+      ...(breakpoint.message !== undefined ? { message: breakpoint.message } : {})
     };
   }
 
