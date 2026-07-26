@@ -66,7 +66,11 @@ export class DapClient extends EventEmitter {
     }
   }
 
-  async request(command: string, args: AnyRecord = {}, timeoutMs = this.defaultTimeoutMs): Promise<AnyRecord> {
+  async request<TResponse extends AnyRecord = AnyRecord>(
+    command: string,
+    args: AnyRecord = {},
+    timeoutMs = this.defaultTimeoutMs
+  ): Promise<TResponse> {
     const seq = this.seq;
     this.seq += 1;
     const message = {
@@ -88,7 +92,7 @@ export class DapClient extends EventEmitter {
             command,
             timeoutMs
           })
-      );
+      ) as TResponse;
     } catch (error) {
       this.pending.delete(seq);
       throw error;

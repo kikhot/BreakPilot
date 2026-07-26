@@ -2,9 +2,13 @@ import { EventEmitter } from "node:events";
 import type {
   DapBreakpoint,
   DapEventMessage,
+  DapGotoTarget,
+  DapGotoTargetsResponse,
   DapScope,
   DapStackFrame,
   DapVariable,
+  FreshStopBoundary,
+  FreshStopResult,
   StoppedEvent
 } from "../types/dap.ts";
 import type { DebugLanguage } from "../types/debug.ts";
@@ -14,6 +18,17 @@ import { DapClient } from "./DapClient.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
 import { createDeferred, withTimeout } from "../utils/timeout.ts";
 import { toDapSource } from "../utils/path.ts";
+
+type ObservedStop = {
+  sequence: number;
+  event: StoppedEvent;
+};
+
+type FreshStopWaiter = {
+  boundary: FreshStopBoundary;
+  deferred: ReturnType<typeof createDeferred<FreshStopResult>>;
+  timer: ReturnType<typeof setTimeout> | null;
+};
 
 export class DapSession extends EventEmitter {
   sessionId: string;
@@ -28,11 +43,15 @@ export class DapSession extends EventEmitter {
   startError: Error | null;
   stoppedQueue: StoppedEvent[];
   stoppedWaiters: ReturnType<typeof createDeferred<StoppedEvent>>[];
+  freshStopWaiters: FreshStopWaiter[];
+  stopSequence: number;
   readonly #runtimeEventListeners: Set<(event: DapEventMessage) => void>;
   readonly #clientListeners: Array<[event: string, listener: (...args: any[]) => void]>;
   #runtimeEventSourceAttached: boolean;
   #startGraceTimer: ReturnType<typeof setTimeout> | null;
   #disposed: boolean;
+  #terminalSequence: number;
+  #latestStopped: ObservedStop | null;
   threadId: number | null;
   terminated: boolean;
 
@@ -60,11 +79,15 @@ export class DapSession extends EventEmitter {
     this.startError = null;
     this.stoppedQueue = [];
     this.stoppedWaiters = [];
+    this.freshStopWaiters = [];
+    this.stopSequence = 0;
     this.#runtimeEventListeners = new Set();
     this.#clientListeners = [];
     this.#runtimeEventSourceAttached = false;
     this.#startGraceTimer = null;
     this.#disposed = false;
+    this.#terminalSequence = 0;
+    this.#latestStopped = null;
     this.threadId = null;
     this.terminated = false;
   }
@@ -88,19 +111,27 @@ export class DapSession extends EventEmitter {
     this.#listenToClient("stopped", (body: StoppedEvent) => {
       this.threadId = body.threadId ?? this.threadId;
       const event = { sessionId: this.sessionId, ...body };
+      this.stopSequence += 1;
+      const observed: ObservedStop = { sequence: this.stopSequence, event };
+      this.#latestStopped = observed;
       const waiter = this.stoppedWaiters.shift();
       if (waiter) waiter.resolve(event);
       else this.stoppedQueue.push(event);
+      this.#resolveFreshStopWaiters(observed);
       this.emit("stopped", event);
     });
     this.#listenToClient("continued", (body: AnyRecord) => this.emit("continued", body));
     this.#listenToClient("terminated", (body: AnyRecord) => {
       this.terminated = true;
       this.#runtimeEventSourceAttached = false;
+      this.#terminalSequence += 1;
+      this.#resolveFreshTerminalWaiters(this.#terminalSequence);
       this.emit("terminated", body);
     });
     this.#listenToClient("exited", (body: AnyRecord) => {
       this.#runtimeEventSourceAttached = false;
+      this.#terminalSequence += 1;
+      this.#resolveFreshTerminalWaiters(this.#terminalSequence);
       this.emit("exited", body);
     });
     this.#listenToClient("exit", () => {
@@ -141,14 +172,12 @@ export class DapSession extends EventEmitter {
       clearTimeout(this.#startGraceTimer);
       this.#startGraceTimer = null;
     }
-    const error = this.startError ?? new BreakPilotError(
-      ErrorCodes.TARGET_PROCESS_EXITED,
-      "Debug session ended.",
-      { sessionId: this.sessionId }
-    );
+    const error = this.#sessionEndedError();
     for (const waiter of this.initializedWaiters.splice(0)) waiter.reject(error);
     for (const waiter of this.stoppedWaiters.splice(0)) waiter.reject(error);
+    for (const waiter of [...this.freshStopWaiters]) this.#rejectFreshStopWaiter(waiter, error);
     this.stoppedQueue = [];
+    this.#latestStopped = null;
     this.startRequestPromise = null;
     this.#detachClientListeners();
     this.#runtimeEventListeners.clear();
@@ -321,6 +350,65 @@ export class DapSession extends EventEmitter {
     }
   }
 
+  captureStopBoundary(): FreshStopBoundary {
+    return {
+      stopSequence: this.stopSequence,
+      terminalSequence: this.#terminalSequence
+    };
+  }
+
+  async waitForStopOrTerminationAfter(
+    boundary: FreshStopBoundary,
+    timeoutMs = 30000
+  ): Promise<FreshStopResult> {
+    const captured: FreshStopBoundary = {
+      stopSequence: boundary.stopSequence,
+      terminalSequence: boundary.terminalSequence
+    };
+    const alreadyObserved = this.#freshOutcomeAfter(captured);
+    if (alreadyObserved) return alreadyObserved;
+    if (this.#disposed) throw this.#sessionEndedError();
+
+    const deferred = createDeferred<FreshStopResult>();
+    const waiter: FreshStopWaiter = {
+      boundary: captured,
+      deferred,
+      timer: null
+    };
+    this.freshStopWaiters.push(waiter);
+    waiter.timer = setTimeout(() => {
+      this.#rejectFreshStopWaiter(
+        waiter,
+        new BreakPilotError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for a fresh debug stop.", {
+          sessionId: this.sessionId,
+          timeoutMs,
+          boundary: captured
+        })
+      );
+    }, timeoutMs);
+
+    // This second read closes the causal registration window without touching
+    // the ordinary stopped FIFO. JavaScript normally cannot interleave an
+    // event here, but preserving it makes the boundary safe if future client
+    // hooks gain synchronous delivery during registration.
+    const raced = this.#freshOutcomeAfter(captured);
+    if (raced) this.#resolveFreshStopWaiter(waiter, raced);
+    return deferred.promise;
+  }
+
+  async gotoTargets(filePath: string, line: number, column?: number): Promise<DapGotoTarget[]> {
+    const response = await this.client.request<DapGotoTargetsResponse>("gotoTargets", {
+      source: { path: filePath },
+      line,
+      ...(column === undefined ? {} : { column })
+    });
+    return response.targets ?? [];
+  }
+
+  async goto(threadId: number, targetId: number): Promise<void> {
+    await this.client.request("goto", { threadId, targetId });
+  }
+
   async threads(): Promise<AnyRecord[]> {
     const response = await this.client.request("threads", {});
     return response.threads ?? [];
@@ -440,6 +528,56 @@ export class DapSession extends EventEmitter {
     } finally {
       this.disposeClient();
     }
+  }
+
+  #freshOutcomeAfter(boundary: FreshStopBoundary): FreshStopResult | null {
+    if (this.#terminalSequence > boundary.terminalSequence) return { terminated: true };
+    const latest = this.#latestStopped;
+    if (latest && latest.sequence > boundary.stopSequence) return latest.event;
+    return null;
+  }
+
+  #resolveFreshStopWaiters(observed: ObservedStop): void {
+    for (const waiter of [...this.freshStopWaiters]) {
+      if (observed.sequence > waiter.boundary.stopSequence) {
+        this.#resolveFreshStopWaiter(waiter, observed.event);
+      }
+    }
+  }
+
+  #resolveFreshTerminalWaiters(terminalSequence: number): void {
+    for (const waiter of [...this.freshStopWaiters]) {
+      if (terminalSequence > waiter.boundary.terminalSequence) {
+        this.#resolveFreshStopWaiter(waiter, { terminated: true });
+      }
+    }
+  }
+
+  #resolveFreshStopWaiter(waiter: FreshStopWaiter, result: FreshStopResult): void {
+    if (!this.#removeFreshStopWaiter(waiter)) return;
+    waiter.deferred.resolve(result);
+  }
+
+  #rejectFreshStopWaiter(waiter: FreshStopWaiter, error: Error): void {
+    if (!this.#removeFreshStopWaiter(waiter)) return;
+    waiter.deferred.reject(error);
+  }
+
+  #removeFreshStopWaiter(waiter: FreshStopWaiter): boolean {
+    const index = this.freshStopWaiters.indexOf(waiter);
+    if (index < 0) return false;
+    this.freshStopWaiters.splice(index, 1);
+    if (waiter.timer) clearTimeout(waiter.timer);
+    waiter.timer = null;
+    return true;
+  }
+
+  #sessionEndedError(): Error {
+    return this.startError ?? new BreakPilotError(
+      ErrorCodes.TARGET_PROCESS_EXITED,
+      "Debug session ended.",
+      { sessionId: this.sessionId }
+    );
   }
 
   #listenToClient(event: string, listener: (...args: any[]) => void): void {

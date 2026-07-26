@@ -69,6 +69,21 @@ export interface DapBreakpoint {
   [key: string]: any;
 }
 
+export interface DapGotoTarget {
+  id: number;
+  label: string;
+  line: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  [key: string]: any;
+}
+
+export interface DapGotoTargetsResponse {
+  targets?: DapGotoTarget[];
+  [key: string]: any;
+}
+
 export interface StoppedEvent {
   sessionId?: string;
   reason?: string;
@@ -77,3 +92,11 @@ export interface StoppedEvent {
   allThreadsStopped?: boolean;
   [key: string]: any;
 }
+
+/** A causal snapshot used to wait only for a stop/terminal event observed later. */
+export interface FreshStopBoundary {
+  stopSequence: number;
+  terminalSequence: number;
+}
+
+export type FreshStopResult = StoppedEvent | { terminated: true };
