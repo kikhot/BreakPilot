@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { BreakpointManager } from "./BreakpointManager.ts";
+import type { DapBreakpoint } from "../types/dap.ts";
 import type {
   BreakpointPatchRequest,
   BreakpointRecord,
@@ -102,15 +103,18 @@ export class BreakpointReconciler {
         // mutate our desired snapshot while returning adapter evidence.
         const providerInput = source.desired.map((breakpoint) => this.#clone(breakpoint));
         const responses = await session.provider.setBreakpoints(source.filePath, providerInput);
+        this.#assertCompleteAdapterEvidence(source.desired, responses);
         appliedBySource.set(source.filePath, this.#projectAdapterEvidence(source.desired, responses));
       }
 
-      // No local source list changes before every provider call has fulfilled.
-      for (const source of sourceStates) {
+      // No local source list changes before every provider call has fulfilled and
+      // supplied complete adapter evidence. The manager preflights every clone
+      // and installs every affected source in one map replacement.
+      this.#breakpoints.replaceSources(session.sessionId, sourceStates.map((source) => {
         const applied = appliedBySource.get(source.filePath);
         if (!applied) throw new Error("Missing applied breakpoint source state.");
-        this.#breakpoints.replaceSource(session.sessionId, source.filePath, applied);
-      }
+        return { filePath: source.filePath, records: applied };
+      }));
 
       const current = this.#breakpoints.get(session.sessionId, target.id);
       if (!current) throw new Error("Breakpoint was missing after a successful replacement.");
@@ -269,7 +273,7 @@ export class BreakpointReconciler {
     return PATCH_FIELD_ORDER.filter((field) => changed.has(field));
   }
 
-  #projectAdapterEvidence(desired: BreakpointRecord[], responses: Awaited<ReturnType<DebugSessionRecord["provider"]["setBreakpoints"]>>): BreakpointRecord[] {
+  #projectAdapterEvidence(desired: BreakpointRecord[], responses: DapBreakpoint[]): BreakpointRecord[] {
     return desired.map((breakpoint, index) => {
       const response = responses[index];
       const projected = this.#clone(breakpoint);
@@ -288,15 +292,31 @@ export class BreakpointReconciler {
     let restored = true;
     for (const source of sourceStates) {
       try {
-        await session.provider.setBreakpoints(
+        const responses = await session.provider.setBreakpoints(
           source.filePath,
           source.original.map((breakpoint) => this.#clone(breakpoint))
         );
+        this.#assertCompleteAdapterEvidence(source.original, responses);
       } catch {
         restored = false;
       }
     }
     return restored;
+  }
+
+  #assertCompleteAdapterEvidence(desired: BreakpointRecord[], responses: unknown): asserts responses is DapBreakpoint[] {
+    if (!Array.isArray(responses) || responses.length !== desired.length) {
+      throw new Error("Provider did not return complete breakpoint evidence.");
+    }
+    for (const response of responses) {
+      if (typeof response !== "object" || response === null) {
+        throw new Error("Provider returned a malformed breakpoint evidence entry.");
+      }
+      const verified = Object.getOwnPropertyDescriptor(response, "verified");
+      if (!verified || !("value" in verified) || typeof verified.value !== "boolean") {
+        throw new Error("Provider returned a malformed breakpoint evidence entry.");
+      }
+    }
   }
 
   #affectedSources(target: BreakpointRecord, patch: BreakpointPatchRequest): string[] {

@@ -9,6 +9,7 @@ import type { BreakpointRecord, DebugSessionRecord } from "../src/types/sessions
 
 const workspaceRoot = path.resolve("/tmp/breakpilot-breakpoint-reconciler");
 const sourceA = path.join(workspaceRoot, "a.ts");
+const sourceM = path.join(workspaceRoot, "m.ts");
 const sourceZ = path.join(workspaceRoot, "z.ts");
 
 type SetBreakpoints = (filePath: string, breakpoints: BreakpointRecord[]) => Promise<DapBreakpoint[]>;
@@ -103,6 +104,81 @@ test("reconciles an agent line move without dropping user breakpoints", async ()
   assert.equal(manager.get(session.sessionId, "user-b")?.line, 14);
 });
 
+test("requires complete well-formed provider evidence before committing a non-empty source update", async () => {
+  for (const incomplete of [
+    [],
+    [{ id: 1, verified: true, line: 22 }],
+    [{ id: 1, verified: "not-a-boolean", line: 22 }],
+    { not: "an array" }
+  ] as unknown[]) {
+    const manager = new BreakpointManager();
+    let calls = 0;
+    const session = sessionWith(async (_filePath, records) => {
+      calls += 1;
+      return calls === 1 ? incomplete as DapBreakpoint[] : dapReplies(records);
+    });
+    const reconciler = new BreakpointReconciler(manager);
+    addBreakpoint(manager, session.sessionId, { id: "agent-a", file: sourceA, line: 10, owner: "agent" });
+    addBreakpoint(manager, session.sessionId, { id: "user-b", file: sourceA, line: 14, owner: "user" });
+
+    const error = await assertRejectsWithCode("BREAKPOINT_UPDATE_FAILED", () => reconciler.update(session, {
+      breakpointId: "agent-a",
+      line: 22
+    }));
+
+    assert.equal((error as { details: { rollbackApplied?: boolean } }).details.rollbackApplied, true);
+    assert.equal(calls, 2, "the complete original source must be restored after incomplete apply evidence");
+    assert.deepEqual(manager.listSource(session.sessionId, sourceA).map((record) => [record.id, record.line]), [
+      ["agent-a", 10],
+      ["user-b", 14]
+    ]);
+  }
+});
+
+test("treats incomplete rollback evidence as indeterminate", async () => {
+  const manager = new BreakpointManager();
+  let calls = 0;
+  const session = sessionWith(async () => {
+    calls += 1;
+    return [];
+  });
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "agent-a", file: sourceA, line: 10, owner: "agent" });
+
+  const error = await assertRejectsWithCode("BREAKPOINT_ROLLBACK_FAILED", () => reconciler.update(session, {
+    breakpointId: "agent-a",
+    line: 22
+  }));
+
+  assert.deepEqual((error as { details: unknown }).details, {
+    outcome: "indeterminate",
+    retrySafe: false,
+    rollbackApplied: false,
+    affectedIds: ["agent-a"],
+    recommendedAction: "Inspect the debugger breakpoint state, re-list breakpoints, and reconcile before retrying."
+  });
+  assert.equal(calls, 2);
+  assert.equal(manager.get(session.sessionId, "agent-a")?.line, 10);
+});
+
+test("accepts complete unverified evidence with adapter breakpoint id zero", async () => {
+  const manager = new BreakpointManager();
+  const session = sessionWith(async (_filePath, records) => records.map((record) => ({
+    id: 0,
+    verified: false,
+    line: record.line,
+    column: record.column
+  })));
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "agent-a", file: sourceA, line: 10, owner: "agent" });
+
+  const result = await reconciler.update(session, { breakpointId: "agent-a", line: 22 });
+
+  assert.equal(result.verified, false);
+  assert.equal(result.current.adapterBreakpointId, 0);
+  assert.equal(manager.get(session.sessionId, "agent-a")?.adapterBreakpointId, 0);
+});
+
 test("enforces user-breakpoint ownership without changing stored ownership", async () => {
   const manager = new BreakpointManager();
   const session = sessionWith(async (_filePath, records) => dapReplies(records));
@@ -150,6 +226,37 @@ test("relocates across sources using sorted complete source replacements", async
   ], "provider calls expose the source lock/replacement order");
   assert.deepEqual(manager.listSource(session.sessionId, sourceA).map((record) => record.id), ["user-new", "agent-z"]);
   assert.deepEqual(manager.listSource(session.sessionId, sourceZ).map((record) => record.id), ["agent-old"]);
+});
+
+test("uses one atomic source replacement for relocation without touching other sources or sessions", async () => {
+  const manager = new BreakpointManager();
+  const session = sessionWith(async (_filePath, records) => dapReplies(records));
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "agent-z", file: sourceZ, line: 10, owner: "agent" });
+  addBreakpoint(manager, session.sessionId, { id: "agent-old", file: sourceZ, line: 12, owner: "agent" });
+  addBreakpoint(manager, session.sessionId, { id: "user-new", file: sourceA, line: 20, owner: "user" });
+  addBreakpoint(manager, session.sessionId, { id: "agent-third", file: sourceM, line: 40, owner: "agent" });
+  addBreakpoint(manager, "other-session", { id: "other-session-breakpoint", file: sourceM, line: 50, owner: "agent" });
+  manager.replaceSource = () => assert.fail("cross-source reconciliation must commit through replaceSources");
+
+  await reconciler.update(session, { breakpointId: "agent-z", filePath: sourceA, line: 30 });
+
+  assert.deepEqual(manager.listSource(session.sessionId, sourceA).map((record) => record.id), ["user-new", "agent-z"]);
+  assert.deepEqual(manager.listSource(session.sessionId, sourceZ).map((record) => record.id), ["agent-old"]);
+  assert.deepEqual(manager.listSource(session.sessionId, sourceM).map((record) => record.id), ["agent-third"]);
+  assert.deepEqual(manager.listSource("other-session", sourceM).map((record) => record.id), ["other-session-breakpoint"]);
+});
+
+test("rejects a source-local replacement collision without erasing another source", () => {
+  const manager = new BreakpointManager();
+  addBreakpoint(manager, "session-reconciler", { id: "shared-id", file: sourceZ, line: 10, owner: "agent" });
+
+  assert.throws(() => manager.replaceSource("session-reconciler", sourceA, [{
+    ...manager.get("session-reconciler", "shared-id")!,
+    file: sourceA
+  }]));
+  assert.deepEqual(manager.listSource("session-reconciler", sourceZ).map((record) => record.id), ["shared-id"]);
+  assert.deepEqual(manager.listSource("session-reconciler", sourceA), []);
 });
 
 test("serializes same-source updates before snapshotting their complete source list", async () => {
@@ -230,6 +337,37 @@ test("proves recovery after a provider replacement failure without leaking provi
     ["user-b", 14]
   ]);
   assert.equal(calls, 2, "the complete original source list must be restored");
+});
+
+test("keeps local state unchanged when provider-projected fields cannot be cloned for commit", async () => {
+  const manager = new BreakpointManager();
+  let calls = 0;
+  const session = sessionWith(async (_filePath, records) => {
+    calls += 1;
+    if (calls === 1) {
+      return records.map((record) => ({
+        id: 1,
+        verified: true,
+        line: record.line,
+        message: (() => "uncloneable") as unknown as string
+      }));
+    }
+    return dapReplies(records);
+  });
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "agent-a", file: sourceA, line: 10, owner: "agent" });
+  addBreakpoint(manager, session.sessionId, { id: "user-b", file: sourceA, line: 14, owner: "user" });
+
+  await assertRejectsWithCode("BREAKPOINT_UPDATE_FAILED", () => reconciler.update(session, {
+    breakpointId: "agent-a",
+    line: 22
+  }));
+
+  assert.equal(calls, 2);
+  assert.deepEqual(manager.listSource(session.sessionId, sourceA).map((record) => [record.id, record.line]), [
+    ["agent-a", 10],
+    ["user-b", 14]
+  ]);
 });
 
 test("reports indeterminate state when restoration cannot be proven", async () => {

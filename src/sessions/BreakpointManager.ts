@@ -17,6 +17,11 @@ export type ProjectBreakpointFilter = {
   file?: string;
 };
 
+export type BreakpointSourceReplacement = {
+  filePath: string;
+  records: BreakpointRecord[];
+};
+
 export class BreakpointManager {
   bySession: Map<string, Map<string, BreakpointRecord>>;
   byProject: Map<string, Map<string, ProjectBreakpointRecord>>;
@@ -101,26 +106,41 @@ export class BreakpointManager {
   }
 
   replaceSource(sessionId: string, filePath: string, records: BreakpointRecord[]): void {
-    const normalizedFile = path.resolve(filePath);
+    this.replaceSources(sessionId, [{ filePath, records }]);
+  }
+
+  replaceSources(sessionId: string, replacements: BreakpointSourceReplacement[]): void {
+    const prepared = this.#prepareSourceReplacements(sessionId, replacements);
+    if (prepared.length === 0) return;
+
+    const selectedSources = new Set(prepared.map((replacement) => replacement.filePath));
     const existing = this.bySession.get(sessionId);
     if (existing) {
-      for (const [id, breakpoint] of existing.entries()) {
-        if (path.resolve(breakpoint.file) === normalizedFile) existing.delete(id);
+      for (const replacement of prepared) {
+        for (const record of replacement.records) {
+          const conflicting = existing.get(record.id);
+          if (conflicting && !selectedSources.has(path.resolve(conflicting.file))) {
+            throw new Error(`Breakpoint ${record.id} belongs to an unselected source.`);
+          }
+        }
       }
     }
 
-    if (records.length === 0) return;
-    const sessionBreakpoints = existing ?? new Map<string, BreakpointRecord>();
-    if (!existing) this.bySession.set(sessionId, sessionBreakpoints);
-    for (const record of records) {
-      const replacement = this.#clone(record);
-      replacement.sessionId = sessionId;
-      replacement.file = normalizedFile;
-      // A relocation can insert an existing id into a different source. Delete it
-      // first so the replacement list's order is retained for that source.
-      sessionBreakpoints.delete(replacement.id);
-      sessionBreakpoints.set(replacement.id, replacement);
+    // Clone every current record before building the final map. No stored map is
+    // modified until all input and existing data has passed cloning/preflight.
+    const finalSession = new Map<string, BreakpointRecord>(
+      [...(existing?.entries() ?? [])].map(([id, breakpoint]) => [id, this.#clone(breakpoint)])
+    );
+    for (const [id, breakpoint] of finalSession.entries()) {
+      if (selectedSources.has(path.resolve(breakpoint.file))) finalSession.delete(id);
     }
+    for (const replacement of prepared) {
+      for (const record of replacement.records) {
+        finalSession.set(record.id, record);
+      }
+    }
+
+    this.bySession.set(sessionId, finalSession);
   }
 
   addProject(breakpoint: ProjectBreakpointInput): ProjectBreakpointRecord {
@@ -205,5 +225,32 @@ export class BreakpointManager {
 
   #clone<T extends BreakpointRecord>(breakpoint: T): T {
     return structuredClone(breakpoint);
+  }
+
+  #prepareSourceReplacements(
+    sessionId: string,
+    replacements: BreakpointSourceReplacement[]
+  ): Array<{ filePath: string; records: BreakpointRecord[] }> {
+    const prepared: Array<{ filePath: string; records: BreakpointRecord[] }> = [];
+    const sources = new Set<string>();
+    const ids = new Set<string>();
+
+    for (const replacement of replacements) {
+      const filePath = path.resolve(replacement.filePath);
+      if (sources.has(filePath)) throw new Error(`Source replacement was duplicated for ${filePath}.`);
+      sources.add(filePath);
+
+      const records = replacement.records.map((record) => {
+        const clone = this.#clone(record);
+        if (!clone.id) throw new Error("Breakpoint replacement requires an id.");
+        if (ids.has(clone.id)) throw new Error(`Breakpoint replacement id was duplicated: ${clone.id}.`);
+        ids.add(clone.id);
+        clone.sessionId = sessionId;
+        clone.file = filePath;
+        return clone;
+      });
+      prepared.push({ filePath, records });
+    }
+    return prepared;
   }
 }
