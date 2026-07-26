@@ -105,9 +105,12 @@ test("reconciles an agent line move without dropping user breakpoints", async ()
 });
 
 test("requires complete well-formed provider evidence before committing a non-empty source update", async () => {
+  const sparse = new Array<DapBreakpoint>(2);
+  sparse[0] = { id: 1, verified: true, line: 22 };
   for (const incomplete of [
     [],
     [{ id: 1, verified: true, line: 22 }],
+    sparse,
     [{ id: 1, verified: "not-a-boolean", line: 22 }],
     { not: "an array" }
   ] as unknown[]) {
@@ -177,6 +180,117 @@ test("accepts complete unverified evidence with adapter breakpoint id zero", asy
   assert.equal(result.verified, false);
   assert.equal(result.current.adapterBreakpointId, 0);
   assert.equal(manager.get(session.sessionId, "agent-a")?.adapterBreakpointId, 0);
+});
+
+test("rejects full-cardinality apply evidence with invalid scalar fields", async () => {
+  const manager = new BreakpointManager();
+  let calls = 0;
+  const session = sessionWith(async (_filePath, records) => {
+    calls += 1;
+    if (calls === 1) {
+      return [{
+        id: 0,
+        verified: true,
+        line: "not-a-number",
+        column: "also-not-a-number",
+        message: 42
+      } as unknown as DapBreakpoint];
+    }
+    return dapReplies(records);
+  });
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "agent-a", file: sourceA, line: 10, owner: "agent" });
+
+  await assertRejectsWithCode("BREAKPOINT_UPDATE_FAILED", () => reconciler.update(session, {
+    breakpointId: "agent-a",
+    line: 22
+  }));
+
+  assert.equal(calls, 2);
+  assert.equal(manager.get(session.sessionId, "agent-a")?.line, 10);
+});
+
+test("treats invalid rollback scalar evidence as indeterminate", async () => {
+  const manager = new BreakpointManager();
+  let calls = 0;
+  const session = sessionWith(async () => {
+    calls += 1;
+    return [{
+      id: 1,
+      verified: true,
+      line: "invalid"
+    } as unknown as DapBreakpoint];
+  });
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "agent-a", file: sourceA, line: 10, owner: "agent" });
+
+  const error = await assertRejectsWithCode("BREAKPOINT_ROLLBACK_FAILED", () => reconciler.update(session, {
+    breakpointId: "agent-a",
+    line: 22
+  }));
+
+  assert.deepEqual((error as { details: unknown }).details, {
+    outcome: "indeterminate",
+    retrySafe: false,
+    rollbackApplied: false,
+    affectedIds: ["agent-a"],
+    recommendedAction: "Inspect the debugger breakpoint state, re-list breakpoints, and reconcile before retrying."
+  });
+  assert.equal(calls, 2);
+  assert.equal(manager.get(session.sessionId, "agent-a")?.line, 10);
+});
+
+test("commits valid falsey adapter evidence exactly", async () => {
+  const manager = new BreakpointManager();
+  const session = sessionWith(async () => [{
+    id: 0,
+    verified: false,
+    line: 0,
+    column: 0,
+    message: ""
+  }]);
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "agent-a", file: sourceA, line: 10, column: 2, owner: "agent" });
+
+  const result = await reconciler.update(session, { breakpointId: "agent-a", condition: "ready" });
+
+  assert.equal(result.verified, false);
+  assert.equal(result.current.adapterBreakpointId, 0);
+  assert.equal(result.current.line, 0);
+  assert.equal(result.current.column, 0);
+  assert.equal(result.current.message, "");
+  assert.deepEqual(result.changedFields, ["line", "column", "condition"]);
+  assert.equal(manager.get(session.sessionId, "agent-a")?.message, "");
+});
+
+test("rejects accessor-backed evidence without leaking it into local state", async () => {
+  const manager = new BreakpointManager();
+  let calls = 0;
+  let getterReads = 0;
+  const hostile: DapBreakpoint = { id: 1, verified: true, line: 22 };
+  Object.defineProperty(hostile, "message", {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error("provider getter must not run");
+    }
+  });
+  const session = sessionWith(async (_filePath, records) => {
+    calls += 1;
+    return calls === 1 ? [hostile] : dapReplies(records);
+  });
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "agent-a", file: sourceA, line: 10, owner: "agent" });
+
+  await assertRejectsWithCode("BREAKPOINT_UPDATE_FAILED", () => reconciler.update(session, {
+    breakpointId: "agent-a",
+    line: 22
+  }));
+
+  assert.equal(calls, 2);
+  assert.equal(getterReads, 0);
+  assert.equal(manager.get(session.sessionId, "agent-a")?.line, 10);
+  assert.equal(manager.get(session.sessionId, "agent-a")?.message, undefined);
 });
 
 test("enforces user-breakpoint ownership without changing stored ownership", async () => {

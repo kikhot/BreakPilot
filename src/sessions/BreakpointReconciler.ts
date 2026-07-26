@@ -1,4 +1,5 @@
 import path from "node:path";
+import { types } from "node:util";
 
 import { BreakpointManager } from "./BreakpointManager.ts";
 import type { DapBreakpoint } from "../types/dap.ts";
@@ -103,8 +104,8 @@ export class BreakpointReconciler {
         // mutate our desired snapshot while returning adapter evidence.
         const providerInput = source.desired.map((breakpoint) => this.#clone(breakpoint));
         const responses = await session.provider.setBreakpoints(source.filePath, providerInput);
-        this.#assertCompleteAdapterEvidence(source.desired, responses);
-        appliedBySource.set(source.filePath, this.#projectAdapterEvidence(source.desired, responses));
+        const evidence = this.#normalizeAdapterEvidence(source.desired, responses);
+        appliedBySource.set(source.filePath, this.#projectAdapterEvidence(source.desired, evidence));
       }
 
       // No local source list changes before every provider call has fulfilled and
@@ -279,7 +280,7 @@ export class BreakpointReconciler {
       const projected = this.#clone(breakpoint);
       if (!response) return projected;
 
-      projected.verified = Boolean(response.verified);
+      projected.verified = response.verified;
       if (response.message !== undefined) projected.message = response.message;
       if (response.id !== undefined) projected.adapterBreakpointId = response.id;
       if (response.line !== undefined) projected.line = response.line;
@@ -296,7 +297,7 @@ export class BreakpointReconciler {
           source.filePath,
           source.original.map((breakpoint) => this.#clone(breakpoint))
         );
-        this.#assertCompleteAdapterEvidence(source.original, responses);
+        this.#normalizeAdapterEvidence(source.original, responses);
       } catch {
         restored = false;
       }
@@ -304,19 +305,84 @@ export class BreakpointReconciler {
     return restored;
   }
 
-  #assertCompleteAdapterEvidence(desired: BreakpointRecord[], responses: unknown): asserts responses is DapBreakpoint[] {
-    if (!Array.isArray(responses) || responses.length !== desired.length) {
-      throw new Error("Provider did not return complete breakpoint evidence.");
-    }
-    for (const response of responses) {
-      if (typeof response !== "object" || response === null) {
-        throw new Error("Provider returned a malformed breakpoint evidence entry.");
+  #normalizeAdapterEvidence(desired: BreakpointRecord[], responses: unknown): DapBreakpoint[] {
+    try {
+      if (!Array.isArray(responses) || types.isProxy(responses) || responses.length !== desired.length) {
+        throw new Error("Provider did not return complete breakpoint evidence.");
       }
-      const verified = Object.getOwnPropertyDescriptor(response, "verified");
-      if (!verified || !("value" in verified) || typeof verified.value !== "boolean") {
-        throw new Error("Provider returned a malformed breakpoint evidence entry.");
+      const normalized: DapBreakpoint[] = [];
+      for (let index = 0; index < responses.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(responses, String(index));
+        if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+          throw new Error("Provider returned an unsafe breakpoint evidence entry.");
+        }
+        normalized.push(this.#normalizeAdapterEvidenceEntry(descriptor.value));
+      }
+      return normalized;
+    } catch {
+      throw new Error("Provider returned malformed breakpoint evidence.");
+    }
+  }
+
+  #normalizeAdapterEvidenceEntry(response: unknown): DapBreakpoint {
+    if (typeof response !== "object" || response === null || Array.isArray(response) || types.isProxy(response)) {
+      throw new Error("Breakpoint evidence entry is not a plain object.");
+    }
+    const prototype = Object.getPrototypeOf(response);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error("Breakpoint evidence entry is not a plain object.");
+    }
+
+    for (const key of Reflect.ownKeys(response)) {
+      if (typeof key !== "string") throw new Error("Breakpoint evidence entry contains an unsupported key.");
+      const descriptor = Object.getOwnPropertyDescriptor(response, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+        throw new Error("Breakpoint evidence entry contains an unsafe property.");
       }
     }
+
+    const verified = this.#requiredEvidenceValue(response, "verified");
+    if (typeof verified !== "boolean") throw new Error("Breakpoint evidence verified must be boolean.");
+
+    const normalized: DapBreakpoint = { verified };
+    const id = this.#optionalEvidenceValue(response, "id");
+    if (id !== undefined) {
+      if (typeof id !== "number" || !Number.isSafeInteger(id)) throw new Error("Breakpoint evidence id must be a safe integer.");
+      normalized.id = id;
+    }
+    const message = this.#optionalEvidenceValue(response, "message");
+    if (message !== undefined) {
+      if (typeof message !== "string") throw new Error("Breakpoint evidence message must be a string.");
+      normalized.message = message;
+    }
+    const line = this.#optionalEvidenceValue(response, "line");
+    if (line !== undefined) {
+      if (typeof line !== "number" || !Number.isSafeInteger(line)) throw new Error("Breakpoint evidence line must be a safe integer.");
+      normalized.line = line;
+    }
+    const column = this.#optionalEvidenceValue(response, "column");
+    if (column !== undefined) {
+      if (typeof column !== "number" || !Number.isSafeInteger(column)) throw new Error("Breakpoint evidence column must be a safe integer.");
+      normalized.column = column;
+    }
+    return normalized;
+  }
+
+  #requiredEvidenceValue(response: object, key: string): unknown {
+    const descriptor = Object.getOwnPropertyDescriptor(response, key);
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new Error(`Breakpoint evidence ${key} is missing or unsafe.`);
+    }
+    return descriptor.value;
+  }
+
+  #optionalEvidenceValue(response: object, key: string): unknown {
+    const descriptor = Object.getOwnPropertyDescriptor(response, key);
+    if (!descriptor) return undefined;
+    if (!descriptor.enumerable || !("value" in descriptor)) {
+      throw new Error(`Breakpoint evidence ${key} is unsafe.`);
+    }
+    return descriptor.value;
   }
 
   #affectedSources(target: BreakpointRecord, patch: BreakpointPatchRequest): string[] {
