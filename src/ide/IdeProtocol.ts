@@ -23,6 +23,7 @@ export const IdeMessageTypes = Object.freeze({
   AGENT_CLEAR_BREAKPOINTS: "agent_clear_breakpoints",
   AGENT_LIST_BREAKPOINTS: "agent_list_breakpoints",
   AGENT_LIST_RUN_CONFIGURATIONS: "agent_list_run_configurations",
+  AGENT_REQUEST_STACK: "agent_request_stack",
   AGENT_REQUEST_VARIABLES: "agent_request_variables",
   AGENT_START_DEBUG: "agent_start_debug",
   AGENT_CONTINUE: "agent_continue",

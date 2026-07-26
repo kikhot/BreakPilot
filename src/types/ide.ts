@@ -3,7 +3,20 @@ import type { DebugLanguage, SessionStateValue } from "./debug.ts";
 import type { AnyRecord } from "./json.ts";
 import type { BreakpointInput, BreakpointRecord } from "./sessions.ts";
 
-export interface BridgeMessage {
+export interface DebuggerFeatureMap {
+  breakpointUpdate?: boolean;
+  eventStream?: boolean;
+  stackPagination?: boolean;
+  variableHandles?: boolean;
+  nativeSetVariable?: boolean;
+}
+
+export interface DebuggerProtocolInfo {
+  debuggerProtocolVersion?: number;
+  debuggerFeatures?: DebuggerFeatureMap;
+}
+
+export interface BridgeMessage extends DebuggerProtocolInfo {
   id?: string;
   type: string;
   clientId?: string;
@@ -17,6 +30,11 @@ export interface BridgeMessage {
   action?: string;
   command?: string;
   requestId?: string;
+  pauseEpoch?: number;
+  expectedPauseEpoch?: number;
+  ref?: number | string;
+  offset?: number;
+  limit?: number;
   options?: AnyRecord;
   snapshot?: AnyRecord;
   ide?: string;
@@ -25,7 +43,7 @@ export interface BridgeMessage {
   [key: string]: any;
 }
 
-export interface IdeDebugSessionInfo {
+export interface IdeDebugSessionInfo extends DebuggerProtocolInfo {
   ideSessionId: string;
   clientId: string;
   workspaceRoot?: string;
@@ -37,11 +55,13 @@ export interface IdeDebugSessionInfo {
   stopped?: StoppedEvent | AnyRecord;
   topFrame?: DapStackFrame | AnyRecord;
   capabilities?: AnyRecord;
+  negotiatedDebuggerFeatures: Required<DebuggerFeatureMap>;
+  pauseEpoch?: number;
   startedAt: string;
   updatedAt: string;
 }
 
-export interface IdeClientInfo {
+export interface IdeClientInfo extends DebuggerProtocolInfo {
   clientId: string;
   ide: string;
   workspaceRoot?: string;

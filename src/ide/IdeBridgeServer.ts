@@ -226,6 +226,10 @@ export class IdeBridgeServer extends EventEmitter {
   sendToClient(clientId: string | undefined, message: Partial<BridgeMessage>): boolean {
     const socket = this.registry.socketForClient(clientId);
     if (!socket) return false;
+    if (message.type === IdeMessageTypes.AGENT_REQUEST_STACK) {
+      const session = this.registry.findSessionForClient(clientId, message.ideSessionId);
+      if (!session?.negotiatedDebuggerFeatures.stackPagination) return false;
+    }
     this.#send(socket, makeBridgeMessage(String(message.type), { ...message, clientId }));
     return true;
   }
@@ -271,7 +275,15 @@ export class IdeBridgeServer extends EventEmitter {
 
   #handleMessage(socket: Socket, message: BridgeMessage): void {
     const clientId = this.socketClientIds.get(socket);
-    if (clientId) message.clientId = clientId;
+    if (!clientId || this.registry.socketForClient(clientId) !== socket) return;
+    message.clientId = clientId;
+    if (
+      message.ideSessionId &&
+      !this.#isSessionLifecycleMessage(message.type) &&
+      !this.registry.findSessionForClient(clientId, message.ideSessionId)
+    ) {
+      return;
+    }
     if (message.type === IdeMessageTypes.IDE_REGISTER) {
       if (!this.#isWorkspaceAllowed(message.workspaceRoot)) {
         this.#send(socket, makeBridgeMessage("bridge_rejected", {
@@ -283,11 +295,18 @@ export class IdeBridgeServer extends EventEmitter {
         socket.end();
         return;
       }
-      this.registry.update(clientId, {
+      const registration: Partial<IdeClientInfo> = {
         ide: message.ide,
         workspaceRoot: message.workspaceRoot ? path.resolve(message.workspaceRoot) : message.workspaceRoot,
         capabilities: message.capabilities ?? {}
-      });
+      };
+      if (Object.hasOwn(message, "debuggerProtocolVersion")) {
+        registration.debuggerProtocolVersion = message.debuggerProtocolVersion;
+      }
+      if (Object.hasOwn(message, "debuggerFeatures")) {
+        registration.debuggerFeatures = message.debuggerFeatures;
+      }
+      this.registry.update(clientId, registration);
       this.#send(socket, makeBridgeMessage("ide_registered", {
         clientId,
         workspaceRoot: this.workspaceRoot,
@@ -298,17 +317,17 @@ export class IdeBridgeServer extends EventEmitter {
       this.registry.update(clientId, { lastHeartbeatAt: new Date().toISOString() });
       this.#send(socket, makeBridgeMessage("ide_heartbeat_ack", { clientId }));
     } else if (message.type === IdeMessageTypes.IDE_SESSION_STARTED) {
-      this.registry.upsertSession(clientId, message, "running");
+      if (!this.registry.upsertSession(clientId, message, "running")) return;
     } else if (
       message.type === IdeMessageTypes.IDE_SESSION_PAUSED ||
       message.type === IdeMessageTypes.IDE_SESSION_STOPPED ||
       message.type === IdeMessageTypes.IDE_BREAKPOINT_HIT
     ) {
-      this.registry.upsertSession(clientId, message, "paused");
+      if (!this.registry.upsertSession(clientId, message, "paused")) return;
     } else if (message.type === IdeMessageTypes.IDE_SESSION_RESUMED) {
-      this.registry.upsertSession(clientId, message, "running");
+      if (!this.registry.upsertSession(clientId, message, "running")) return;
     } else if (message.type === IdeMessageTypes.IDE_SESSION_TERMINATED) {
-      this.registry.upsertSession(clientId, message, "terminated");
+      if (!this.registry.upsertSession(clientId, message, "terminated")) return;
     }
     this.audit?.record("ide_bridge_message", { clientId, type: message.type });
     this.emit("message", { clientId, message });
@@ -326,11 +345,21 @@ export class IdeBridgeServer extends EventEmitter {
     return path.resolve(workspaceRoot) === this.workspaceRoot;
   }
 
+  #isSessionLifecycleMessage(type: string): boolean {
+    return type === IdeMessageTypes.IDE_SESSION_STARTED ||
+      type === IdeMessageTypes.IDE_SESSION_PAUSED ||
+      type === IdeMessageTypes.IDE_SESSION_STOPPED ||
+      type === IdeMessageTypes.IDE_BREAKPOINT_HIT ||
+      type === IdeMessageTypes.IDE_SESSION_RESUMED ||
+      type === IdeMessageTypes.IDE_SESSION_TERMINATED;
+  }
+
   #removeSocket(socket: Socket): void {
     const clientId = this.socketClientIds.get(socket);
-    if (clientId) this.registry.remove(clientId);
+    const currentSocket = Boolean(clientId && this.registry.socketForClient(clientId) === socket);
+    if (clientId && currentSocket) this.registry.remove(clientId);
     this.socketClientIds.delete(socket);
     this.buffers.delete(socket);
-    this.emit("disconnect", { clientId });
+    if (currentSocket) this.emit("disconnect", { clientId });
   }
 }
