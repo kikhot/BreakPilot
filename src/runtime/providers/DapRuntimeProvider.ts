@@ -4,6 +4,7 @@ import type {
   DapEventMessage,
   DapGotoTarget,
   DapStackFrame,
+  FreshStopBoundary,
   FreshStopResult,
   StoppedEvent
 } from "../../types/dap.ts";
@@ -21,6 +22,8 @@ import type {
   RuntimeEvent,
   RuntimeEventKind,
   RuntimeEventPage,
+  RuntimeStackRequest,
+  RuntimeStackResult,
   ThreadId
 } from "../../types/sessions.ts";
 import { DapSession } from "../../dap/DapSession.ts";
@@ -184,6 +187,10 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     return this.dap.waitForBreakpoint(timeoutMs);
   }
 
+  captureStopBoundary(): FreshStopBoundary {
+    return this.dap.captureStopBoundary();
+  }
+
   async runToLine(args: RunToLineArgs): Promise<RunToLineResult> {
     const requestedPosition = this.#requestedPosition(args);
     this.#assertPaused();
@@ -224,8 +231,71 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     return this.dap.threads();
   }
 
-  async getCallStack(threadId: number | null = this.dap.threadId, limit = 20): Promise<AnyRecord> {
-    return this.dap.stackTrace(threadId, limit);
+  async getCallStack(
+    threadId: ThreadId | null | undefined = this.dap.threadId,
+    request: RuntimeStackRequest = { offset: 0, limit: 20 }
+  ): Promise<RuntimeStackResult> {
+    if (typeof threadId === "string") {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "DAP thread ids must be numeric.", { threadId });
+    }
+    const supportsDelayedStackTraceLoading = this.dap.capabilities?.supportsDelayedStackTraceLoading === true;
+    const stack = supportsDelayedStackTraceLoading
+      ? await this.dap.stackTrace(threadId, request.limit, request.offset)
+      : await this.dap.stackTraceFull(threadId);
+    const rawFrames = stack.stackFrames;
+    const stackFrames = supportsDelayedStackTraceLoading
+      ? rawFrames.slice(0, request.limit)
+      : rawFrames.slice(request.offset, request.offset + request.limit);
+    const totalFrames = Number.isSafeInteger(stack.totalFrames) && Number(stack.totalFrames) >= 0
+      ? Number(stack.totalFrames)
+      : undefined;
+    const providerPage = {
+      threadId: stack.threadId,
+      stackFrames,
+      offset: request.offset,
+      ...(totalFrames === undefined ? {} : { totalFrames }),
+      completeness: totalFrames === undefined ? "unknown" as const : "partial" as const,
+      partial: true,
+      truncationReason: "provider" as const
+    };
+    if (totalFrames === undefined || request.offset > totalFrames) return providerPage;
+
+    if (supportsDelayedStackTraceLoading) {
+      const expectedCount = Math.min(request.limit, totalFrames - request.offset);
+      if (rawFrames.length !== expectedCount) return providerPage;
+    } else if (rawFrames.length !== totalFrames) {
+      return providerPage;
+    }
+
+    const nextOffset = request.offset + stackFrames.length;
+    if (nextOffset === totalFrames) {
+      return {
+        threadId: stack.threadId,
+        stackFrames,
+        offset: request.offset,
+        totalFrames,
+        completeness: "complete",
+        partial: false
+      };
+    }
+    if (
+      request.limit > 0 &&
+      stackFrames.length === request.limit &&
+      nextOffset > request.offset &&
+      nextOffset < totalFrames
+    ) {
+      return {
+        threadId: stack.threadId,
+        stackFrames,
+        offset: request.offset,
+        totalFrames,
+        completeness: "partial",
+        partial: true,
+        nextOffset,
+        truncationReason: "limit"
+      };
+    }
+    return providerPage;
   }
 
   async getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot> {
@@ -236,7 +306,7 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     args: AnyRecord,
     limits: Required<VariableLimits>
   ): Promise<InspectVariableResult> {
-    const variablesReference = Number(args.variablesReference);
+    const variablesReference = this.#dapVariableReference(args.variablesReference);
     const variables = await this.dap.variables(variablesReference, {
       start: args.start ?? 0,
       count: args.count ?? limits.maxItems
@@ -259,10 +329,10 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async setVariable(args: AnyRecord): Promise<AnyRecord> {
-    const parentRef = Number(args.parentRef ?? 0);
+    const parentRef = this.#dapVariableReference(args.parentRef);
     const name = String(args.name ?? "");
     const value = String(args.newValue ?? "");
-    if (!parentRef || !name) {
+    if (!name) {
       throw new Error("DAP setVariable requires parentRef and name.");
     }
     return this.dap.setVariable(parentRef, name, value);
@@ -270,7 +340,7 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
 
   async evaluate(expression: string, options: AnyRecord = {}): Promise<AnyRecord> {
     let frameId = options.frameId;
-    if (!frameId) {
+    if (frameId === undefined) {
       const stack = await this.dap.stackTrace(options.threadId ?? this.dap.threadId, 1);
       frameId = stack.stackFrames[0]?.id;
     }
@@ -303,6 +373,15 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
     }
   }
 
+  #dapVariableReference(value: unknown): number {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "DAP variable references must be positive integers.", {
+        variablesReference: value
+      });
+    }
+    return value;
+  }
+
   #hasNativeRunToLine(): boolean {
     return this.dap.capabilities.supportsGotoTargetsRequest === true &&
       typeof this.dap.gotoTargets === "function" &&
@@ -314,7 +393,7 @@ export class DapRuntimeProvider implements RuntimeDebugProvider {
   #fallbackSession(): DebugSessionRecord | null {
     if (!this.options.breakpointReconciler || !this.options.getSession) return null;
     const session = this.options.getSession() ?? null;
-    if (!session || session.provider !== this || session.dap !== this.dap || session.providerKind !== "dap") return null;
+    if (!session || session.provider !== this || session.sessionId !== this.sessionId) return null;
     if (typeof this.options.breakpointReconciler.withTemporaryBreakpoint !== "function") return null;
     return session;
   }

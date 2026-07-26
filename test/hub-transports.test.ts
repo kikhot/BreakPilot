@@ -277,6 +277,8 @@ try {
     createdAt: new Date(0).toISOString(),
     providerKind: "dap",
     provider: {
+      kind: "dap",
+      sessionId: "sess-archived",
       async disconnect() {
         return {};
       }
@@ -308,6 +310,8 @@ try {
     createdAt: new Date(0).toISOString(),
     providerKind: "dap",
     provider: {
+      kind: "dap",
+      sessionId: "sess-archived",
       async disconnect() {
         return {};
       }

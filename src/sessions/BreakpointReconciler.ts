@@ -120,11 +120,11 @@ export class BreakpointReconciler {
     callback: (context: TemporaryBreakpointExecutionContext) => Promise<T>,
     options: TemporaryBreakpointTransactionOptions = {}
   ): Promise<TemporaryBreakpointTransaction<T>> {
-    const dap = session.dap;
-    if (!dap) {
+    const captureStopBoundary = session.provider.captureStopBoundary?.bind(session.provider);
+    if (!captureStopBoundary) {
       throw new BreakPilotError(
         ErrorCodes.UNSUPPORTED_CAPABILITY,
-        "Temporary run-to-line breakpoints require a live DAP session.",
+        "Temporary run-to-line breakpoints require a provider-owned causal boundary.",
         { sessionId: session.sessionId, capability: "runToLine" }
       );
     }
@@ -159,7 +159,7 @@ export class BreakpointReconciler {
         // No asynchronous work is allowed between this capture and invoking the
         // callback. The callback registers its fresh wait before dispatching its
         // one execution request, closing the stale-stop race.
-        const boundary = dap.captureStopBoundary();
+        const boundary = captureStopBoundary();
         callbackResult = await callback({
           temporaryBreakpoint: this.#clone(committedTemporary),
           boundary

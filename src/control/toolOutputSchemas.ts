@@ -180,10 +180,17 @@ export const callStackSuccessSchema: JsonSchema = {
     frames: { type: "array", items: frameSchema },
     offset: { type: "integer", minimum: 0 },
     totalFrames: { type: "integer", minimum: 0 },
+    pauseEpoch: { type: "integer", minimum: 0 },
+    completeness: { type: "string", enum: ["complete", "partial", "unknown"] },
     partial: { type: "boolean" },
+    nextOffset: { type: "integer", minimum: 0 },
+    truncationReason: {
+      type: "string",
+      enum: ["limit", "provider", "timeout", "noSuspendContext"]
+    },
     warnings: warningsSchema
   },
-  required: ["threadId", "frames", "offset", "totalFrames"]
+  required: ["threadId", "frames", "offset", "completeness", "partial"]
 };
 
 export const frameSuccessSchema: JsonSchema = {
@@ -209,18 +216,45 @@ export const valueSuccessSchema: JsonSchema = {
   }
 };
 
+const setValueSuccessCommonProperties: Record<string, JsonSchema> = {
+  oldValue: scalarValueSchema,
+  newValue: { type: "string" },
+  applied: { type: "boolean" },
+  verified: { type: "boolean" },
+  mutationMode: { type: "string", enum: ["native", "evaluateAssignment"] },
+  result: providerPayloadSchema,
+  warnings: warningsSchema
+};
+
+const setValuePathSuccessSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...setValueSuccessCommonProperties,
+    path: { type: "array", minItems: 1, items: { type: "string" } }
+  },
+  required: ["path", "oldValue", "newValue", "applied", "verified", "mutationMode"]
+};
+
+const setValueRefSuccessSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...setValueSuccessCommonProperties,
+    ref: { oneOf: [{ type: "number" }, { type: "string" }] }
+  },
+  required: ["ref", "oldValue", "newValue", "applied", "verified", "mutationMode"]
+};
+
 export const setValueSuccessSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    path: { type: "array", items: { type: "string" } },
-    oldValue: scalarValueSchema,
-    newValue: { type: "string" },
-    applied: { type: "boolean" },
-    result: providerPayloadSchema,
-    warnings: warningsSchema
+    ...setValueSuccessCommonProperties,
+    path: { type: "array", minItems: 1, items: { type: "string" } },
+    ref: { oneOf: [{ type: "number" }, { type: "string" }] }
   },
-  required: ["path", "oldValue"]
+  oneOf: [setValuePathSuccessSchema, setValueRefSuccessSchema]
 };
 
 export const evalSuccessSchema: JsonSchema = {

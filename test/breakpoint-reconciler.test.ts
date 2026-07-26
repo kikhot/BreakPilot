@@ -638,6 +638,7 @@ test("temporary breakpoint cleanup failure retains complete adapter-acknowledged
     if (calls === 1) return dapReplies(records);
     return [];
   });
+  session.provider.captureStopBoundary = () => ({ stopSequence: 4, terminalSequence: 2 });
   session.dap = {
     captureStopBoundary: () => ({ stopSequence: 4, terminalSequence: 2 })
   } as unknown as DebugSessionRecord["dap"];
@@ -662,4 +663,32 @@ test("temporary breakpoint cleanup failure retains complete adapter-acknowledged
     [callbackTemporary?.id, true, 101, 22]
   ]);
   assert.equal((error as { details: { temporaryBreakpointId?: string } }).details.temporaryBreakpointId, callbackTemporary?.id);
+});
+
+test("temporary breakpoint causal boundary comes only from the live provider", async () => {
+  const manager = new BreakpointManager();
+  const session = sessionWith(async (_filePath, records) => dapReplies(records));
+  let providerCaptures = 0;
+  let staleCaptures = 0;
+  session.provider.captureStopBoundary = () => {
+    providerCaptures += 1;
+    return { stopSequence: 8, terminalSequence: 5 };
+  };
+  session.dap = {
+    captureStopBoundary: () => {
+      staleCaptures += 1;
+      return { stopSequence: 1, terminalSequence: 1 };
+    }
+  } as unknown as DebugSessionRecord["dap"];
+  const reconciler = new BreakpointReconciler(manager);
+
+  const result = await reconciler.withTemporaryBreakpoint(
+    session,
+    { filePath: sourceA, line: 22 },
+    async (context) => context.boundary
+  );
+
+  assert.deepEqual(result.result, { stopSequence: 8, terminalSequence: 5 });
+  assert.equal(providerCaptures, 1);
+  assert.equal(staleCaptures, 0);
 });

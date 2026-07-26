@@ -7,7 +7,16 @@ import type { DapBreakpoint, StoppedEvent } from "../../types/dap.ts";
 import type { DebugLanguage, RuntimeStepKind } from "../../types/debug.ts";
 import type { InspectVariableResult, RuntimeSnapshot, VariableLimits } from "../../types/inspection.ts";
 import type { AnyRecord } from "../../types/json.ts";
-import type { BreakpointFilter, BreakpointRecord, RunToLineArgs, RunToLineResult, RuntimeDebugProvider } from "../../types/sessions.ts";
+import type {
+  BreakpointFilter,
+  BreakpointRecord,
+  RunToLineArgs,
+  RunToLineResult,
+  RuntimeDebugProvider,
+  RuntimeStackRequest,
+  RuntimeStackResult,
+  ThreadId
+} from "../../types/sessions.ts";
 import {
   debugControlConfirmationRequest,
   evaluateConfirmationRequest,
@@ -15,6 +24,12 @@ import {
   variableInspectionConfirmationRequest
 } from "../../ide/ConfirmationPolicy.ts";
 import { IdeBridgeServer } from "../../ide/IdeBridgeServer.ts";
+import {
+  decodeBridgeEvent,
+  publicBridgeSnapshot,
+  safeBridgeDataRecord,
+  type SafeBridgeSnapshot
+} from "../../ide/BridgeEventDecoder.ts";
 import { IdeMessageTypes } from "../../ide/IdeProtocol.ts";
 import { BreakPilotError, ErrorCodes } from "../../utils/errors.ts";
 import { makeId } from "../../utils/ids.ts";
@@ -22,12 +37,11 @@ import { createDeferred, withTimeout } from "../../utils/timeout.ts";
 import type { RuntimeProviderCapabilities } from "../../types/capabilities.ts";
 import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../ProviderCapabilities.ts";
 
-type BridgeEvent = { clientId?: string; message: BridgeMessage };
 type StopTransitionBoundary = {
   operation: string;
   revision: number;
   capturedStop?: StoppedEvent;
-  listener?: (event: BridgeEvent) => void;
+  listener?: (event: unknown) => void;
 };
 
 export interface IdeRuntimeProviderOptions {
@@ -90,8 +104,8 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       );
       const responseBreakpoint = response.breakpoint as BreakpointRecord | undefined;
       results.push({
-        id: Number(responseBreakpoint?.adapterBreakpointId ?? breakpoint.adapterBreakpointId ?? 0),
-        verified: responseBreakpoint?.verified ?? true,
+        id: this.#dapBreakpointId(responseBreakpoint?.adapterBreakpointId ?? breakpoint.adapterBreakpointId, 0),
+        verified: this.#breakpointBoolean(responseBreakpoint?.verified, true),
         line: responseBreakpoint?.line ?? breakpoint.line,
         column: responseBreakpoint?.column ?? breakpoint.column,
         message: response.error?.message
@@ -131,7 +145,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         ? response.breakpoints
         : [];
     return rawBreakpoints
-      .map((breakpoint, index) => this.#breakpointFromIde(breakpoint as AnyRecord, index))
+      .map((breakpoint, index) => this.#breakpointFromIde(breakpoint, index))
       .filter((breakpoint): breakpoint is BreakpointRecord => Boolean(breakpoint));
   }
 
@@ -159,7 +173,11 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
 
     const requestId = makeId("ide_wait");
     const deferred = createDeferred<StoppedEvent>();
-    const listener = ({ clientId, message }: BridgeEvent) => {
+    const listener = (event: unknown) => {
+      const decoded = decodeBridgeEvent(event);
+      if (!decoded) return;
+      const { clientId } = decoded;
+      const message = decoded.message as BridgeMessage;
       if (clientId !== this.ideClientId) return;
       if (message.ideSessionId !== this.ideSessionId) return;
       if (
@@ -216,21 +234,27 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       : [];
   }
 
-  async getCallStack(threadId: number | null = this.threadId, limit = 20): Promise<AnyRecord> {
-    const snapshot = await this.getRuntimeSnapshot({ threadId, levels: limit, profile: "focused" }, {
+  async getCallStack(
+    threadId: ThreadId | null | undefined = this.threadId,
+    request: RuntimeStackRequest = { offset: 0, limit: 20 }
+  ): Promise<RuntimeStackResult> {
+    const snapshot = await this.getRuntimeSnapshot({
+      threadId,
+      levels: request.offset + request.limit,
+      profile: "focused"
+    }, {
       maxDepth: 0,
       maxItems: 1,
       maxStringLength: 200,
       redactPatterns: []
     });
-    const hasThreadSnapshot = Array.isArray((snapshot as AnyRecord).threads);
-    const partial = Boolean((snapshot as AnyRecord).partial) || (!hasThreadSnapshot && (snapshot.stackFrames?.length ?? 0) <= 1);
     return {
       threadId: snapshot.threadId ?? threadId,
-      stackFrames: snapshot.stackFrames.slice(0, limit),
-      totalFrames: snapshot.stackFrames.length,
-      partial,
-      capabilities: partial ? { stack: "topFrameOnly" } : { stack: "full" }
+      stackFrames: snapshot.stackFrames.slice(request.offset, request.offset + request.limit),
+      offset: request.offset,
+      completeness: "unknown",
+      partial: true,
+      truncationReason: "provider"
     };
   }
 
@@ -470,7 +494,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         bridgeError
       );
     }
-    return response.result ?? response;
+    return publicBridgeSnapshot((response.result ?? response) as SafeBridgeSnapshot) as AnyRecord;
   }
 
   async #confirm(request: IdeConfirmationRequest): Promise<void> {
@@ -479,7 +503,10 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     const topFrame = sessionInfo?.topFrame as AnyRecord | undefined;
     const source = topFrame?.source as AnyRecord | undefined;
     const deferred = createDeferred<void>();
-    const listener = ({ message }: BridgeEvent) => {
+    const listener = (event: unknown) => {
+      const decoded = decodeBridgeEvent(event);
+      if (!decoded || decoded.clientId !== this.ideClientId) return;
+      const message = decoded.message as BridgeMessage;
       if (message.confirmationId !== confirmationId) return;
       if (message.type === IdeMessageTypes.USER_REJECT_CONTINUE) {
         this.bridge.off("message", listener);
@@ -535,7 +562,10 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   ): Promise<BridgeMessage> {
     const requestId = makeId("ide_req");
     const deferred = createDeferred<BridgeMessage>();
-    const listener = ({ message }: BridgeEvent) => {
+    const listener = (event: unknown) => {
+      const decoded = decodeBridgeEvent(event);
+      if (!decoded || decoded.clientId !== this.ideClientId) return;
+      const message = decoded.message as BridgeMessage;
       if (message.requestId !== requestId) return;
       if (!responseTypes.includes(message.type)) return;
       if (!predicate(message)) return;
@@ -607,7 +637,11 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       operation,
       revision: this.#sessionRevision()
     };
-    transition.listener = ({ clientId, message }: BridgeEvent) => {
+    transition.listener = (event: unknown) => {
+      const decoded = decodeBridgeEvent(event);
+      if (!decoded) return;
+      const { clientId } = decoded;
+      const message = decoded.message as BridgeMessage;
       if (clientId !== this.ideClientId) return;
       if (message.ideSessionId !== this.ideSessionId) return;
       if (
@@ -641,13 +675,16 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     return normalized === "collecting data..." || normalized === "collecting data";
   }
 
-  #breakpointFromIde(raw: AnyRecord, index: number): BreakpointRecord | null {
-    const file = raw.file ?? raw.filePath;
-    const line = raw.line;
-    const type = typeof raw.type === "string" ? raw.type : "line";
-    if (type === "line" && (typeof file !== "string" || typeof line !== "number")) return null;
-    const id = String(raw.id ?? raw.breakpointId ?? raw.ideBreakpointId ?? `ide_bp_${index}`);
-    return {
+  #breakpointFromIde(value: unknown, index: number): BreakpointRecord | null {
+    try {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const raw = value as AnyRecord;
+      const file = raw.file ?? raw.filePath;
+      const line = raw.line;
+      const type = typeof raw.type === "string" ? raw.type : "line";
+      if (type === "line" && (typeof file !== "string" || typeof line !== "number")) return null;
+      const id = this.#opaqueId(raw.id) ?? this.#opaqueId(raw.breakpointId) ?? this.#opaqueId(raw.ideBreakpointId) ?? `ide_bp_${index}`;
+      return {
       id,
       sessionId: this.sessionId,
       file: typeof file === "string" ? file : "",
@@ -656,21 +693,44 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       condition: typeof raw.condition === "string" ? raw.condition : undefined,
       hitCondition: typeof raw.hitCondition === "string" ? raw.hitCondition : undefined,
       logMessage: typeof raw.logMessage === "string" ? raw.logMessage : undefined,
-      enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
-      temporary: Boolean(raw.temporary),
+      enabled: this.#breakpointBoolean(raw.enabled, true),
+      temporary: this.#breakpointBoolean(raw.temporary, false),
       suspendPolicy: raw.suspendPolicy === "ALL" || raw.suspendPolicy === "THREAD" || raw.suspendPolicy === "NONE"
         ? raw.suspendPolicy
         : undefined,
-      isLogMessage: Boolean(raw.isLogMessage),
-      isLogStack: Boolean(raw.isLogStack),
+      isLogMessage: this.#breakpointBoolean(raw.isLogMessage, false),
+      isLogStack: this.#breakpointBoolean(raw.isLogStack, false),
       owner: typeof raw.owner === "string" ? raw.owner : "user",
-      verified: raw.verified === undefined ? true : Boolean(raw.verified),
-      adapterBreakpointId: typeof raw.adapterBreakpointId === "number" || typeof raw.adapterBreakpointId === "string"
-        ? raw.adapterBreakpointId
-        : undefined,
-      ideBreakpointId: typeof raw.ideBreakpointId === "string" ? raw.ideBreakpointId : id,
+      verified: this.#breakpointBoolean(raw.verified, true),
+      adapterBreakpointId: this.#adapterBreakpointId(raw.adapterBreakpointId),
+      ideBreakpointId: this.#opaqueId(raw.ideBreakpointId) ?? id,
       createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString()
-    };
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  #opaqueId(value: unknown): string | undefined {
+    return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+  }
+
+  #adapterBreakpointId(value: unknown): number | string | undefined {
+    return typeof value === "number" && Number.isFinite(value) ? value : this.#opaqueId(value);
+  }
+
+  #breakpointBoolean(value: unknown, missingDefault: boolean): boolean {
+    if (typeof value === "boolean") return value;
+    return value === undefined ? missingDefault : false;
+  }
+
+  #dapBreakpointId(value: unknown, fallback: number): number {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim().length > 0) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return fallback;
   }
 
   #stoppedFromSession(session: IdeDebugSessionInfo): StoppedEvent | null {
@@ -709,7 +769,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         ? raw.threadId
         : undefined;
     const topFrame = raw.topFrame && typeof raw.topFrame === "object" && !Array.isArray(raw.topFrame) && Object.keys(raw.topFrame).length > 0
-      ? raw.topFrame
+      ? publicBridgeSnapshot(raw.topFrame as SafeBridgeSnapshot) as AnyRecord
       : undefined;
     const allThreadsStopped = typeof raw.allThreadsStopped === "boolean"
       ? raw.allThreadsStopped
@@ -772,10 +832,11 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
 }
 
 function bridgeErrorPayload(error: unknown): AnyRecord | null {
-  if (!error) return null;
-  if (typeof error !== "object") {
-    return { code: ErrorCodes.TOOL_FAILED, message: String(error) };
-  }
-  const payload = error as AnyRecord;
-  return Object.keys(payload).length > 0 ? payload : null;
+  const payload = safeBridgeDataRecord(error);
+  if (!payload || Object.keys(payload).length === 0) return null;
+  return {
+    ...payload,
+    code: typeof payload.code === "string" && payload.code.trim().length > 0 ? payload.code : ErrorCodes.TOOL_FAILED,
+    message: typeof payload.message === "string" && payload.message.trim().length > 0 ? payload.message : "IDE bridge request failed."
+  };
 }

@@ -18,7 +18,13 @@ const compactVariableNodeProperties: Record<string, JsonSchema> = {
   value: { type: "string" },
   path: { type: "array", items: { type: "string" } },
   type: { type: "string" },
-  ref: { type: "number" }
+  ref: { oneOf: [{ type: "number" }, { type: "string" }] },
+  pauseEpoch: { type: "integer", minimum: 0 },
+  childrenCount: { type: "integer", minimum: 0 },
+  complete: { type: "boolean" },
+  truncated: { type: "boolean" },
+  modifiable: { type: "boolean" },
+  mutationMode: { type: "string", enum: ["native", "evaluateAssignment"] }
 };
 
 // JsonSchema intentionally has no $ref support. A bounded schema keeps every
@@ -211,7 +217,7 @@ export const frameSchema: JsonSchema = {
   additionalProperties: false,
   properties: {
     index: { type: "integer", minimum: 0 },
-    id: { type: "number" },
+    id: { oneOf: [{ type: "number" }, { type: "string" }] },
     filePath: { oneOf: [{ type: "string" }, { type: "number" }, { type: "null" }] },
     line: nullableNumberSchema,
     function: { type: "string" }

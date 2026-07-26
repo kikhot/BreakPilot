@@ -106,7 +106,10 @@ assert.equal(proxyAccessorReads, 0, "output validation must reject proxies befor
 const malformedSetValue = {
   path: ["x"],
   oldValue: "0",
-  applied: "yes"
+  newValue: "1",
+  applied: "yes",
+  verified: false,
+  mutationMode: "native"
 };
 const { manager: mutationManager, router: mutationRouter } = createRouterWithHandler(
   "bp_debug_set_value",
@@ -130,8 +133,11 @@ assert.equal(JSON.stringify(mutationResponse), JSON.stringify({
     message: "Debugger tool returned a result that violates its published contract.",
     details: {
       tool: "bp_debug_set_value",
-      issues: [{ path: "$.applied", keyword: "type" }],
-      issueCount: 1,
+      issues: [
+        { path: "$.applied", keyword: "type" },
+        { path: "$", keyword: "oneOf" }
+      ],
+      issueCount: 2,
       outcome: "indeterminate",
       retrySafe: false
     }
@@ -141,8 +147,11 @@ assert.deepEqual(auditRecords, [{
   type: "tool_output_contract_violation",
   payload: {
     tool: "bp_debug_set_value",
-    issueCount: 1,
-    issues: [{ path: "$.applied", keyword: "type" }]
+    issueCount: 2,
+    issues: [
+      { path: "$.applied", keyword: "type" },
+      { path: "$", keyword: "oneOf" }
+    ]
   }
 }], "audit data must omit the malformed runtime payload");
 assert.equal(JSON.stringify(auditRecords).includes("yes"), false);

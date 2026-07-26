@@ -9,9 +9,9 @@ import { SecurityPolicy } from "../security/SecurityPolicy.ts";
 import { AuditLogger } from "../audit/AuditLogger.ts";
 import type { ToolResponse } from "../types/control.ts";
 import type { DebugLanguage, DebugMode, SessionOwnerValue } from "../types/debug.ts";
-import type { DapStackFrame, StoppedEvent } from "../types/dap.ts";
+import type { StoppedEvent } from "../types/dap.ts";
 import type { BridgeMessage, IdeClientInfo, IdeDebugSessionInfo } from "../types/ide.ts";
-import type { VariableNode, VariableScopeView } from "../types/inspection.ts";
+import type { RuntimeReference, VariableNode, VariableScopeView } from "../types/inspection.ts";
 import type { AnyRecord } from "../types/json.ts";
 import type { BreakPilotPolicy, EvaluateMode } from "../types/policy.ts";
 import type {
@@ -28,6 +28,12 @@ import type {
   ThreadId
 } from "../types/sessions.ts";
 import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
+import {
+  decodeBridgeEvent,
+  publicBridgeSnapshot,
+  safeBridgeDataRecord,
+  type SafeBridgeSnapshot
+} from "../ide/BridgeEventDecoder.ts";
 import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
 import { BreakPilotError, ErrorCodes, ok } from "../utils/errors.ts";
 import { makeId, makeSessionId } from "../utils/ids.ts";
@@ -64,7 +70,7 @@ type DebugToolArgs = AnyRecord & {
   breakpointId?: string;
   requireVerified?: boolean;
   expression?: string;
-  frameId?: number;
+  frameId?: RuntimeReference;
   threadId?: ThreadId;
   timeoutMs?: number;
   timeout?: number;
@@ -90,8 +96,8 @@ type DebugToolArgs = AnyRecord & {
   depth?: number;
   limit?: number;
   maxString?: number;
-  variablesReference?: number;
-  ref?: number;
+  variablesReference?: RuntimeReference;
+  ref?: RuntimeReference;
   path?: string[];
   start?: number;
   count?: number;
@@ -286,15 +292,21 @@ export class DebugSessionManager {
       [IdeMessageTypes.IDE_RUN_CONFIGURATIONS_SNAPSHOT],
       (message) => message.requestId === requestId
     );
-    if (this.#bridgeMessageError(response)) {
+    const bridgeError = this.#decodedBridgeError(
+      response,
+      ErrorCodes.TOOL_FAILED,
+      "IDE failed to list run configurations."
+    );
+    if (bridgeError) {
       throw new BreakPilotError(
-        String(response.error?.code ?? ErrorCodes.TOOL_FAILED),
-        String(response.error?.message ?? "IDE failed to list run configurations."),
-        { error: response.error }
+        bridgeError.code,
+        bridgeError.message,
+        { error: bridgeError.error }
       );
     }
-    const configurations = Array.isArray(response.result?.configurations)
-      ? response.result.configurations.map((configuration: unknown) => ({
+    const result = publicBridgeSnapshot(response.result as SafeBridgeSnapshot) as AnyRecord | undefined;
+    const configurations = Array.isArray(result?.configurations)
+      ? result.configurations.map((configuration: unknown) => ({
         ...(configuration && typeof configuration === "object" ? configuration as AnyRecord : {}),
         ide: target.client.ide,
         projectPath: workspaceRoot
@@ -303,7 +315,7 @@ export class DebugSessionManager {
     return ok(null, {
       ...(normalized.filePath ? { filePath: normalized.filePath } : {}),
       configurations,
-      runPoints: Array.isArray(response.result?.runPoints) ? response.result.runPoints : undefined
+      runPoints: Array.isArray(result?.runPoints) ? result.runPoints : undefined
     }, auditId);
   }
 
@@ -356,7 +368,7 @@ export class DebugSessionManager {
       if (session.provider.capabilities.pause === "unsupported" || !session.provider.pause) {
         throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support pause.", {
           sessionId: session.sessionId,
-          providerKind: session.providerKind,
+          providerKind: session.provider.kind,
           capability: "pause"
         });
       }
@@ -383,7 +395,7 @@ export class DebugSessionManager {
     }
 
     if (action === "resume") {
-      if (session.providerKind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, "resume");
+      if (session.provider.kind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, "resume");
       await session.provider.continue(normalized.threadId ?? session.provider.threadId);
       session.state = SessionState.RUNNING;
       return ok(session.sessionId, { status: "running" }, auditId);
@@ -393,11 +405,11 @@ export class DebugSessionManager {
       if (session.provider.capabilities.stepping === "unsupported") {
         throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support stepping.", {
           sessionId: session.sessionId,
-          providerKind: session.providerKind,
+          providerKind: session.provider.kind,
           capability: "stepping"
         });
       }
-      if (session.providerKind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, action);
+      if (session.provider.kind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, action);
       const kind = action === "stepInto" ? "into" : action === "stepOut" ? "out" : "over";
       await session.provider.step(kind, normalized.threadId ?? session.provider.threadId);
       session.state = SessionState.RUNNING;
@@ -422,7 +434,7 @@ export class DebugSessionManager {
       if (session.provider.capabilities.eventDrain === "unsupported" || !session.provider.drainEvents) {
         throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support event drain.", {
           sessionId: session.sessionId,
-          providerKind: session.providerKind,
+          providerKind: session.provider.kind,
           capability: "eventDrain"
         });
       }
@@ -433,7 +445,7 @@ export class DebugSessionManager {
       if (!this.#isRuntimeEventPage(page)) {
         throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support cursor event draining.", {
           sessionId: session.sessionId,
-          providerKind: session.providerKind,
+          providerKind: session.provider.kind,
           capability: "eventDrain"
         });
       }
@@ -465,13 +477,13 @@ export class DebugSessionManager {
         state: session.state
       });
     }
-    if (session.providerKind !== "ide") {
+    if (session.provider.kind !== "ide") {
       this.coordinator.assertCanControl(session, SessionOwner.MCP, "run to line");
     }
     if (session.provider.capabilities.runToLine === "unsupported" || !session.provider.runToLine) {
       throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support run-to-line.", {
         sessionId: session.sessionId,
-        providerKind: session.providerKind
+        providerKind: session.provider.kind
       });
     }
     this.coordinator.beginExecution(session, "run-to-line");
@@ -511,7 +523,7 @@ export class DebugSessionManager {
     if (!session.provider.listThreads) {
       throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support thread listing.", {
         sessionId: session.sessionId,
-        providerKind: session.providerKind
+        providerKind: session.provider.kind
       });
     }
     const offset = args.offset ?? 0;
@@ -531,6 +543,7 @@ export class DebugSessionManager {
   async bpDebugFrame(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
     const session = this.#resolveSession(normalized);
+    this.#assertDapFrameId(session, normalized.frameId);
     this.#assertVariableReferences(session, "frame inspection");
     const auditId = this.audit.record("bp_debug_frame_requested", { sessionId: session.sessionId });
     const frame = await this.#frameView(session, normalized);
@@ -540,6 +553,7 @@ export class DebugSessionManager {
   async bpDebugValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
     const session = this.#resolveSession(normalized);
+    this.#assertDapFrameId(session, normalized.frameId);
     this.#assertVariableReferences(session, "value inspection");
     const auditId = this.audit.record("bp_debug_value_requested", { sessionId: session.sessionId, ref: normalized.ref, path: normalized.path });
 
@@ -549,12 +563,13 @@ export class DebugSessionManager {
       const count = Number.isFinite(requestedCount)
         ? Math.min(limits.maxItems, Math.max(1, Math.floor(requestedCount)))
         : limits.maxItems;
-      if (session.dap) {
-        const variables = await session.dap.variables(Number(normalized.ref), {
+      const dap = this.#associatedDapSession(session);
+      if (dap) {
+        const variables = await dap.variables(this.#dapVariableReference(normalized.ref), {
           start: normalized.start ?? 0,
           count
         });
-        const serializer = new VariableSerializer(session.dap, limits, { objectFields: normalized.expand ?? "deep" });
+        const serializer = new VariableSerializer(dap, limits, { objectFields: normalized.expand ?? "deep" });
         const items = await serializer.serializeVariableNodes(variables);
         return ok(session.sessionId, {
           ref: normalized.ref,
@@ -592,18 +607,24 @@ export class DebugSessionManager {
   async bpDebugSetValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
     const session = this.#resolveSession(normalized);
+    this.#assertDapFrameId(session, normalized.frameId);
     this.#assertVariableReferences(session, "set-value path resolution");
     const auditId = this.audit.record("bp_debug_set_value_requested", { sessionId: session.sessionId, path: normalized.path, ref: normalized.ref });
-    if (!normalized.path || normalized.path.length === 0) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value requires path + newValue.", {});
-    }
     if (normalized.ref !== undefined) {
-      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value does not accept ref; use path + newValue.", {});
+      throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support ref-target variable mutation.", {
+        sessionId: session.sessionId,
+        providerKind: session.provider.kind,
+        capability: "refTargetMutation",
+        ref: normalized.ref
+      });
+    }
+    if (!normalized.path || normalized.path.length === 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value requires path or ref plus newValue.", {});
     }
     if (session.provider.capabilities.setValue === "unsupported" || !session.provider.setVariable) {
       throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support variable mutation.", {
         sessionId: session.sessionId,
-        providerKind: session.providerKind,
+        providerKind: session.provider.kind,
         capability: "setValue"
       });
     }
@@ -613,10 +634,10 @@ export class DebugSessionManager {
         path: normalized.path
       });
     }
-    if (!node.parentRef && session.providerKind !== "ide") {
+    if (!node.parentRef && session.provider.kind !== "ide") {
       throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider cannot mutate this variable because parentRef is unavailable.", {
         path: normalized.path,
-        providerKind: session.providerKind
+        providerKind: session.provider.kind
       });
     }
     const result = await session.provider.setVariable({
@@ -624,19 +645,43 @@ export class DebugSessionManager {
       parentRef: node.parentRef,
       name: node.name
     });
-    return ok(session.sessionId, { path: normalized.path, oldValue: node.raw ?? node.summary, result }, auditId);
+    const providerMode = session.provider.capabilities.setValue;
+    const reportedMode = result.mutationMode;
+    const mutationMode = reportedMode === "native" || reportedMode === "evaluateAssignment"
+      ? reportedMode
+      : providerMode;
+    const {
+      applied: _providerApplied,
+      verified: _providerVerified,
+      mutationMode: _providerMutationMode,
+      ...providerDiagnostics
+    } = result;
+    return ok(session.sessionId, {
+      path: normalized.path,
+      oldValue: node.raw ?? node.summary,
+      newValue: normalized.newValue,
+      applied: typeof result.applied === "boolean" ? result.applied : true,
+      // Task 2 has no provider read-back proof contract. An accepted setter
+      // response is applied but remains unverified even if a legacy payload
+      // happens to include a truthy `verified` field.
+      verified: false,
+      mutationMode,
+      result: providerDiagnostics
+    }, auditId);
   }
 
   async bpDebugEval(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const normalized = this.#normalizeBpArgs(args);
     const session = this.#resolveSession(normalized);
+    this.#assertDapFrameId(session, normalized.frameId);
     const mode = normalized.mode ?? this.policy.evaluate.defaultMode ?? "readonly";
     const auditId = this.audit.record("bp_debug_eval_requested", { sessionId: session.sessionId, expression: normalized.expression, mode });
     if (!normalized.expression) throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "Expression is required.");
-    this.security.assertEvaluate(normalized.expression, mode, { ideConfirmationAvailable: session.providerKind === "ide" });
+    this.security.assertEvaluate(normalized.expression, mode, { ideConfirmationAvailable: session.provider.kind === "ide" });
     let frameId = normalized.frameId;
-    if (!frameId && normalized.frameIndex !== undefined && session.dap) {
-      const stack = await session.dap.stackTrace(this.#dapThreadId(normalized.threadId, session.dap.threadId), (normalized.frameIndex ?? 0) + 1);
+    const dap = this.#associatedDapSession(session);
+    if (frameId === undefined && normalized.frameIndex !== undefined && dap) {
+      const stack = await dap.stackTrace(this.#dapThreadId(normalized.threadId, dap.threadId), (normalized.frameIndex ?? 0) + 1);
       frameId = stack.stackFrames[normalized.frameIndex ?? 0]?.id;
     }
     const result = await session.provider.evaluate(normalized.expression, {
@@ -654,9 +699,17 @@ export class DebugSessionManager {
     let session: DebugSessionRecord;
     try {
       session = this.#resolveSession(normalized);
-    } catch {
+    } catch (error) {
+      if (
+        !(error instanceof BreakPilotError) ||
+        error.code !== ErrorCodes.SESSION_NOT_FOUND ||
+        normalized.sessionId !== undefined
+      ) {
+        throw error;
+      }
       session = await this.#adoptActiveIdeSession(normalized);
     }
+    this.#assertDapFrameId(session, normalized.frameId);
     const auditId = this.audit.record("bp_debug_context_requested", { sessionId: session.sessionId });
     this.#assertVariableReferences(session, "context inspection");
     const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 1000).catch(() => null);
@@ -753,7 +806,7 @@ export class DebugSessionManager {
     });
 
     try {
-      const dap = session.dap;
+      const dap = this.#associatedDapSession(session);
       if (!dap) throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP session was not initialized.");
       await dap.initialize(adapterImpl.adapterId);
       await dap.launch(
@@ -832,7 +885,7 @@ export class DebugSessionManager {
     });
 
     try {
-      const dap = session.dap;
+      const dap = this.#associatedDapSession(session);
       if (!dap) throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP session was not initialized.");
       await dap.initialize(adapterImpl.adapterId);
       await dap.attach(
@@ -861,11 +914,11 @@ export class DebugSessionManager {
     if (!args.file || !args.line) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "filePath and line are required.");
     }
-    if (session.providerKind !== "ide") {
+    if (session.provider.kind !== "ide") {
       this.coordinator.assertCanControl(session, SessionOwner.MCP, "set breakpoint");
     }
     this.#assertSessionMutationAllowed(session, "set breakpoint");
-    this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.providerKind);
+    this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.provider.kind);
     const file = this.security.assertWorkspacePath(args.file);
     this.audit.record("bp_debug_session_set_breakpoint_requested", {
       sessionId: session.sessionId,
@@ -892,7 +945,7 @@ export class DebugSessionManager {
     const updated = this.breakpoints.listForSource(session.sessionId, file);
     const selected = updated.find((bp) => bp.id === breakpoint.id) ?? breakpoint;
 
-    if (session.providerKind === "dap") {
+    if (session.provider.kind === "dap") {
       this.#broadcastToWorkspace(session.workspaceRoot, {
         type: "agent_set_breakpoint",
         sessionId: session.sessionId,
@@ -931,12 +984,12 @@ export class DebugSessionManager {
     // an unresolved session must not silently fall through to project-level
     // IDE breakpoint creation.
     const session = this.#resolveSession(args);
-    if (session.providerKind !== "dap" || session.provider.capabilities.breakpointUpdate === "unsupported") {
-      this.#throwBreakpointUpdateUnsupported(session.sessionId, session.providerKind);
+    if (session.provider.kind !== "dap" || session.provider.capabilities.breakpointUpdate === "unsupported") {
+      this.#throwBreakpointUpdateUnsupported(session.sessionId, session.provider.kind);
     }
     this.coordinator.assertCanControl(session, SessionOwner.MCP, "update breakpoint");
     this.#assertSessionMutationAllowed(session, "update breakpoint");
-    this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.providerKind);
+    this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.provider.kind);
 
     const patch = this.#breakpointPatchRequest(session, args);
     const result = await this.breakpointReconciler.update(session, patch);
@@ -1036,7 +1089,7 @@ export class DebugSessionManager {
       : await session.provider.setBreakpoints(breakpoint.file, remaining).then(() => true);
     if (!acknowledged) return { removed: false };
     const removed = this.breakpoints.remove(session.sessionId, breakpointId);
-    if (removed && session.providerKind === "dap") {
+    if (removed && session.provider.kind === "dap") {
       this.#broadcastToWorkspace(session.workspaceRoot, {
         type: "agent_remove_breakpoint",
         sessionId: session.sessionId,
@@ -1091,8 +1144,8 @@ export class DebugSessionManager {
     if (!this.policy.workspace.allowOutsideWorkspace) {
       this.security.assertWorkspacePath(path.relative(this.security.workspaceRoot(), workspaceRoot) || ".");
     }
-    const existing = [...this.sessions.sessions.values()].find(
-      (session) => session.ideSessionId === ideSession.ideSessionId && session.ideClientId === ideSession.clientId
+    const existing = [...this.sessions.sessions.values()].find((session) =>
+      this.#matchesAuthoritativeIdeTuple(session, ideSession.clientId, ideSession.ideSessionId)
     );
     if (existing) {
       return { session: existing, warnings: ["IDE session was already adopted."] };
@@ -1189,19 +1242,23 @@ export class DebugSessionManager {
           message.breakpoint?.id === breakpoint.id
         )
       );
-      if (this.#bridgeMessageError(response)) {
+      const bridgeError = this.#decodedBridgeError(
+        response,
+        ErrorCodes.BREAKPOINT_NOT_VERIFIED,
+        "IDE failed to set breakpoint."
+      );
+      if (bridgeError) {
         throw new BreakPilotError(
-          String(response.error?.code ?? ErrorCodes.BREAKPOINT_NOT_VERIFIED),
-          String(response.error?.message ?? "IDE failed to set breakpoint."),
-          { error: response.error, breakpoint }
+          bridgeError.code,
+          bridgeError.message,
+          { error: bridgeError.error, breakpoint }
         );
       }
       const responseBreakpoint = response.breakpoint as AnyRecord | undefined;
       const selected = this.breakpoints.updateProject(breakpoint.id, {
-        verified: responseBreakpoint?.verified === undefined ? true : Boolean(responseBreakpoint.verified),
-        adapterBreakpointId: responseBreakpoint?.adapterBreakpointId as number | string | undefined,
-        ideBreakpointId: typeof responseBreakpoint?.ideBreakpointId === "string" ? responseBreakpoint.ideBreakpointId : undefined,
-        message: response.error?.message ? String(response.error.message) : undefined,
+        verified: this.#decodedBreakpointBoolean(responseBreakpoint?.verified, true),
+        adapterBreakpointId: this.#decodedAdapterBreakpointId(responseBreakpoint?.adapterBreakpointId),
+        ideBreakpointId: this.#decodedBridgeOpaqueId(responseBreakpoint?.ideBreakpointId),
         line: typeof responseBreakpoint?.line === "number" ? responseBreakpoint.line : breakpoint.line,
         column: typeof responseBreakpoint?.column === "number" ? responseBreakpoint.column : breakpoint.column
       }) ?? breakpoint;
@@ -1333,7 +1390,7 @@ export class DebugSessionManager {
         : [];
     return rawBreakpoints
       .map((breakpoint, index) => this.#projectBreakpointFromIde(
-        breakpoint as AnyRecord,
+        breakpoint,
         index,
         workspaceRoot,
         target.client,
@@ -1400,7 +1457,7 @@ export class DebugSessionManager {
       `Runtime provider does not support ${operation}.`,
       {
         sessionId: session.sessionId,
-        providerKind: session.providerKind,
+        providerKind: session.provider.kind,
         capability: "variableReferences",
         operation
       }
@@ -1478,25 +1535,37 @@ export class DebugSessionManager {
           sessionId: args.sessionId
         });
       }
+      this.#assertProviderAssociation(session);
       return session;
     }
     const workspaceRoot = args.projectPath || args.workspace
       ? resolveWorkspacePath(this.security.workspaceRoot(), String(args.projectPath ?? args.workspace))
       : undefined;
-    const candidates = [...this.sessions.sessions.values()].filter((session) => {
+    const liveCandidates = [...this.sessions.sessions.values()].filter((session) => {
       if (session.state === SessionState.TERMINATED || session.state === SessionState.FAILED) return false;
       if (workspaceRoot && path.resolve(session.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
       return true;
     });
-    if (candidates.length === 0) {
+    if (liveCandidates.length === 0) {
       throw new BreakPilotError(ErrorCodes.SESSION_NOT_FOUND, "No active debug session is available.", {
         ...(args.projectPath ?? args.workspace
           ? { projectPath: args.projectPath ?? args.workspace }
           : {})
       });
     }
+    const candidates = liveCandidates.filter((session) => this.#providerAssociationMismatch(session) === null);
+    if (candidates.length === 0) {
+      throw new BreakPilotError(
+        ErrorCodes.TOOL_FAILED,
+        "No active debug session has a valid runtime provider association.",
+        { sessions: liveCandidates.map((session) => this.#sessionSummary(session, true)) }
+      );
+    }
     const selected = this.#selectSessionCandidate(candidates);
-    if (selected) return selected;
+    if (selected) {
+      this.#assertProviderAssociation(selected);
+      return selected;
+    }
     throw new BreakPilotError(
       ErrorCodes.SESSION_AMBIGUOUS,
       "Multiple debug sessions are active. Pass sessionId to choose one.",
@@ -1515,10 +1584,11 @@ export class DebugSessionManager {
     const mismatchedSession = Boolean(
       evidence?.sessionId && evidence.sessionId !== session.sessionId
     );
+    const expectedIdeSessionId = this.#canonicalIdeSessionId(session);
     const mismatchedIdeSession = Boolean(
       evidence?.ideSessionId &&
-      session.ideSessionId &&
-      evidence.ideSessionId !== session.ideSessionId
+      expectedIdeSessionId &&
+      evidence.ideSessionId !== expectedIdeSessionId
     );
     const nested = evidence?.stopped && typeof evidence.stopped === "object" && !Array.isArray(evidence.stopped)
       ? evidence.stopped as AnyRecord
@@ -1530,8 +1600,8 @@ export class DebugSessionManager {
         `Runtime provider did not report correlated stop evidence after ${operation}.`,
         {
           sessionId: session.sessionId,
-          providerKind: session.providerKind,
-          ...(session.ideSessionId !== undefined ? { ideSessionId: session.ideSessionId } : {}),
+          providerKind: session.provider.kind,
+          ...(expectedIdeSessionId !== undefined ? { ideSessionId: expectedIdeSessionId } : {}),
           ...(evidence?.sessionId !== undefined ? { reportedSessionId: evidence.sessionId } : {}),
           ...(evidence?.ideSessionId !== undefined ? { reportedIdeSessionId: evidence.ideSessionId } : {})
         }
@@ -1563,7 +1633,11 @@ export class DebugSessionManager {
   }
 
   #selectSessionCandidate(candidates = [...this.sessions.sessions.values()]): DebugSessionRecord | null {
-    const live = candidates.filter((session) => session.state !== SessionState.TERMINATED && session.state !== SessionState.FAILED);
+    const live = candidates.filter((session) =>
+      session.state !== SessionState.TERMINATED &&
+      session.state !== SessionState.FAILED &&
+      this.#providerAssociationMismatch(session) === null
+    );
     if (live.length === 0) return null;
     const paused = live.filter((session) => session.state === SessionState.PAUSED);
     if (paused.length === 1) return paused[0]!;
@@ -1638,6 +1712,7 @@ export class DebugSessionManager {
       if (session.state === SessionState.TERMINATED || session.state === SessionState.FAILED) {
         return false;
       }
+      if (this.#providerAssociationMismatch(session)) return false;
       return true;
     }).map((session) => this.#sessionSummary(session, args.detail === "diagnostic"));
   }
@@ -1680,36 +1755,51 @@ export class DebugSessionManager {
     if (!session.provider.getCallStack) {
       throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider does not support call stack inspection.", {
         sessionId: session.sessionId,
-        providerKind: session.providerKind
+        providerKind: session.provider.kind
       });
     }
-    const stack = await session.provider.getCallStack(threadId ?? session.provider.threadId, offset + limit);
+    const stack = await session.provider.getCallStack(threadId ?? session.provider.threadId, { offset, limit });
+    const providerOffset = Number.isSafeInteger(stack.offset) && stack.offset >= 0 ? stack.offset : offset;
     const frames = (stack.stackFrames ?? [])
-      .slice(offset, offset + limit)
-      .map((frame: DapStackFrame, index: number) => this.#frameSummary(frame, index + offset));
+      .map((frame, index: number) => this.#frameSummary(frame, index + providerOffset));
+    const totalFrames = Number.isSafeInteger(stack.totalFrames) && Number(stack.totalFrames) >= 0
+      ? Number(stack.totalFrames)
+      : undefined;
+    const completeness = totalFrames === undefined ? "unknown" : stack.completeness;
+    const partial = completeness !== "complete";
+    const nextOffset = stack.nextOffset;
+    const truncationReason = totalFrames === undefined
+      ? stack.truncationReason ?? "provider"
+      : stack.truncationReason;
     return {
       threadId: stack.threadId ?? threadId ?? session.provider.threadId,
       frames,
-      offset,
-      totalFrames: stack.totalFrames ?? frames.length,
-      ...(stack.partial ? { partial: true } : {})
+      offset: providerOffset,
+      ...(totalFrames === undefined ? {} : { totalFrames }),
+      ...(stack.pauseEpoch === undefined ? {} : { pauseEpoch: stack.pauseEpoch }),
+      completeness,
+      partial,
+      ...(nextOffset === undefined ? {} : { nextOffset }),
+      ...(truncationReason === undefined ? {} : { truncationReason })
     };
   }
 
   async #frameView(session: DebugSessionRecord, args: DebugToolArgs, compact = true): Promise<AnyRecord> {
     const limits = this.#variableLimits(args);
     const expand = args.expand ?? args.objectFields ?? "preview";
+    const dap = this.#associatedDapSession(session);
 
-    if (session.dap) {
-      const stack = await session.dap.stackTrace(this.#dapThreadId(args.threadId, session.dap.threadId), (args.frameIndex ?? 0) + 1);
-      const frame = args.frameId
-        ? stack.stackFrames.find((candidate) => candidate.id === args.frameId) ?? { id: args.frameId }
+    if (dap) {
+      const requestedFrameId = args.frameId === undefined ? undefined : this.#dapFrameId(args.frameId);
+      const stack = await dap.stackTrace(this.#dapThreadId(args.threadId, dap.threadId), (args.frameIndex ?? 0) + 1);
+      const frame = requestedFrameId !== undefined
+        ? stack.stackFrames.find((candidate) => candidate.id === requestedFrameId) ?? { id: requestedFrameId }
         : stack.stackFrames[args.frameIndex ?? 0];
-      const scopes = frame?.id ? await session.dap.scopes(frame.id) : [];
-      const serializer = new VariableSerializer(session.dap, limits, { objectFields: expand });
+      const scopes = frame?.id !== undefined ? await dap.scopes(this.#dapFrameId(frame.id)) : [];
+      const serializer = new VariableSerializer(dap, limits, { objectFields: expand });
       const variables: VariableScopeView[] = [];
       for (const scope of scopes) {
-        const dapVariables = await session.dap.variables(scope.variablesReference, {
+        const dapVariables = await dap.variables(scope.variablesReference, {
           start: 0,
           count: limits.maxItems
         });
@@ -1752,7 +1842,7 @@ export class DebugSessionManager {
     return compact ? this.#compactFrameView(view) : view;
   }
 
-  #frameSummary(frame: DapStackFrame, index: number): AnyRecord {
+  #frameSummary(frame: AnyRecord, index: number): AnyRecord {
     const source = frame.source as AnyRecord | undefined;
     const filePath = source?.path ?? source?.sourceReference ?? null;
     const fn = frame.name ?? "";
@@ -1859,6 +1949,128 @@ export class DebugSessionManager {
     return fallback;
   }
 
+  #dapVariableReference(value: unknown): number {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "DAP variable references must be positive integers.", {
+        variablesReference: value
+      });
+    }
+    return value;
+  }
+
+  #dapFrameId(value: unknown): number {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "DAP frame ids must be positive integers.", {
+        frameId: value
+      });
+    }
+    return value;
+  }
+
+  #assertDapFrameId(session: DebugSessionRecord, value: unknown): void {
+    if (session.provider.kind === "dap" && value !== undefined) this.#dapFrameId(value);
+  }
+
+  #assertProviderAssociation(session: DebugSessionRecord): void {
+    const details = this.#providerAssociationMismatch(session);
+    if (!details) return;
+    throw new BreakPilotError(
+      ErrorCodes.TOOL_FAILED,
+      "Debug session record is not associated with its runtime provider.",
+      details
+    );
+  }
+
+  #providerAssociationMismatch(
+    session: DebugSessionRecord,
+    { requireCurrentIdeRegistry = true }: { requireCurrentIdeRegistry?: boolean } = {}
+  ): AnyRecord | null {
+    const providerSessionId = session.provider.sessionId;
+    const dapSessionId = session.provider instanceof DapRuntimeProvider
+      ? session.provider.dap.sessionId
+      : undefined;
+    const ideProvider = session.provider instanceof IdeRuntimeProvider
+      ? session.provider
+      : null;
+    const providerSessionMismatch = typeof providerSessionId !== "string" || providerSessionId !== session.sessionId;
+    const dapSessionMismatch = dapSessionId !== undefined && (
+      typeof dapSessionId !== "string" || dapSessionId !== session.sessionId
+    );
+    const recordIdeTuplePresent = Boolean(
+      this.#isPresentOpaqueId(session.ideClientId) &&
+      this.#isPresentOpaqueId(session.ideSessionId)
+    );
+    const providerIdeTuplePresent = Boolean(
+      ideProvider &&
+      this.#isPresentOpaqueId(ideProvider.ideClientId) &&
+      this.#isPresentOpaqueId(ideProvider.ideSessionId)
+    );
+    const providerOwnsManagerBridge = Boolean(
+      ideProvider && this.ideBridge && ideProvider.bridge === this.ideBridge
+    );
+    const currentRegistryOwnsTuple = Boolean(
+      ideProvider &&
+      providerOwnsManagerBridge &&
+      this.ideBridge?.registry.get(ideProvider.ideClientId) &&
+      this.ideBridge.registry.findSessionForClient(ideProvider.ideClientId, ideProvider.ideSessionId)
+    );
+    const ideAssociationMismatch = Boolean(
+      ideProvider && (
+        !recordIdeTuplePresent ||
+        !providerIdeTuplePresent ||
+        !providerOwnsManagerBridge ||
+        (requireCurrentIdeRegistry && !currentRegistryOwnsTuple) ||
+        session.ideClientId !== ideProvider.ideClientId ||
+        session.ideSessionId !== ideProvider.ideSessionId
+      )
+    );
+    if (!providerSessionMismatch && !dapSessionMismatch && !ideAssociationMismatch) return null;
+    return {
+      sessionId: session.sessionId,
+      providerSessionId: typeof providerSessionId === "string" ? providerSessionId : null,
+      ...(dapSessionId === undefined
+        ? {}
+        : { dapSessionId: typeof dapSessionId === "string" ? dapSessionId : null }),
+      ...(ideProvider
+        ? {
+            recordIdeTuplePresent,
+            providerIdeTuplePresent,
+            providerOwnsManagerBridge,
+            currentRegistryOwnsTuple
+          }
+        : {}),
+      providerKind: session.provider.kind
+    };
+  }
+
+  #isPresentOpaqueId(value: unknown): value is string {
+    return typeof value === "string" && value.trim().length > 0;
+  }
+
+  #matchesAuthoritativeIdeTuple(
+    session: DebugSessionRecord,
+    clientId: unknown,
+    ideSessionId: unknown,
+    { requireCurrentRegistry = true }: { requireCurrentRegistry?: boolean } = {}
+  ): boolean {
+    if (!this.#isPresentOpaqueId(clientId) || !this.#isPresentOpaqueId(ideSessionId)) return false;
+    if (!(session.provider instanceof IdeRuntimeProvider)) return false;
+    if (this.#providerAssociationMismatch(session, { requireCurrentIdeRegistry: requireCurrentRegistry })) return false;
+    return session.provider.ideClientId === clientId && session.provider.ideSessionId === ideSessionId;
+  }
+
+  #canonicalIdeSessionId(session: DebugSessionRecord): string | undefined {
+    if (!(session.provider instanceof IdeRuntimeProvider)) return undefined;
+    if (this.#providerAssociationMismatch(session)) return undefined;
+    return session.provider.ideSessionId;
+  }
+
+  #associatedDapSession(session: DebugSessionRecord): DapSession | undefined {
+    if (!(session.provider instanceof DapRuntimeProvider)) return undefined;
+    if (this.#providerAssociationMismatch(session)) return undefined;
+    return session.provider.dap;
+  }
+
   #threadView(thread: AnyRecord, session: DebugSessionRecord): AnyRecord {
     const providerThreadId = session.provider.threadId;
     return {
@@ -1893,6 +2105,12 @@ export class DebugSessionManager {
     };
     if (node.type) compact.type = node.type;
     if (node.ref !== undefined) compact.ref = node.ref;
+    if (node.pauseEpoch !== undefined) compact.pauseEpoch = node.pauseEpoch;
+    if (node.childrenCount !== undefined) compact.childrenCount = node.childrenCount;
+    if (node.complete !== undefined) compact.complete = node.complete;
+    compact.truncated = node.truncated;
+    if (node.modifiable !== undefined) compact.modifiable = node.modifiable;
+    if (node.mutationMode !== undefined) compact.mutationMode = node.mutationMode;
     if (node.children?.length) compact.children = node.children.map((child) => this.#compactNode(child));
     return compact;
   }
@@ -1948,17 +2166,22 @@ export class DebugSessionManager {
   }
 
   #projectBreakpointFromIde(
-    raw: AnyRecord,
+    value: unknown,
     index: number,
     workspaceRoot: string,
     client: IdeClientInfo,
     ideSessionId?: string
   ): ProjectBreakpointRecord | null {
+    const raw = this.#safeOwnDataRecord(value);
+    if (!raw) return null;
     const type = typeof raw.type === "string" ? raw.type : "line";
     const file = raw.file ?? raw.filePath;
     const line = raw.line;
     if (type === "line" && (typeof file !== "string" || typeof line !== "number")) return null;
-    const id = String(raw.id ?? raw.breakpointId ?? raw.ideBreakpointId ?? `${client.clientId}:ide_bp_${index}`);
+    const id = this.#decodedBridgeOpaqueId(raw.id)
+      ?? this.#decodedBridgeOpaqueId(raw.breakpointId)
+      ?? this.#decodedBridgeOpaqueId(raw.ideBreakpointId)
+      ?? `${client.clientId}:ide_bp_${index}`;
     return {
       id,
       workspaceRoot,
@@ -1971,19 +2194,17 @@ export class DebugSessionManager {
       condition: typeof raw.condition === "string" ? raw.condition : undefined,
       hitCondition: typeof raw.hitCondition === "string" ? raw.hitCondition : undefined,
       logMessage: typeof raw.logMessage === "string" ? raw.logMessage : undefined,
-      enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
-      temporary: Boolean(raw.temporary),
+      enabled: this.#decodedBreakpointBoolean(raw.enabled, true),
+      temporary: this.#decodedBreakpointBoolean(raw.temporary, false),
       suspendPolicy: raw.suspendPolicy === "ALL" || raw.suspendPolicy === "THREAD" || raw.suspendPolicy === "NONE"
         ? raw.suspendPolicy
         : undefined,
-      isLogMessage: Boolean(raw.isLogMessage),
-      isLogStack: Boolean(raw.isLogStack),
+      isLogMessage: this.#decodedBreakpointBoolean(raw.isLogMessage, false),
+      isLogStack: this.#decodedBreakpointBoolean(raw.isLogStack, false),
       owner: typeof raw.owner === "string" ? raw.owner : "user",
-      verified: raw.verified === undefined ? true : Boolean(raw.verified),
-      adapterBreakpointId: typeof raw.adapterBreakpointId === "number" || typeof raw.adapterBreakpointId === "string"
-        ? raw.adapterBreakpointId
-        : undefined,
-      ideBreakpointId: typeof raw.ideBreakpointId === "string" ? raw.ideBreakpointId : id,
+      verified: this.#decodedBreakpointBoolean(raw.verified, true),
+      adapterBreakpointId: this.#decodedAdapterBreakpointId(raw.adapterBreakpointId),
+      ideBreakpointId: this.#decodedBridgeOpaqueId(raw.ideBreakpointId) ?? id,
       createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString()
     };
   }
@@ -2013,7 +2234,12 @@ export class DebugSessionManager {
           truncated: Boolean(variable.truncated)
         } as VariableNode;
       }
-      const ref = Number(variable.variablesReference ?? 0) > 0 ? Number(variable.variablesReference) : undefined;
+      const rawRef = variable.variablesReference;
+      const ref = typeof rawRef === "string"
+        ? rawRef
+        : typeof rawRef === "number" && rawRef > 0
+          ? rawRef
+          : undefined;
       const nodeName = String(variable.name ?? name);
       const children = variable.value && typeof variable.value === "object" && !Array.isArray(variable.value)
         ? this.#nodesFromSerializedMap(variable.value as AnyRecord, [...parentPath, nodeName])
@@ -2027,6 +2253,13 @@ export class DebugSessionManager {
         kind: String(variable.kind ?? "primitive") as VariableNode["kind"],
         summary,
         ref,
+        pauseEpoch: typeof variable.pauseEpoch === "number" ? variable.pauseEpoch : undefined,
+        childrenCount: typeof variable.childrenCount === "number" ? variable.childrenCount : undefined,
+        complete: typeof variable.complete === "boolean" ? variable.complete : undefined,
+        modifiable: typeof variable.modifiable === "boolean" ? variable.modifiable : undefined,
+        mutationMode: variable.mutationMode === "native" || variable.mutationMode === "evaluateAssignment"
+          ? variable.mutationMode
+          : undefined,
         path: [...parentPath, nodeName],
         expandable: Boolean(ref),
         truncated: Boolean(variable.truncated),
@@ -2056,6 +2289,7 @@ export class DebugSessionManager {
     pathTokens: string[]
   ): Promise<VariableNode | null> {
     const frame = await this.#frameView(session, { ...args, expand: args.expand ?? "preview" }, false);
+    const dap = this.#associatedDapSession(session);
     let level = (frame.variables as VariableScopeView[]).flatMap((scope: VariableScopeView) => scope.items);
     let current: VariableNode | undefined;
     for (let index = 0; index < pathTokens.length; index += 1) {
@@ -2063,13 +2297,13 @@ export class DebugSessionManager {
       current = level.find((node) => node.name === token);
       if (!current) return null;
       if (index === pathTokens.length - 1) return current;
-      if ((!current.children || current.children.length === 0) && current.ref && session.dap) {
+      if ((!current.children || current.children.length === 0) && typeof current.ref === "number" && current.ref > 0 && dap) {
         const limits = this.#variableLimits(args);
-        const variables = await session.dap.variables(current.ref, {
+        const variables = await dap.variables(current.ref, {
           start: 0,
           count: limits.maxItems
         });
-        const serializer = new VariableSerializer(session.dap, limits, { objectFields: "preview" });
+        const serializer = new VariableSerializer(dap, limits, { objectFields: "preview" });
         current.children = await serializer.serializeVariableNodes(variables, 0, new Set<number>(), current.ref);
       }
       level = current.children ?? [];
@@ -2197,8 +2431,9 @@ export class DebugSessionManager {
     session.state = SessionState.FAILED;
     session.disposeLifecycle?.();
     session.disposeLifecycle = undefined;
-    session.provider.disposeRuntimeEvents?.();
-    session.dap?.disposeClient();
+    const associated = this.#providerAssociationMismatch(session) === null;
+    if (associated) session.provider.disposeRuntimeEvents?.();
+    this.#associatedDapSession(session)?.disposeClient();
     this.breakpoints.clear(session.sessionId);
     this.sessions.remove(session.sessionId);
   }
@@ -2211,15 +2446,16 @@ export class DebugSessionManager {
   }
 
   #sessionSummary(session: DebugSessionRecord, diagnostic = false): SessionSummary {
+    const ideSessionId = this.#canonicalIdeSessionId(session);
     return {
       sessionId: session.sessionId,
       language: session.language,
       mode: session.mode,
       state: session.state,
-      ...(session.ideSessionId ? { ideSessionId: session.ideSessionId } : {}),
+      ...(ideSessionId ? { ideSessionId } : {}),
       ...(diagnostic
         ? {
-            providerKind: session.providerKind,
+            providerKind: session.provider.kind,
             capabilities: session.provider.capabilities
           }
         : {})
@@ -2247,27 +2483,36 @@ export class DebugSessionManager {
     }
     this.cleaningSessions.add(session.sessionId);
     try {
-      this.#broadcastToWorkspace(session.workspaceRoot, {
-        type: IdeMessageTypes.AGENT_CLEAR_BREAKPOINTS,
-        sessionId: session.sessionId,
-        workspaceRoot: session.workspaceRoot,
-        reason
-      });
+      const associationMismatch = this.#providerAssociationMismatch(session);
+      if (!associationMismatch) {
+        this.#broadcastToWorkspace(session.workspaceRoot, {
+          type: IdeMessageTypes.AGENT_CLEAR_BREAKPOINTS,
+          sessionId: session.sessionId,
+          workspaceRoot: session.workspaceRoot,
+          reason
+        });
+      }
       let result: AnyRecord = { acknowledged: true, reason };
-      if (disconnectProvider) {
+      if (disconnectProvider && !associationMismatch) {
         try {
           result = await session.provider.disconnect({ terminateDebuggee, restart });
         } catch (error) {
           const typedError = error as Error;
           result = { acknowledged: false, message: typedError.message, reason };
         }
+      } else if (disconnectProvider) {
+        result = {
+          acknowledged: false,
+          message: "Runtime provider association was invalid; provider disconnect was skipped.",
+          reason
+        };
       }
       session.state = SessionState.TERMINATED;
       this.#archiveRuntimeEvents(session);
       session.disposeLifecycle?.();
       session.disposeLifecycle = undefined;
-      session.provider.disposeRuntimeEvents?.();
-      session.dap?.disposeClient();
+      if (!associationMismatch) session.provider.disposeRuntimeEvents?.();
+      this.#associatedDapSession(session)?.disposeClient();
       this.breakpoints.clear(session.sessionId);
       this.sessions.remove(session.sessionId);
       return result;
@@ -2326,12 +2571,13 @@ export class DebugSessionManager {
   }
 
   #applyRunToLineFailureState(session: DebugSessionRecord): void {
-    if (session.providerKind !== "dap" || !session.dap) return;
-    if (session.dap?.terminated || session.state === SessionState.TERMINATED) {
+    const dap = this.#associatedDapSession(session);
+    if (!dap) return;
+    if (dap.terminated || session.state === SessionState.TERMINATED) {
       session.state = SessionState.TERMINATED;
       return;
     }
-    session.state = session.dap?.isPaused === true ? SessionState.PAUSED : SessionState.RUNNING;
+    session.state = dap.isPaused === true ? SessionState.PAUSED : SessionState.RUNNING;
   }
 
   #deferDapLifecycleCleanup(session: DebugSessionRecord, reason: string): boolean {
@@ -2353,7 +2599,7 @@ export class DebugSessionManager {
   }
 
   #archiveRuntimeEvents(session: DebugSessionRecord): void {
-    if (session.providerKind !== "dap") return;
+    if (session.provider.kind !== "dap") return;
     const events = session.runtimeEvents;
     if (!events || events.read({ cursor: 0, limit: 1 }).items.length === 0) return;
     this.#archivedRuntimeEvents.delete(session.sessionId);
@@ -2366,13 +2612,14 @@ export class DebugSessionManager {
   }
 
   async #recoverBreakpointHit(session: DebugSessionRecord): Promise<StoppedEvent | null> {
-    if (!session.dap) return null;
+    const dap = this.#associatedDapSession(session);
+    if (!dap) return null;
     const breakpoints = this.breakpoints.list(session.sessionId).filter((bp) => bp.verified);
     if (breakpoints.length === 0) return null;
 
     let threads: AnyRecord[];
     try {
-      threads = await session.dap.threads();
+      threads = await dap.threads();
     } catch {
       return null;
     }
@@ -2381,7 +2628,7 @@ export class DebugSessionManager {
       const threadId = Number(thread.id);
       if (!Number.isFinite(threadId)) continue;
       try {
-        const stack = await session.dap.stackTrace(threadId, 1);
+        const stack = await dap.stackTrace(threadId, 1);
         const topFrame = stack.stackFrames[0];
         const sourcePath = topFrame?.source?.path;
         if (!sourcePath || !topFrame.line) continue;
@@ -2389,7 +2636,7 @@ export class DebugSessionManager {
           (bp) => path.resolve(bp.file) === path.resolve(String(sourcePath)) && bp.line === topFrame.line
         );
         if (!matched) continue;
-        session.dap.threadId = threadId;
+        dap.threadId = threadId;
         return {
           sessionId: session.sessionId,
           reason: "breakpoint",
@@ -2409,25 +2656,69 @@ export class DebugSessionManager {
 
   #wireIdeBridge(): void {
     if (!this.ideBridge) return;
-    this.ideBridge.on(IdeMessageTypes.IDE_SESSION_PAUSED, ({ message }: { message: AnyRecord }) => {
-      this.#updateAdoptedIdeSession(message.ideSessionId, message.clientId, SessionState.PAUSED);
+    this.ideBridge.on(IdeMessageTypes.IDE_SESSION_PAUSED, (event: unknown) => {
+      this.#applyIdeLifecycleEvent(event, SessionState.PAUSED);
     });
-    this.ideBridge.on(IdeMessageTypes.IDE_BREAKPOINT_HIT, ({ message }: { message: AnyRecord }) => {
-      this.#updateAdoptedIdeSession(message.ideSessionId, message.clientId, SessionState.PAUSED);
+    this.ideBridge.on(IdeMessageTypes.IDE_BREAKPOINT_HIT, (event: unknown) => {
+      this.#applyIdeLifecycleEvent(event, SessionState.PAUSED);
     });
-    this.ideBridge.on(IdeMessageTypes.IDE_SESSION_STOPPED, ({ message }: { message: AnyRecord }) => {
-      this.#updateAdoptedIdeSession(message.ideSessionId, message.clientId, SessionState.PAUSED);
+    this.ideBridge.on(IdeMessageTypes.IDE_SESSION_STOPPED, (event: unknown) => {
+      this.#applyIdeLifecycleEvent(event, SessionState.PAUSED);
     });
-    this.ideBridge.on(IdeMessageTypes.IDE_SESSION_RESUMED, ({ message }: { message: AnyRecord }) => {
-      this.#updateAdoptedIdeSession(message.ideSessionId, message.clientId, SessionState.RUNNING);
+    this.ideBridge.on(IdeMessageTypes.IDE_SESSION_RESUMED, (event: unknown) => {
+      this.#applyIdeLifecycleEvent(event, SessionState.RUNNING);
     });
-    this.ideBridge.on(IdeMessageTypes.IDE_SESSION_TERMINATED, ({ message }: { message: AnyRecord }) => {
-      this.#updateAdoptedIdeSession(message.ideSessionId, message.clientId, SessionState.TERMINATED);
-      void this.#cleanupAdoptedIdeSession(message.ideSessionId, message.clientId, "ide_session_terminated");
+    this.ideBridge.on(IdeMessageTypes.IDE_SESSION_TERMINATED, (event: unknown) => {
+      this.#applyIdeLifecycleEvent(event, SessionState.TERMINATED, "ide_session_terminated");
     });
-    this.ideBridge.on("disconnect", ({ clientId }: { clientId?: string }) => {
-      if (clientId) this.breakpoints.clearProjectForClient(clientId);
+    this.ideBridge.on("disconnect", (event: unknown) => {
+      const clientId = this.#decodeIdeBridgeClientId(event);
+      if (!clientId) return;
+      if (this.ideBridge?.registry.get(clientId)) return;
+      this.breakpoints.clearProjectForClient(clientId);
+      void this.#cleanupDisconnectedIdeClient(clientId);
     });
+  }
+
+  #applyIdeLifecycleEvent(event: unknown, state: string, cleanupReason?: string): void {
+    const decoded = this.#decodeIdeBridgeEvent(event);
+    if (!decoded) return;
+    const clientId = this.#decodedBridgeOpaqueId(decoded.clientId);
+    const ideSessionId = this.#decodedBridgeOpaqueId(decoded.message.ideSessionId);
+    if (!clientId || !ideSessionId) return;
+    this.#updateAdoptedIdeSession(ideSessionId, clientId, state);
+    if (cleanupReason) void this.#cleanupAdoptedIdeSession(ideSessionId, clientId, cleanupReason);
+  }
+
+  #decodeIdeBridgeEvent(event: unknown): { clientId?: string; message: AnyRecord } | null {
+    return decodeBridgeEvent(event);
+  }
+
+  #decodeIdeBridgeClientId(event: unknown): string | undefined {
+    const envelope = this.#safeOwnDataRecord(event);
+    if (!envelope) return undefined;
+    const clientId = envelope.clientId;
+    return this.#isPresentOpaqueId(clientId) ? clientId : undefined;
+  }
+
+  #safeOwnDataRecord(value: unknown): AnyRecord | null {
+    return safeBridgeDataRecord(value);
+  }
+
+  async #cleanupDisconnectedIdeClient(clientId: string): Promise<void> {
+    const sessions = [...this.sessions.sessions.values()].filter((session) => {
+      if (!(session.provider instanceof IdeRuntimeProvider)) return false;
+      return this.#matchesAuthoritativeIdeTuple(
+        session,
+        clientId,
+        session.provider.ideSessionId,
+        { requireCurrentRegistry: false }
+      );
+    });
+    await Promise.allSettled(sessions.map((session) => this.#cleanupSession(session, {
+      reason: "ide_client_disconnected",
+      disconnectProvider: false
+    })));
   }
 
   async #cleanupAdoptedIdeSession(
@@ -2435,12 +2726,9 @@ export class DebugSessionManager {
     clientId: string | undefined,
     reason: string
   ): Promise<void> {
-    if (!ideSessionId) return;
-    const sessions = [...this.sessions.sessions.values()].filter((session) => {
-      if (session.ideSessionId !== ideSessionId) return false;
-      if (clientId && session.ideClientId && session.ideClientId !== clientId) return false;
-      return true;
-    });
+    const sessions = [...this.sessions.sessions.values()].filter((session) =>
+      this.#matchesAssociatedIdeEvent(session, ideSessionId, clientId)
+    );
     await Promise.allSettled(sessions.map((session) => this.#cleanupSession(session, { reason, disconnectProvider: false })));
   }
 
@@ -2449,36 +2737,53 @@ export class DebugSessionManager {
     clientId: string | undefined,
     state: string
   ): void {
-    if (!ideSessionId) return;
     for (const session of this.sessions.sessions.values()) {
-      if (session.ideSessionId !== ideSessionId) continue;
-      if (clientId && session.ideClientId && session.ideClientId !== clientId) continue;
+      if (!this.#matchesAssociatedIdeEvent(session, ideSessionId, clientId)) continue;
       session.state = state;
     }
   }
 
+  #matchesAssociatedIdeEvent(
+    session: DebugSessionRecord,
+    ideSessionId: string | undefined,
+    clientId: string | undefined
+  ): boolean {
+    return this.#matchesAuthoritativeIdeTuple(session, clientId, ideSessionId);
+  }
+
   #selectIdeSession(args: DebugToolArgs): IdeDebugSessionInfo | undefined {
     if (!this.ideBridge) return undefined;
-    if (args.ideSessionId) return this.ideBridge.registry.findSession(args.ideSessionId, args.clientId);
     const workspaceRoot = args.projectPath || args.workspace
       ? resolveWorkspacePath(this.security.workspaceRoot(), String(args.projectPath ?? args.workspace))
       : this.security.workspaceRoot();
     const sessions = this.ideBridge.registry.listSessions({
       clientId: args.clientId,
       workspaceRoot
+    }).filter((session) => {
+      return session.state !== SessionState.TERMINATED && session.state !== SessionState.FAILED;
     });
-    if (!args.ideSessionId && sessions.length > 1) {
+    const matchingSessions = args.ideSessionId
+      ? sessions.filter((session) => session.ideSessionId === args.ideSessionId)
+      : sessions;
+    if (!args.clientId && matchingSessions.length > 1) {
       throw new BreakPilotError(
         ErrorCodes.IDE_SESSION_AMBIGUOUS,
         "Multiple IDE debug sessions match. Pass clientId and ideSessionId to choose one.",
-        { sessions }
+        {
+          sessions: matchingSessions.map((session) => ({
+            clientId: session.clientId,
+            ideSessionId: session.ideSessionId,
+            state: session.state,
+            active: Boolean(session.active)
+          }))
+        }
       );
     }
     return (
-      sessions.find((session) => session.active && session.state === SessionState.PAUSED) ??
-      sessions.find((session) => session.state === SessionState.PAUSED) ??
-      sessions.find((session) => session.active) ??
-      sessions[0]
+      matchingSessions.find((session) => session.active && session.state === SessionState.PAUSED) ??
+      matchingSessions.find((session) => session.state === SessionState.PAUSED) ??
+      matchingSessions.find((session) => session.active) ??
+      matchingSessions[0]
     );
   }
 
@@ -2584,8 +2889,35 @@ export class DebugSessionManager {
     return normalized;
   }
 
-  #bridgeMessageError(message: BridgeMessage): boolean {
-    return Boolean(message.error && Object.keys(message.error).length > 0);
+  #decodedBridgeOpaqueId(value: unknown): string | undefined {
+    return this.#isPresentOpaqueId(value) ? value : undefined;
+  }
+
+  #decodedBridgeText(value: unknown): string | undefined {
+    return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+  }
+
+  #decodedAdapterBreakpointId(value: unknown): number | string | undefined {
+    return this.#numberOrUndefined(value) ?? this.#decodedBridgeOpaqueId(value);
+  }
+
+  #decodedBreakpointBoolean(value: unknown, missingDefault: boolean): boolean {
+    if (typeof value === "boolean") return value;
+    return value === undefined ? missingDefault : false;
+  }
+
+  #decodedBridgeError(
+    message: AnyRecord,
+    fallbackCode: string,
+    fallbackMessage: string
+  ): { code: string; message: string; error: AnyRecord } | null {
+    const error = this.#safeOwnDataRecord(message.error);
+    if (!error || Object.keys(error).length === 0) return null;
+    return {
+      code: this.#decodedBridgeText(error.code) ?? fallbackCode,
+      message: this.#decodedBridgeText(error.message) ?? fallbackMessage,
+      error
+    };
   }
 
   #sendIdeClientRequest(
@@ -2601,9 +2933,10 @@ export class DebugSessionManager {
     const bridge = this.ideBridge;
     return new Promise((resolve, reject) => {
       let timer: NodeJS.Timeout;
-      const listener = ({ clientId: eventClientId, message: response }: { clientId?: string; message: BridgeMessage }): void => {
-        const responseClientId = eventClientId ?? response.clientId;
-        if (responseClientId !== clientId) return;
+      const listener = (event: unknown): void => {
+        const decoded = this.#decodeIdeBridgeEvent(event);
+        if (!decoded || decoded.clientId !== clientId) return;
+        const response = decoded.message as BridgeMessage;
         if (!matches(response)) return;
         cleanup();
         resolve(response);
@@ -2655,27 +2988,37 @@ export class DebugSessionManager {
         bridge.off(IdeMessageTypes.IDE_SESSION_STARTED, sessionListener);
         bridge.off(IdeMessageTypes.IDE_SESSION_PAUSED, sessionListener);
       };
-      const resolveSession = (message: AnyRecord): boolean => {
-        if (message.clientId !== clientId) return false;
-        const session = bridge.registry.findSession(message.ideSessionId, clientId);
+      const resolveSession = (eventClientId: string | undefined, message: AnyRecord): boolean => {
+        if (eventClientId !== clientId) return false;
+        const ideSessionId = this.#decodedBridgeOpaqueId(message.ideSessionId);
+        if (!ideSessionId) return false;
+        const session = bridge.registry.findSession(ideSessionId, clientId);
         if (!session) return false;
         if (session.workspaceRoot && path.resolve(session.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
         cleanup();
         resolve(session);
         return true;
       };
-      const commandListener = ({ message }: { message: AnyRecord }): void => {
+      const commandListener = (event: unknown): void => {
+        const decoded = this.#decodeIdeBridgeEvent(event);
+        if (!decoded || decoded.clientId !== clientId) return;
+        const { message } = decoded;
         if (message.requestId !== requestId) return;
-        if (message.error && Object.keys(message.error).length > 0) {
+        const bridgeError = this.#decodedBridgeError(
+          message,
+          ErrorCodes.TOOL_FAILED,
+          "IDE debug launch failed."
+        );
+        if (bridgeError) {
           cleanup();
           reject(new BreakPilotError(
-            String(message.error.code ?? ErrorCodes.TOOL_FAILED),
-            String(message.error.message ?? "IDE debug launch failed."),
-            { error: message.error, requestId }
+            bridgeError.code,
+            bridgeError.message,
+            { error: bridgeError.error, requestId }
           ));
           return;
         }
-        if (message.ideSessionId && resolveSession(message)) return;
+        if (message.ideSessionId && resolveSession(decoded.clientId, message)) return;
         const existing = bridge.registry
           .listSessions({ clientId, workspaceRoot })
           .find((session) => Date.parse(session.startedAt) >= startedAt - 1000);
@@ -2684,9 +3027,12 @@ export class DebugSessionManager {
           resolve(existing);
         }
       };
-      const sessionListener = ({ message }: { message: AnyRecord }): void => {
+      const sessionListener = (event: unknown): void => {
+        const decoded = this.#decodeIdeBridgeEvent(event);
+        if (!decoded || decoded.clientId !== clientId) return;
+        const { message } = decoded;
         if (message.requestId && message.requestId !== requestId) return;
-        resolveSession(message);
+        resolveSession(decoded.clientId, message);
       };
       const timer = setTimeout(() => {
         cleanup();
@@ -2722,10 +3068,12 @@ export class DebugSessionManager {
         ideSessionId: args.ideSessionId
       });
     }
-    const existing = [...this.sessions.sessions.values()].find(
-      (session) => session.ideSessionId === ideSession.ideSessionId && session.ideClientId === ideSession.clientId
+    const existing = [...this.sessions.sessions.values()].find((session) =>
+      this.#matchesAuthoritativeIdeTuple(session, ideSession.clientId, ideSession.ideSessionId)
     );
-    if (existing) return existing;
+    if (existing) {
+      return existing;
+    }
     const adopted = await this.#adoptIdeSession({
       ...args,
       clientId: ideSession.clientId,

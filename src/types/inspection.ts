@@ -11,6 +11,9 @@ export interface VariableLimits {
 
 export type SnapshotProfile = "focused" | "locals" | "full" | "custom" | string;
 export type ObjectFieldsMode = "none" | "preview" | "shallow" | "deep" | string;
+export type RuntimeReference = number | string;
+export type RuntimeMutationMode = "native" | "evaluateAssignment";
+export type RuntimeStackFrame = Omit<DapStackFrame, "id"> & { id: RuntimeReference };
 export type ScopeCategory =
   | "arguments"
   | "locals"
@@ -38,7 +41,12 @@ export interface SerializedVariable {
   kind: VariableKind;
   valuePreview?: string;
   value?: unknown;
-  variablesReference?: number;
+  variablesReference?: RuntimeReference;
+  pauseEpoch?: number;
+  childrenCount?: number;
+  complete?: boolean;
+  modifiable?: boolean;
+  mutationMode?: RuntimeMutationMode;
   truncated: boolean;
   redacted?: boolean;
   cycle?: boolean;
@@ -53,8 +61,13 @@ export interface VariableNode {
   summary: string;
   raw?: unknown;
   path?: string[];
-  ref?: number;
-  parentRef?: number;
+  ref?: RuntimeReference;
+  parentRef?: RuntimeReference;
+  pauseEpoch?: number;
+  childrenCount?: number;
+  complete?: boolean;
+  modifiable?: boolean;
+  mutationMode?: RuntimeMutationMode;
   expandable: boolean;
   truncated: boolean;
   redacted?: boolean;
@@ -81,7 +94,7 @@ export interface ScopeMetadata {
   category: ScopeCategory;
   included: boolean;
   expensive: boolean;
-  variablesReference: number;
+  variablesReference: RuntimeReference;
 }
 
 export interface RuntimeSnapshot {
@@ -90,10 +103,10 @@ export interface RuntimeSnapshot {
   language: DebugLanguage;
   profile?: SnapshotProfile;
   threadId: number | null;
-  frameId: number | null;
+  frameId: RuntimeReference | null;
   threads?: AnyRecord[];
   partial?: boolean;
-  stackFrames: DapStackFrame[];
+  stackFrames: RuntimeStackFrame[];
   variables: Record<string, {
     name: string;
     category?: ScopeCategory;
@@ -110,7 +123,7 @@ export interface RuntimeSnapshot {
 }
 
 export interface InspectVariableResult extends AnyRecord {
-  variablesReference?: number;
+  variablesReference?: RuntimeReference;
   start?: number;
   count?: number;
   variables?: SerializedVariableMap;

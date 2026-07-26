@@ -79,8 +79,19 @@ const provider: RuntimeDebugProvider = {
   async listThreads() {
     return snapshot.threads;
   },
-  async getCallStack() {
-    return { threadId: 1, stackFrames: snapshot.stackFrames, totalFrames: 2, partial: false };
+  async getCallStack(_threadId, request) {
+    const stackFrames = snapshot.stackFrames.slice(request.offset, request.offset + request.limit);
+    const nextOffset = request.offset + stackFrames.length;
+    const partial = nextOffset < 2;
+    return {
+      threadId: 1,
+      stackFrames,
+      offset: request.offset,
+      totalFrames: 2,
+      completeness: partial ? "partial" : "complete",
+      partial,
+      ...(partial ? { nextOffset, truncationReason: "limit" as const } : {})
+    };
   },
   async getRuntimeSnapshot() {
     return snapshot as any;

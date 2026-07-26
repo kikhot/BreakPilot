@@ -2,6 +2,7 @@ import type { DapStackFrame, StoppedEvent } from "./dap.ts";
 import type { DebugLanguage, SessionStateValue } from "./debug.ts";
 import type { AnyRecord } from "./json.ts";
 import type { BreakpointInput, BreakpointRecord } from "./sessions.ts";
+import type { RuntimeReference } from "./inspection.ts";
 
 export interface DebuggerFeatureMap {
   breakpointUpdate?: boolean;
@@ -32,7 +33,7 @@ export interface BridgeMessage extends DebuggerProtocolInfo {
   requestId?: string;
   pauseEpoch?: number;
   expectedPauseEpoch?: number;
-  ref?: number | string;
+  ref?: RuntimeReference;
   offset?: number;
   limit?: number;
   options?: AnyRecord;

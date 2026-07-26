@@ -139,9 +139,10 @@ const frameIndex: JsonSchema = {
 };
 
 const frameId: JsonSchema = {
-  type: "integer",
-  minimum: 0,
-  maximum: MAX_SOURCE_POSITION
+  oneOf: [
+    { type: "integer", minimum: 0, maximum: MAX_SOURCE_POSITION },
+    { type: "string" }
+  ]
 };
 
 const maxString: JsonSchema = {
@@ -163,10 +164,11 @@ const sourceColumn: JsonSchema = {
   maximum: MAX_SOURCE_POSITION
 };
 
-const positiveReference: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_SOURCE_POSITION
+const runtimeReference: JsonSchema = {
+  oneOf: [
+    { type: "integer", minimum: 1, maximum: MAX_SOURCE_POSITION },
+    { type: "string" }
+  ]
 };
 
 const networkPort: JsonSchema = {
@@ -311,7 +313,7 @@ const valueRefInput: JsonSchema = {
   properties: {
     ...valueCommonProperties,
     ref: {
-      ...positiveReference,
+      ...runtimeReference,
       description: "Opaque variable reference returned by frame/value tools."
     }
   },
@@ -324,11 +326,53 @@ const valueVariablesReferenceInput: JsonSchema = {
   properties: {
     ...valueCommonProperties,
     variablesReference: {
-      ...positiveReference,
+      ...runtimeReference,
       description: "Compatibility alias for ref."
     }
   },
   required: ["variablesReference"]
+};
+
+const setValueCommonProperties: Record<string, JsonSchema> = {
+  projectPath,
+  workspace,
+  sessionId,
+  threadId,
+  frameId,
+  frameIndex,
+  newValue: { type: "string" },
+  timeout,
+  timeoutMs,
+  expand,
+  objectFields,
+  depth: expansionDepth,
+  maxDepth,
+  limit: { ...pageLimit, default: 20 },
+  maxItems,
+  maxString,
+  maxStringLength,
+  redactPatterns,
+  detail
+};
+
+const setValuePathInput: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...setValueCommonProperties,
+    path: { type: "array", minItems: 1, items: { type: "string" } }
+  },
+  required: ["path", "newValue"]
+};
+
+const setValueRefInput: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...setValueCommonProperties,
+    ref: runtimeReference
+  },
+  required: ["ref", "newValue"]
 };
 
 const breakpointRemoveCommonProperties: Record<string, JsonSchema> = {
@@ -590,11 +634,11 @@ export const toolDefinitions: ToolDefinition[] = [
         ...valueCommonProperties,
         path: { type: "array", minItems: 1, items: { type: "string" } },
         ref: {
-          ...positiveReference,
+          ...runtimeReference,
           description: "Opaque variable reference returned by frame/value tools."
         },
         variablesReference: {
-          ...positiveReference,
+          ...runtimeReference,
           description: "Compatibility alias for ref."
         }
       },
@@ -609,28 +653,11 @@ export const toolDefinitions: ToolDefinition[] = [
       type: "object",
       additionalProperties: false,
       properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        threadId,
-        frameId,
-        frameIndex,
+        ...setValueCommonProperties,
         path: { type: "array", minItems: 1, items: { type: "string" } },
-        newValue: { type: "string" },
-        timeout,
-        timeoutMs,
-        expand,
-        objectFields,
-        depth: expansionDepth,
-        maxDepth,
-        limit: { ...pageLimit, default: 20 },
-        maxItems,
-        maxString,
-        maxStringLength,
-        redactPatterns,
-        detail
+        ref: runtimeReference
       },
-      required: ["path", "newValue"]
+      oneOf: [setValuePathInput, setValueRefInput]
     },
     outputSchema: toolOutputSchemas.bp_debug_set_value
   },

@@ -40,7 +40,7 @@ export class SessionStore {
       state: session.state,
       createdAt: session.createdAt,
       workspaceRoot: session.workspaceRoot,
-      providerKind: session.providerKind,
+      providerKind: session.provider.kind,
       ideClientId: session.ideClientId,
       ideSessionId: session.ideSessionId,
       capabilities: session.provider.capabilities

@@ -12,6 +12,7 @@ import type {
   StoppedEvent
 } from "../types/dap.ts";
 import type { DebugLanguage } from "../types/debug.ts";
+import type { RuntimeReference } from "../types/inspection.ts";
 import type { AnyRecord } from "../types/json.ts";
 import type { BreakpointRecord } from "../types/sessions.ts";
 import { DapClient } from "./DapClient.ts";
@@ -451,7 +452,8 @@ export class DapSession extends EventEmitter {
 
   async stackTrace(
     threadId: number | null = this.threadId,
-    levels = 20
+    levels = 20,
+    startFrame = 0
   ): Promise<{ threadId: number | null; stackFrames: DapStackFrame[]; totalFrames?: number }> {
     if (threadId == null) {
       const threads = await this.threads();
@@ -460,9 +462,25 @@ export class DapSession extends EventEmitter {
     if (threadId == null) return { threadId: null, stackFrames: [] };
     const response = await this.client.request("stackTrace", {
       threadId,
-      startFrame: 0,
+      startFrame,
       levels
     });
+    return {
+      threadId,
+      stackFrames: response.stackFrames ?? [],
+      totalFrames: response.totalFrames
+    };
+  }
+
+  async stackTraceFull(
+    threadId: number | null = this.threadId
+  ): Promise<{ threadId: number | null; stackFrames: DapStackFrame[]; totalFrames?: number }> {
+    if (threadId == null) {
+      const threads = await this.threads();
+      threadId = (threads[0]?.id as number | undefined) ?? null;
+    }
+    if (threadId == null) return { threadId: null, stackFrames: [] };
+    const response = await this.client.request("stackTrace", { threadId });
     return {
       threadId,
       stackFrames: response.stackFrames ?? [],
@@ -476,9 +494,14 @@ export class DapSession extends EventEmitter {
   }
 
   async variables(
-    variablesReference: number,
+    variablesReference: RuntimeReference,
     options: { start?: number; count?: number; filter?: string } = {}
   ): Promise<DapVariable[]> {
+    if (typeof variablesReference !== "number" || !Number.isSafeInteger(variablesReference) || variablesReference <= 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "DAP variable references must be positive integers.", {
+        variablesReference
+      });
+    }
     const response = await this.client.request("variables", {
       variablesReference,
       start: options.start,
@@ -488,7 +511,12 @@ export class DapSession extends EventEmitter {
     return response.variables ?? [];
   }
 
-  async setVariable(variablesReference: number, name: string, value: string): Promise<AnyRecord> {
+  async setVariable(variablesReference: RuntimeReference, name: string, value: string): Promise<AnyRecord> {
+    if (typeof variablesReference !== "number" || !Number.isSafeInteger(variablesReference) || variablesReference <= 0) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "DAP variable references must be positive integers.", {
+        variablesReference
+      });
+    }
     return this.client.request("setVariable", {
       variablesReference,
       name,
@@ -497,6 +525,14 @@ export class DapSession extends EventEmitter {
   }
 
   async evaluate(expression: string, options: AnyRecord = {}): Promise<AnyRecord> {
+    if (
+      options.frameId !== undefined &&
+      (typeof options.frameId !== "number" || !Number.isSafeInteger(options.frameId) || options.frameId <= 0)
+    ) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "DAP frame ids must be positive integers.", {
+        frameId: options.frameId
+      });
+    }
     return this.client.request(
       "evaluate",
       {

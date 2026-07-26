@@ -1,7 +1,7 @@
 import type { DapSession } from "../dap/DapSession.ts";
 import type { RuntimeEventBuffer } from "../runtime/RuntimeEventBuffer.ts";
 import type { RuntimeProviderCapabilities } from "./capabilities.ts";
-import type { DapBreakpoint, StoppedEvent } from "./dap.ts";
+import type { DapBreakpoint, FreshStopBoundary, StoppedEvent } from "./dap.ts";
 import type {
   DebugLanguage,
   DebugMode,
@@ -11,11 +11,29 @@ import type {
   SessionStateValue
 } from "./debug.ts";
 import type { AnyRecord } from "./json.ts";
-import type { InspectVariableResult, RuntimeSnapshot, VariableLimits } from "./inspection.ts";
+import type { InspectVariableResult, RuntimeSnapshot, RuntimeStackFrame, VariableLimits } from "./inspection.ts";
 
 export type ThreadId = number | string;
 
 export type DetailLevel = "compact" | "diagnostic";
+
+export interface RuntimeStackRequest {
+  offset: number;
+  limit: number;
+  pauseEpoch?: number;
+}
+
+export interface RuntimeStackResult {
+  threadId: ThreadId | null;
+  stackFrames: RuntimeStackFrame[];
+  offset: number;
+  totalFrames?: number;
+  pauseEpoch?: number;
+  completeness: "complete" | "partial" | "unknown";
+  partial: boolean;
+  nextOffset?: number;
+  truncationReason?: "limit" | "provider" | "timeout" | "noSuspendContext";
+}
 
 export interface RunToLineArgs {
   filePath: string;
@@ -122,12 +140,13 @@ export interface RuntimeDebugProvider {
   setBreakpoints(filePath: string, breakpoints: BreakpointRecord[]): Promise<DapBreakpoint[]>;
   removeBreakpoint?(breakpoint: BreakpointRecord): Promise<AnyRecord>;
   waitForBreakpoint(timeoutMs?: number): Promise<StoppedEvent>;
+  captureStopBoundary?(): FreshStopBoundary;
   runToLine?(args: RunToLineArgs): Promise<RunToLineResult>;
   listBreakpoints?(filter?: BreakpointFilter): Promise<BreakpointRecord[]>;
   updateBreakpoint?(breakpoint: BreakpointRecord): Promise<BreakpointRecord>;
   drainEvents?(args?: DrainEventsArgs): Promise<DebugEventBuffer | RuntimeEventPage>;
   listThreads?(args?: { offset?: number; limit?: number }): Promise<AnyRecord[]>;
-  getCallStack?(threadId?: ThreadId | null, args?: number | { offset?: number; limit?: number }): Promise<AnyRecord>;
+  getCallStack?(threadId: ThreadId | null | undefined, request: RuntimeStackRequest): Promise<RuntimeStackResult>;
   getRuntimeSnapshot(args: AnyRecord, limits: Required<VariableLimits>): Promise<RuntimeSnapshot>;
   inspectVariable?(args: AnyRecord, limits: Required<VariableLimits>): Promise<InspectVariableResult | AnyRecord>;
   setVariable?(args: AnyRecord): Promise<AnyRecord>;

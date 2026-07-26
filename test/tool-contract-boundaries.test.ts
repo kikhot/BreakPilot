@@ -129,7 +129,14 @@ test("value, set-value, and remove selectors reject missing, empty, and mixed ta
   };
   manager.bpDebugSetValue = async () => {
     calls.setValue += 1;
-    return { path: ["answer"], oldValue: "42" };
+    return {
+      path: ["answer"],
+      oldValue: "42",
+      newValue: "43",
+      applied: true,
+      verified: false,
+      mutationMode: "native"
+    };
   };
   manager.bpDebugRemoveBreakpoint = async () => {
     calls.remove += 1;
@@ -171,6 +178,21 @@ test("value, set-value, and remove selectors reject missing, empty, and mixed ta
   });
   assert.equal(validSetPath.error, undefined);
   assert.equal(calls.setValue, 1);
+  const validSetRef = await router.callTool("bp_debug_set_value", {
+    ref: "bpref_opaque",
+    newValue: "43"
+  });
+  assert.equal(validSetRef.error, undefined);
+  assert.equal(calls.setValue, 2);
+  for (const args of [
+    { newValue: "43" },
+    { path: ["answer"], ref: "bpref_opaque", newValue: "43" },
+    { ref: "bpref_opaque", newValue: "43", unknown: true }
+  ]) {
+    const response = await router.callTool("bp_debug_set_value", args);
+    assert.equal(response.error?.code, ErrorCodes.INVALID_ARGUMENT, JSON.stringify(args));
+  }
+  assert.equal(calls.setValue, 2, "invalid set-value selectors must not dispatch");
 
   for (const args of [
     { breakpointId: "bp_1" },

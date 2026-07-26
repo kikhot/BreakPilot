@@ -604,6 +604,24 @@ test("concrete DAP fallback capability requires manager wiring when goto is unav
   assert.equal(unwired.client.requests.length, 0, "unwired fallback must not mutate the adapter");
 });
 
+test("fallback trusts its live provider when the mirror is absent and compatibility kind is stale", async () => {
+  const { client, provider, record } = createFixture({ native: false, fallback: true });
+  delete record.dap;
+  record.providerKind = "ide";
+
+  assert.equal(provider.capabilities.runToLine, "fallback");
+  const result = await run(provider, {
+    filePath: "/workspace/Foo.java",
+    line: 20,
+    threadId: 7,
+    timeoutMs: 100
+  });
+
+  assert.equal(result.status, "paused");
+  assert.equal(result.targetReached, true);
+  assert.equal(client.setBreakpointCalls, 2);
+});
+
 test("fallback run-to-line preserves every source breakpoint, resumes once, and proves cleanup", async () => {
   const { client, provider, breakpoints, record, highLevelSetBreakpoints } = createFixture({
     native: false,
@@ -884,63 +902,16 @@ test("manager marks an indeterminate post-dispatch cleanup failure as running", 
   const policy = loadPolicy("breakpilot.yaml");
   const manager = new DebugSessionManager({ policy });
   const workspaceRoot = policy.workspace.root;
-  const provider: RuntimeDebugProvider = {
-    kind: "dap",
-    sessionId: "run_to_line_cleanup_state",
-    language: "java",
-    workspaceRoot,
-    capabilities: {
-      pause: "native",
-      stepping: "native",
-      runToLine: "fallback",
-      variableReferences: "native",
-      setValue: "unsupported",
-      breakpointUpdate: "fallback",
-      conditionalBreakpoints: "unsupported",
-      hitConditionalBreakpoints: "unsupported",
-      tracepoints: "unsupported",
-      eventDrain: "unsupported"
-    },
-    threadId: 7,
-    async setBreakpoints() { return []; },
-    async waitForBreakpoint() { return { reason: "breakpoint", threadId: 7 }; },
-    async runToLine() {
-      throw new BreakPilotError(
-        ErrorCodes.RUN_TO_LINE_CLEANUP_FAILED,
-        "cleanup could not be proven",
-        { outcome: "indeterminate", retrySafe: false, cleanupRequired: true }
-      );
-    },
-    async getRuntimeSnapshot() {
-      return {
-        sessionId: "run_to_line_cleanup_state",
-        source: "headless" as const,
-        language: "java",
-        threadId: 7,
-        frameId: null,
-        stackFrames: [],
-        variables: {},
-        limits: { maxDepth: 1, maxItems: 1, maxStringLength: 1 }
-      };
-    },
-    async evaluate() { return {}; },
-    async continue() { return {}; },
-    async step() { return {}; },
-    async disconnect() { return {}; }
-  };
-  const record: DebugSessionRecord = {
-    sessionId: provider.sessionId,
-    language: provider.language,
-    workspaceRoot,
-    mode: "headless",
-    owner: "mcp",
-    state: "paused",
-    createdAt: new Date(0).toISOString(),
-    providerKind: "dap",
-    provider,
-    // The fallback has already dispatched continue and did not receive a fresh
-    // terminal or stop; the manager must not preserve the stale paused state.
-    dap: { isPaused: false, terminated: false } as unknown as DapSession
+  const { dap, provider, record } = createFixture({ native: false, fallback: true });
+  dap.workspaceRoot = workspaceRoot;
+  record.workspaceRoot = workspaceRoot;
+  provider.runToLine = async () => {
+    dap.markRunning();
+    throw new BreakPilotError(
+      ErrorCodes.RUN_TO_LINE_CLEANUP_FAILED,
+      "cleanup could not be proven",
+      { outcome: "indeterminate", retrySafe: false, cleanupRequired: true }
+    );
   };
   manager.sessions.add(record);
 
@@ -955,61 +926,14 @@ test("manager derives running state after a dispatched DAP request fails", async
   const policy = loadPolicy("breakpilot.yaml");
   const manager = new DebugSessionManager({ policy });
   const workspaceRoot = policy.workspace.root;
-  const dapState = { isPaused: true, terminated: false };
-  const provider: RuntimeDebugProvider = {
-    kind: "dap",
-    sessionId: "run_to_line_dispatch_failure_state",
-    language: "java",
-    workspaceRoot,
-    capabilities: {
-      pause: "native",
-      stepping: "native",
-      runToLine: "native",
-      variableReferences: "native",
-      setValue: "unsupported",
-      breakpointUpdate: "fallback",
-      conditionalBreakpoints: "unsupported",
-      hitConditionalBreakpoints: "unsupported",
-      tracepoints: "unsupported",
-      eventDrain: "unsupported"
-    },
-    threadId: 7,
-    async setBreakpoints() { return []; },
-    async waitForBreakpoint() { return { reason: "breakpoint", threadId: 7 }; },
-    async runToLine() {
-      // This models DapRuntimeProvider after it has called markRunning() but
-      // before the adapter rejects its dispatched `goto` request.
-      dapState.isPaused = false;
-      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP goto request failed after dispatch.");
-    },
-    async getRuntimeSnapshot() {
-      return {
-        sessionId: "run_to_line_dispatch_failure_state",
-        source: "headless" as const,
-        language: "java",
-        threadId: 7,
-        frameId: null,
-        stackFrames: [],
-        variables: {},
-        limits: { maxDepth: 1, maxItems: 1, maxStringLength: 1 }
-      };
-    },
-    async evaluate() { return {}; },
-    async continue() { return {}; },
-    async step() { return {}; },
-    async disconnect() { return {}; }
-  };
-  const record: DebugSessionRecord = {
-    sessionId: provider.sessionId,
-    language: provider.language,
-    workspaceRoot,
-    mode: "headless",
-    owner: "mcp",
-    state: "paused",
-    createdAt: new Date(0).toISOString(),
-    providerKind: "dap",
-    provider,
-    dap: dapState as unknown as DapSession
+  const { dap, provider, record } = createFixture({ native: true, fallback: false });
+  dap.workspaceRoot = workspaceRoot;
+  record.workspaceRoot = workspaceRoot;
+  provider.runToLine = async () => {
+    // This models DapRuntimeProvider after it has called markRunning() but
+    // before the adapter rejects its dispatched `goto` request.
+    dap.markRunning();
+    throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "DAP goto request failed after dispatch.");
   };
   manager.sessions.add(record);
 

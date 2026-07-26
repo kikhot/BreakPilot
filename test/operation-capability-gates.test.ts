@@ -78,11 +78,14 @@ function sessionRouter(capabilities: RuntimeProviderCapabilities): {
       counters.wait += 1;
       return { sessionId: "operation_caps", reason: "breakpoint", threadId: 7 };
     },
-    async getCallStack() {
+    async getCallStack(_threadId, request) {
       return {
         threadId: 7,
         stackFrames: [{ id: 11, name: "main", line: 1, source: { path: sourceFile } }],
-        totalFrames: 1
+        offset: request.offset,
+        totalFrames: 1,
+        completeness: "complete",
+        partial: false
       };
     },
     async getRuntimeSnapshot() {

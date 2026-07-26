@@ -27,10 +27,18 @@ const expectedSuccessFields: Record<string, string[]> = {
     "warnings"
   ],
   bp_debug_threads: ["threads", "offset", "totalCount", "warnings"],
-  bp_debug_call_stack: ["threadId", "frames", "offset", "totalFrames", "partial", "warnings"],
+  bp_debug_call_stack: [
+    "threadId", "frames", "offset", "totalFrames", "pauseEpoch", "completeness", "partial",
+    "nextOffset", "truncationReason", "warnings"
+  ],
   bp_debug_frame: ["threadId", "frame", "variables", "warnings"],
-  bp_debug_value: ["name", "value", "path", "type", "ref", "children", "items", "result", "warnings"],
-  bp_debug_set_value: ["path", "oldValue", "newValue", "applied", "result", "warnings"],
+  bp_debug_value: [
+    "name", "value", "path", "type", "ref", "pauseEpoch", "childrenCount", "complete", "truncated",
+    "modifiable", "mutationMode", "children", "items", "result", "warnings"
+  ],
+  bp_debug_set_value: [
+    "path", "ref", "oldValue", "newValue", "applied", "verified", "mutationMode", "result", "warnings"
+  ],
   bp_debug_eval: ["expression", "value", "type", "result", "warnings"],
   bp_debug_context: ["status", "position", "frames", "variables", "warnings"],
   bp_debug_list_breakpoints: ["breakpoints", "totalCount", "enabledCount", "source", "warnings"],
@@ -44,10 +52,10 @@ const expectedRequiredFields: Record<string, string[]> = {
   bp_debug_control: ["status"],
   bp_debug_run_to_line: ["status", "targetReached", "requestedPosition", "cleanedUp"],
   bp_debug_threads: ["threads", "offset", "totalCount"],
-  bp_debug_call_stack: ["threadId", "frames", "offset", "totalFrames"],
+  bp_debug_call_stack: ["threadId", "frames", "offset", "completeness", "partial"],
   bp_debug_frame: ["threadId", "frame", "variables"],
   bp_debug_value: [],
-  bp_debug_set_value: ["path", "oldValue"],
+  bp_debug_set_value: ["applied", "verified", "mutationMode"],
   bp_debug_eval: ["expression"],
   bp_debug_context: ["status", "position", "frames", "variables"],
   bp_debug_list_breakpoints: ["breakpoints", "totalCount"],
@@ -112,6 +120,30 @@ for (const tool of toolDefinitions) {
       assert.equal(nested.additionalProperties, false, `${field} must remain a closed public breakpoint view`);
       assert.deepEqual(Object.keys(nested.properties).sort(), publicBreakpointFields.slice().sort());
       assert.deepEqual((nested.required ?? []).slice().sort(), publicBreakpointRequired.slice().sort());
+    }
+  } else if (tool.name === "bp_debug_set_value") {
+    const expectedSetValueFields = expectedSuccessFields.bp_debug_set_value;
+    assert.ok(expectedSetValueFields);
+    assert.equal(success.type, "object");
+    assert.equal(success.additionalProperties, false);
+    assert.deepEqual(
+      Object.keys(success.properties).sort(),
+      expectedSetValueFields.slice().sort(),
+      "set-value must publish its exact compact success fields"
+    );
+    assert.equal(success.oneOf.length, 2, "set-value output must expose path and ref target branches");
+    for (const [index, target] of ["path", "ref"].entries()) {
+      const branch = success.oneOf[index] as AnyRecord;
+      assert.equal(branch.type, "object");
+      assert.equal(branch.additionalProperties, false);
+      assert.deepEqual(
+        Object.keys(branch.properties).sort(),
+        [...expectedSetValueFields.filter((field) => field !== "path" && field !== "ref"), target].sort()
+      );
+      assert.deepEqual(
+        (branch.required ?? []).slice().sort(),
+        [target, "oldValue", "newValue", "applied", "verified", "mutationMode"].sort()
+      );
     }
   } else {
     assert.equal(success.additionalProperties, false, `${tool.name} success must be closed`);

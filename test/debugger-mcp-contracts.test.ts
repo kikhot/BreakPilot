@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { ToolRouter } from "../src/control/ToolRouter.ts";
 import { toolDefinitions } from "../src/control/toolDefinitions.ts";
-import { dapProviderCapabilities } from "../src/runtime/ProviderCapabilities.ts";
+import { dapProviderCapabilities, ideProviderCapabilities } from "../src/runtime/ProviderCapabilities.ts";
 import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import type { AnyRecord } from "../src/types/json.ts";
@@ -344,7 +344,12 @@ manager.sessions.add({
     sessionId: "sess_contract",
     language: "python",
     workspaceRoot: loadPolicy().workspace.root,
-    capabilities: {},
+    capabilities: ideProviderCapabilities({
+      debugCommands: true,
+      variableSnapshot: true,
+      setVariable: true,
+      runToLine: true
+    }),
     threadId: "opaque-thread",
     async setBreakpoints() {
       ideSetBreakpointCalls += 1;
@@ -396,18 +401,25 @@ manager.sessions.add({
       listThreadsArgs = args;
       return threadIds.map((id) => ({ id, name: id, state: "paused", isCurrent: id === "thread-c", frameCount: 1 }));
     },
-    async getCallStack(threadId?: string | number | null, args?: AnyRecord | number) {
-      callStackArgs = args;
-      const limit = typeof args === "number" ? args : Number(args?.limit ?? 20);
+    async getCallStack(threadId?: string | number | null, request: AnyRecord = { offset: 0, limit: 20 }) {
+      callStackArgs = request;
+      const offset = Number(request.offset ?? 0);
+      const limit = Number(request.limit ?? 20);
+      const nextOffset = Math.min(6, offset + limit);
+      const partial = nextOffset < 6;
       return {
         threadId,
         stackFrames: Array.from({ length: limit }, (_, index) => ({
-          id: index + 1,
-          name: `frame${index}`,
-          line: index + 10,
-          source: { path: `src/F${index}.java` }
+          id: offset + index + 1,
+          name: `frame${offset + index}`,
+          line: offset + index + 10,
+          source: { path: `src/F${offset + index}.java` }
         })),
-        totalFrames: 6
+        offset,
+        totalFrames: 6,
+        completeness: partial ? "partial" : "complete",
+        partial,
+        ...(partial ? { nextOffset, truncationReason: "limit" } : {})
       };
     },
     async getRuntimeSnapshot(args: AnyRecord) {
@@ -653,9 +665,11 @@ assert.equal((setVariableArgs as AnyRecord).name, "name");
 assert.deepEqual(setValueResult.result, {
   path: ["name"],
   oldValue: "Alan Turing",
-  newValue: "\"Katherine Johnson\"",
-  applied: true
+  newValue: "\"Katherine Johnson\""
 });
+assert.equal(setValueResult.applied, true);
+assert.equal(setValueResult.verified, false);
+assert.equal(setValueResult.mutationMode, "native");
 
 const threads = await router.callTool("bp_debug_threads", {
   sessionId: "sess_contract",
@@ -672,10 +686,13 @@ const stack = await router.callTool("bp_debug_call_stack", {
   offset: 2,
   limit: 2
 });
-assert.equal(callStackArgs, 4);
+assert.deepEqual(callStackArgs, { offset: 2, limit: 2 });
 assert.deepEqual((stack.frames as AnyRecord[]).map((frame) => frame.index), [2, 3]);
 assert.equal(stack.offset, 2);
 assert.equal(stack.totalFrames, 6);
+assert.equal(stack.completeness, "partial");
+assert.equal(stack.partial, true);
+assert.equal(stack.nextOffset, 4);
 
 await router.callTool("bp_debug_control", {
   sessionId: "sess_contract",
