@@ -34,11 +34,29 @@ export function mergeIdeCapabilityRecords(...layers: AnyRecord[]): AnyRecord {
   return merged;
 }
 
-export function dapProviderCapabilities(raw: AnyRecord = {}): RuntimeProviderCapabilities {
+export interface DapProviderCapabilityOptions {
+  /**
+   * The live provider has both the adapter capability and the causal DAP
+   * primitives needed to implement goto safely.
+   */
+  nativeRunToLineAvailable?: boolean;
+  /** A manager-wired Reconciler can safely provide the temporary-breakpoint path. */
+  fallbackRunToLineAvailable?: boolean;
+}
+
+export function dapProviderCapabilities(
+  raw: AnyRecord = {},
+  options: DapProviderCapabilityOptions = {}
+): RuntimeProviderCapabilities {
+  // The raw DAP flag alone is not enough: it only says the adapter recognizes
+  // goto requests.  The live provider must also prove it owns the Task-4
+  // causal boundary/wait primitives, and supplies that fact explicitly.
+  const nativeRunToLine = options.nativeRunToLineAvailable === true && enabled(raw, "supportsGotoTargetsRequest");
+  const fallbackRunToLine = options.fallbackRunToLineAvailable === true;
   return {
     pause: "native",
     stepping: "native",
-    runToLine: "unsupported",
+    runToLine: nativeRunToLine ? "native" : fallbackRunToLine ? "fallback" : "unsupported",
     variableReferences: "native",
     setValue: enabled(raw, "supportsSetVariable") ? "native" : "unsupported",
     breakpointUpdate: "fallback",

@@ -107,10 +107,13 @@ live session，或者唯一 paused session。多个候选时返回 `SESSION_AMBI
 | `eventDrain` | `native`、`fallback`、`unsupported` | 读取缓存的 debugger/tracepoint 事件。 |
 
 当前 DAP session 的 pause、stepping 和 variable reference 固定为 native；变量修改
-及高级断点只有在 adapter 明确声明时才是 native。DAP 的 run-to-line、
-breakpoint update 和 event drain 当前均为 unsupported。IDE 能力来自 live bridge；
-当前 IDEA 与 VS Code bridge 声明 native run-to-line，以及
-`evaluateAssignment` 形式的 set-value，其他能力必须由 bridge 明确声明。
+及高级断点只有在 adapter 明确声明时才是 native。DAP 的 run-to-line 只有在 live
+adapter 声明 `gotoTargets`，且 BreakPilot 具备证明 fresh stop 的因果 DAP primitive
+时才是 `native`。没有 native goto 时，只有 manager 已接线、可使用共享临时断点事务的
+DAP session 才会声明 `fallback`；未接线/direct provider 仍为 `unsupported`。DAP 的
+breakpoint update 使用完整 source reconciliation fallback，event drain 仍受能力 gate
+控制。IDE 能力来自 live bridge；当前 IDEA 与 VS Code bridge 声明 native
+run-to-line，以及 `evaluateAssignment` 形式的 set-value，其他能力必须由 bridge 明确声明。
 
 manager 会在 dispatch 前强制执行该矩阵。pause、stepping、run-to-line、
 variable-reference inspection、set-value、breakpoint update 和 event drain 为
@@ -119,7 +122,8 @@ variable-reference inspection、set-value、breakpoint update 和 event drain �
 `conditionalBreakpoints`、`hitConditionalBreakpoints`、`tracepoints` gate。
 尚无对应实现能力的高级语义（`enabled:false`、temporary、suspend policy、
 log-message mode、log-stack mode）会在 mutation 前明确拒绝，不会静默忽略。
-BreakPilot 也不会用临时断点静默模拟 run-to-line。
+当 DAP fallback 被声明时，BreakPilot 会使用可见、事务性恢复的 temporary breakpoint，
+而不会静默伪造“已到达目标行”。
 
 ## 推荐流程
 
@@ -210,14 +214,24 @@ IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge �
 {
   "filePath": "src/App.java",
   "line": 42,
+  "column": 1,
   "timeout": 30000,
   "includeFrame": true
 }
 ```
 
-只有 session 的 `runToLine` capability 不是 `unsupported` 时才应调用。当前 IDEA
-与 VS Code bridge 提供 native 操作；DAP provider 明确返回 `unsupported`，且当前
-没有临时断点 fallback。
+只有 session 的 `runToLine` capability 不是 `unsupported` 时才应调用。返回值始终包含
+`status`、`targetReached`、`requestedPosition` 与 `cleanedUp`。Agent 应以
+`targetReached`，而不是仅以 `status:"paused"`，作为“确实到达请求位置”的依据。若 adapter
+选择相邻可执行位置，会在 `resolvedPosition` 中明确返回；另一个 fresh stop 会返回
+`paused + targetReached:false`，绝不会自动继续。终止事件返回
+`stopped + targetReached:false`；fresh wait 超时返回 `timeout + targetReached:false`。
+
+DAP 只有在 live adapter 可提供因果 target proof 时才使用原生 `gotoTargets`/`goto`。
+否则，已由 manager 接线的 DAP session 可以使用 `fallback` 临时断点事务；它返回
+`temporaryBreakpointId`，且仅在完整原始 source list 被 adapter 确认恢复后才返回
+`cleanedUp:true`。若无法证明恢复，调用会返回 `RUN_TO_LINE_CLEANUP_FAILED` 与
+`cleanupRequired:true`；Agent 应先检查/协调断点状态后再重试。
 
 ### `bp_debug_status`
 

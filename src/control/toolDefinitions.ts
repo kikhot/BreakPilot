@@ -501,6 +501,7 @@ export const toolDefinitions: ToolDefinition[] = [
         filePath: { type: "string" },
         file,
         line: sourceLine,
+        column: sourceColumn,
         threadId,
         timeout,
         timeoutMs,

@@ -114,9 +114,14 @@ a public tool exists:
 
 Current DAP sessions always report native pause, stepping, and variable
 references. Optional DAP mutation and breakpoint features are native only when
-the adapter advertises them; DAP run-to-line, breakpoint update, and event drain
-are currently unsupported. IDE capabilities are derived from the live bridge.
-The current IDEA and VS Code bridges advertise native run-to-line and
+the adapter advertises them. DAP run-to-line is `native` only when the live
+adapter advertises `gotoTargets` and BreakPilot has the causal DAP primitives
+needed to prove a fresh stop. If native goto is unavailable, it is `fallback`
+only for a manager-wired DAP session with the shared temporary-breakpoint
+transaction; an unwired/direct provider remains `unsupported`. DAP breakpoint
+updates use complete-source reconciliation as a fallback; event drain remains
+capability-gated. IDE capabilities are derived from the live bridge. The
+current IDEA and VS Code bridges advertise native run-to-line and
 `evaluateAssignment` set-value; other IDE features are enabled only when the
 bridge advertises them.
 
@@ -128,8 +133,9 @@ provider or fabricating success. Breakpoint creation also gates `condition`,
 `hitConditionalBreakpoints`, and `tracepoints`, respectively. Advanced
 semantics without an implemented capability (`enabled:false`, temporary,
 suspend policy, log-message mode, and log-stack mode) are rejected explicitly
-before mutation. BreakPilot does not silently emulate run-to-line with a
-temporary breakpoint.
+before mutation. When the DAP fallback is advertised, BreakPilot uses a
+visible, transactionally restored temporary breakpoint rather than silently
+pretending a line was reached.
 
 ## Recommended Flow
 
@@ -226,14 +232,29 @@ Runs the selected session to a source line.
 {
   "filePath": "src/App.java",
   "line": 42,
+  "column": 1,
   "timeout": 30000,
   "includeFrame": true
 }
 ```
 
 Call this tool only when the selected session reports `runToLine` as supported.
-The current IDEA and VS Code bridges provide a native operation. The DAP
-provider reports `unsupported`; BreakPilot has no temporary-breakpoint fallback.
+The result always includes `status`, `targetReached`, `requestedPosition`, and
+`cleanedUp`. Treat `targetReached`, not merely `status: "paused"`, as proof that
+execution reached the requested source position. A nearby executable target is
+reported in `resolvedPosition`; another fresh stop is returned as
+`paused + targetReached:false` and is never auto-resumed. A terminal event is
+`stopped + targetReached:false`; a fresh-wait timeout is
+`timeout + targetReached:false`.
+
+DAP uses native `gotoTargets`/`goto` only when the live adapter can support a
+causal target proof. Otherwise, a manager-wired DAP session may use the
+`fallback` temporary-breakpoint transaction, which returns
+`temporaryBreakpointId` and sets `cleanedUp:true` only after the complete
+original source list has been acknowledged restored. If that restoration cannot
+be proved, the call fails with `RUN_TO_LINE_CLEANUP_FAILED` and
+`cleanupRequired:true`; agents should inspect/reconcile breakpoints before
+retrying.
 
 ### `bp_debug_status`
 

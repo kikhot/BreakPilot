@@ -3,6 +3,7 @@ import { types } from "node:util";
 
 import { BreakpointManager } from "./BreakpointManager.ts";
 import type { DapBreakpoint } from "../types/dap.ts";
+import type { FreshStopBoundary } from "../types/dap.ts";
 import type {
   BreakpointPatchRequest,
   BreakpointRecord,
@@ -11,6 +12,7 @@ import type {
   ReconciliationFailureDetails
 } from "../types/sessions.ts";
 import { BreakPilotError, ErrorCodes } from "../utils/errors.ts";
+import { makeBreakpointId } from "../utils/ids.ts";
 
 type SourceState = {
   filePath: string;
@@ -28,6 +30,25 @@ type ProvenRecoveryDetails = {
 };
 
 type SourceLockMap = Map<string, Promise<void>>;
+
+export interface TemporaryBreakpointRequest {
+  filePath: string;
+  line: number;
+  column?: number;
+}
+
+export interface TemporaryBreakpointExecutionContext {
+  /** Adapter-acknowledged, locally committed temporary breakpoint evidence. */
+  temporaryBreakpoint: BreakpointRecord;
+  /** Captured immediately before the callback dispatches its single continue. */
+  boundary: FreshStopBoundary;
+}
+
+export interface TemporaryBreakpointTransaction<T> {
+  result: T;
+  temporaryBreakpoint: BreakpointRecord;
+  cleanedUp: true;
+}
 
 const sourceLocksByManager = new WeakMap<BreakpointManager, SourceLockMap>();
 const GENERIC_PROVIDER_FAILURE_CODE = "PROVIDER_REPLACEMENT_FAILED";
@@ -74,6 +95,152 @@ export class BreakpointReconciler {
         release();
       }
     }
+  }
+
+  /**
+   * Execute a single action with a detached, agent-owned temporary breakpoint.
+   *
+   * The method deliberately owns the entire source replacement lifecycle:
+   * complete adapter evidence is required before the temporary record appears
+   * locally, and again before the original source list is restored locally.
+   * That lets callers truthfully distinguish a proven cleanup from an
+   * indeterminate remote debugger state.
+   */
+  async withTemporaryBreakpoint<T>(
+    session: DebugSessionRecord,
+    request: TemporaryBreakpointRequest,
+    callback: (context: TemporaryBreakpointExecutionContext) => Promise<T>
+  ): Promise<TemporaryBreakpointTransaction<T>> {
+    const dap = session.dap;
+    if (!dap) {
+      throw new BreakPilotError(
+        ErrorCodes.UNSUPPORTED_CAPABILITY,
+        "Temporary run-to-line breakpoints require a live DAP session.",
+        { sessionId: session.sessionId, capability: "runToLine" }
+      );
+    }
+
+    const filePath = this.#normalizeSource(request.filePath);
+    const release = await this.#acquireLocks([filePath]);
+    try {
+      const original = this.#breakpoints
+        .listSource(session.sessionId, filePath)
+        .map((breakpoint) => this.#clone(breakpoint));
+      const temporary = this.#newTemporaryBreakpoint(session.sessionId, filePath, request);
+      const desired = [...original.map((breakpoint) => this.#clone(breakpoint)), this.#clone(temporary)];
+      const affectedIds = [...original.map((breakpoint) => breakpoint.id), temporary.id]
+        .sort((left, right) => this.#compareSourceKeys(left, right));
+
+      let primaryError: unknown;
+      let primaryFailed = false;
+      let committedTemporary: BreakpointRecord | null = null;
+      let appliedRecords: BreakpointRecord[] | null = null;
+      let callbackResult!: T;
+      try {
+        appliedRecords = await this.#replaceSourceWithEvidence(session, filePath, desired);
+        this.#breakpoints.replaceSources(session.sessionId, [{ filePath, records: appliedRecords }]);
+        committedTemporary = this.#breakpoints.get(session.sessionId, temporary.id) ?? null;
+        if (!committedTemporary) throw new Error("Temporary breakpoint was missing after an acknowledged replacement.");
+
+        // No asynchronous work is allowed between this capture and invoking the
+        // callback. The callback registers its fresh wait before dispatching its
+        // one execution request, closing the stale-stop race.
+        const boundary = dap.captureStopBoundary();
+        callbackResult = await callback({
+          temporaryBreakpoint: this.#clone(committedTemporary),
+          boundary
+        });
+      } catch (error) {
+        primaryFailed = true;
+        primaryError = error;
+      }
+
+      try {
+        const restored = await this.#replaceSourceWithEvidence(session, filePath, original);
+        this.#breakpoints.replaceSources(session.sessionId, [{ filePath, records: restored }]);
+      } catch {
+        // A failed restore leaves the remote adapter's state unknown. Preserve
+        // the complete desired list locally, including the temporary record,
+        // so a later agent can see and reconcile the possible remote residue.
+        this.#breakpoints.replaceSources(session.sessionId, [{
+          filePath,
+          records: appliedRecords ?? desired
+        }]);
+        throw this.#cleanupFailed(temporary.id, affectedIds);
+      }
+
+      if (primaryFailed) {
+        if (committedTemporary) throw primaryError;
+        throw new BreakPilotError(
+          ErrorCodes.BREAKPOINT_UPDATE_FAILED,
+          "BreakPilot could not install the temporary breakpoint; the original state was restored.",
+          {
+            outcome: "restored",
+            retrySafe: true,
+            rollbackApplied: true,
+            affectedIds,
+            recommendedAction: RETRY_RECOMMENDATION,
+            causeCode: this.#safeCauseCode(primaryError)
+          }
+        );
+      }
+
+      if (!committedTemporary) throw new Error("Temporary breakpoint transaction completed without evidence.");
+      return {
+        result: callbackResult,
+        temporaryBreakpoint: this.#clone(committedTemporary),
+        cleanedUp: true
+      };
+    } finally {
+      release();
+    }
+  }
+
+  async #replaceSourceWithEvidence(
+    session: DebugSessionRecord,
+    filePath: string,
+    desired: BreakpointRecord[]
+  ): Promise<BreakpointRecord[]> {
+    const responses = await session.provider.setBreakpoints(
+      filePath,
+      desired.map((breakpoint) => this.#clone(breakpoint))
+    );
+    const evidence = this.#normalizeAdapterEvidence(desired, responses);
+    return this.#projectAdapterEvidence(desired, evidence);
+  }
+
+  #newTemporaryBreakpoint(
+    sessionId: string,
+    filePath: string,
+    request: TemporaryBreakpointRequest
+  ): BreakpointRecord {
+    return {
+      id: makeBreakpointId(),
+      sessionId,
+      file: filePath,
+      line: request.line,
+      ...(request.column === undefined ? {} : { column: request.column }),
+      enabled: true,
+      temporary: true,
+      owner: "agent",
+      verified: false,
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  #cleanupFailed(temporaryBreakpointId: string, affectedIds: string[]): BreakPilotError {
+    return new BreakPilotError(
+      ErrorCodes.RUN_TO_LINE_CLEANUP_FAILED,
+      "BreakPilot could not prove that the temporary run-to-line breakpoint was removed.",
+      {
+        outcome: "indeterminate",
+        retrySafe: false,
+        cleanupRequired: true,
+        temporaryBreakpointId,
+        affectedIds: [...affectedIds],
+        recommendedAction: INSPECT_RECOMMENDATION
+      }
+    );
   }
 
   async #updateLocked(

@@ -260,6 +260,9 @@ const runToLine = await provider.runToLine?.({
 });
 assert.deepEqual(runToLine, {
   status: "paused",
+  targetReached: true,
+  requestedPosition: { filePath: "/workspace/Hello.java", line: 24 },
+  cleanedUp: true,
   position: { filePath: "/workspace/Hello.java", line: 24 },
   frame: {
     id: 24,

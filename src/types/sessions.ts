@@ -20,17 +20,32 @@ export type DetailLevel = "compact" | "diagnostic";
 export interface RunToLineArgs {
   filePath: string;
   line: number;
+  column?: number;
   threadId?: ThreadId | null;
   timeoutMs?: number;
 }
 
+export interface RunToLineRequestedPosition {
+  filePath: string;
+  line: number;
+  column?: number;
+}
+
 export interface RunToLineResult {
   status: "paused" | "stopped" | "timeout";
+  /** True only when a fresh runtime stop was observed at the resolved target. */
+  targetReached: boolean;
+  /** The source location the agent asked BreakPilot to execute to. */
+  requestedPosition: RunToLineRequestedPosition;
+  /** True only when no temporary state remains or its full restoration was proven. */
+  cleanedUp: boolean;
+  /** The adapter-selected executable location when it differs from the request. */
+  resolvedPosition?: RunToLineRequestedPosition;
   position?: AnyRecord;
   frame?: AnyRecord;
   variables?: AnyRecord[];
   temporaryBreakpointId?: string;
-  cleanedUp?: boolean;
+  cleanupRequired?: boolean;
   message?: string;
   warnings?: string[];
 }

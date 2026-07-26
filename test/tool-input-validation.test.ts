@@ -631,7 +631,15 @@ let dispatchedRunToLine: AnyRecord | undefined;
 manager.bpDebugRunToLine = async (args) => {
   runToLineCalls += 1;
   dispatchedRunToLine = args;
-  return { status: "paused" };
+  return {
+    status: "paused",
+    targetReached: true,
+    requestedPosition: {
+      filePath: String(args?.filePath ?? args?.file ?? "src/Hello.java"),
+      line: Number(args?.line ?? 1)
+    },
+    cleanedUp: true
+  };
 };
 manager.bpDebugStatus = async () => {
   statusCalls += 1;
@@ -807,6 +815,23 @@ assert.notStrictEqual(dispatchedRunToLine, aliasInput);
 assert.equal(dispatchedRunToLine?.file, "src/Hello.java");
 assert.equal(dispatchedRunToLine?.includeFrame, false);
 assert.equal(dispatchedRunToLine?.detail, "compact");
+
+const malformedRunToLineManager = new DebugSessionManager({ policy: loadPolicy() });
+malformedRunToLineManager.bpDebugRunToLine = async () => ({ status: "paused" });
+const malformedRunToLineRouter = new ToolRouter(malformedRunToLineManager);
+const malformedRunToLine = await malformedRunToLineRouter.callTool("bp_debug_run_to_line", {
+  filePath: "src/Hello.java",
+  line: 12
+});
+assert.equal(
+  malformedRunToLine.error?.code,
+  "OUTPUT_CONTRACT_VIOLATION",
+  "the router finalizer must reject provider results that omit required run-to-line truth fields"
+);
+assert.deepEqual(
+  malformedRunToLine.error?.details?.issues?.map((issue: AnyRecord) => issue.path).sort(),
+  ["$.cleanedUp", "$.requestedPosition", "$.targetReached"]
+);
 
 const ambiguousFile = await router.callTool("bp_debug_run_to_line", {
   file: "src/Alias.java",

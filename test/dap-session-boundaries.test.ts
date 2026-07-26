@@ -132,6 +132,9 @@ test("terminated and exited after a boundary resolve fresh waits without changin
     else client.emitExited({ exitCode: 0 });
 
     assert.deepEqual(await fresh, { terminated: true });
+    assert.equal(session.terminated, true, `${terminal} must mark the session terminal`);
+    assert.equal(session.isPaused, false, `${terminal} must clear the paused state`);
+    assert.equal(session.isRunning, false, `${terminal} must not report a live running state`);
     assert.equal((await session.waitForBreakpoint(100)).threadId, 3);
   }
 });

@@ -6,6 +6,7 @@ import { BreakpointManager } from "../src/sessions/BreakpointManager.ts";
 import { BreakpointReconciler } from "../src/sessions/BreakpointReconciler.ts";
 import type { DapBreakpoint } from "../src/types/dap.ts";
 import type { BreakpointRecord, DebugSessionRecord } from "../src/types/sessions.ts";
+import { ErrorCodes } from "../src/utils/errors.ts";
 
 const workspaceRoot = path.resolve("/tmp/breakpilot-breakpoint-reconciler");
 const sourceA = path.join(workspaceRoot, "a.ts");
@@ -627,4 +628,38 @@ test("manager reads, replacement snapshots, and provider inputs are clone-safe",
   const stored = manager.get(session.sessionId, "agent-a");
   assert.equal(stored?.line, 22);
   assert.equal(stored?.condition, "requested");
+});
+
+test("temporary breakpoint cleanup failure retains complete adapter-acknowledged source evidence", async () => {
+  const manager = new BreakpointManager();
+  let calls = 0;
+  const session = sessionWith(async (_filePath, records) => {
+    calls += 1;
+    if (calls === 1) return dapReplies(records);
+    return [];
+  });
+  session.dap = {
+    captureStopBoundary: () => ({ stopSequence: 4, terminalSequence: 2 })
+  } as unknown as DebugSessionRecord["dap"];
+  const reconciler = new BreakpointReconciler(manager);
+  addBreakpoint(manager, session.sessionId, { id: "user-a", file: sourceA, line: 10, owner: "user" });
+
+  let callbackTemporary: BreakpointRecord | undefined;
+  const error = await assertRejectsWithCode(ErrorCodes.RUN_TO_LINE_CLEANUP_FAILED, () =>
+    reconciler.withTemporaryBreakpoint(session, { filePath: sourceA, line: 22 }, async (context) => {
+      callbackTemporary = context.temporaryBreakpoint;
+      assert.deepEqual(context.boundary, { stopSequence: 4, terminalSequence: 2 });
+      return "continued";
+    })
+  );
+
+  assert.equal(calls, 2, "the complete original source must still be attempted during cleanup");
+  assert.equal(callbackTemporary?.verified, true);
+  assert.equal(callbackTemporary?.adapterBreakpointId, 101);
+  const retained = manager.listSource(session.sessionId, sourceA);
+  assert.deepEqual(retained.map((record) => [record.id, record.verified, record.adapterBreakpointId, record.line]), [
+    ["user-a", true, 100, 10],
+    [callbackTemporary?.id, true, 101, 22]
+  ]);
+  assert.equal((error as { details: { temporaryBreakpointId?: string } }).details.temporaryBreakpointId, callbackTemporary?.id);
 });

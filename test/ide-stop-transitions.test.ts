@@ -170,17 +170,24 @@ test("run-to-line does not reuse the paused snapshot that predates command dispa
   }));
 });
 
-test("run-to-line does not treat a stopped command acknowledgement as runtime evidence", async () => {
+test("run-to-line reports an explicit terminal IDE command result without fabricating a pause", async () => {
   const { provider } = providerWith((message, bridge) => {
     bridge.acknowledge(message, { status: "stopped" });
   });
 
-  await expectBreakpointTimeout(provider.runToLine({
+  const result = await provider.runToLine({
     filePath: "/workspace/Hello.java",
     line: 20,
     threadId: 7,
     timeoutMs: 25
-  }));
+  });
+  assert.deepEqual(result, {
+    status: "stopped",
+    targetReached: false,
+    requestedPosition: { filePath: "/workspace/Hello.java", line: 20 },
+    cleanedUp: true,
+    message: "The IDE reported that the debug session stopped before a fresh run-to-line pause."
+  });
 });
 
 test("an empty fresh pause event cannot revive stale stop details", async () => {

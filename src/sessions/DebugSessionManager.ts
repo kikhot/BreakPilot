@@ -60,6 +60,7 @@ type DebugToolArgs = AnyRecord & {
   file?: string;
   filePath?: string;
   line?: number;
+  column?: number;
   breakpointId?: string;
   requireVerified?: boolean;
   expression?: string;
@@ -120,6 +121,11 @@ type ArchivedRuntimeEvents = {
   events: RuntimeEventBuffer;
 };
 
+type DeferredDapLifecycleCleanup = {
+  session: DebugSessionRecord;
+  reason: string;
+};
+
 const MAX_ARCHIVED_RUNTIME_SESSIONS = 32;
 const DAP_TERMINATION_GRACE_MS = 100;
 
@@ -137,6 +143,7 @@ export class DebugSessionManager {
   cleaningSessions: Set<string>;
   readonly #archivedRuntimeEvents: Map<string, ArchivedRuntimeEvents>;
   readonly #dapTerminationTimers: Map<string, ReturnType<typeof setTimeout>>;
+  readonly #deferredDapLifecycleCleanups: Map<string, DeferredDapLifecycleCleanup>;
 
   constructor({ policy, ideBridge }: { policy: BreakPilotPolicy; ideBridge?: IdeBridgeServer | null }) {
     this.policy = policy;
@@ -152,6 +159,7 @@ export class DebugSessionManager {
     this.cleaningSessions = new Set();
     this.#archivedRuntimeEvents = new Map();
     this.#dapTerminationTimers = new Map();
+    this.#deferredDapLifecycleCleanups = new Map();
     this.#wireIdeBridge();
   }
 
@@ -438,20 +446,51 @@ export class DebugSessionManager {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_run_to_line requires filePath and line.", {});
     }
     const session = this.#resolveSession(normalized);
+    const filePath = this.security.assertWorkspacePath(normalized.filePath);
+    if (session.state !== SessionState.PAUSED) {
+      throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "run-to-line requires a paused debug session.", {
+        sessionId: session.sessionId,
+        state: session.state
+      });
+    }
+    if (session.providerKind !== "ide") {
+      this.coordinator.assertCanControl(session, SessionOwner.MCP, "run to line");
+    }
     if (session.provider.capabilities.runToLine === "unsupported" || !session.provider.runToLine) {
       throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support run-to-line.", {
         sessionId: session.sessionId,
         providerKind: session.providerKind
       });
     }
-    const result = await session.provider.runToLine({
-      filePath: normalized.filePath,
-      line,
-      threadId: normalized.threadId,
-      timeoutMs: normalized.timeout
-    });
-    session.state = result.status === "paused" ? SessionState.PAUSED : result.status === "stopped" ? SessionState.TERMINATED : session.state;
-    return ok(session.sessionId, result as AnyRecord, auditId);
+    this.coordinator.beginExecution(session, "run-to-line");
+    try {
+      const result = await session.provider.runToLine({
+        filePath,
+        line,
+        ...(normalized.column === undefined ? {} : { column: normalized.column }),
+        threadId: normalized.threadId,
+        timeoutMs: normalized.timeout
+      });
+      session.state = result.status === "paused"
+        ? SessionState.PAUSED
+        : result.status === "stopped"
+          ? SessionState.TERMINATED
+          : SessionState.RUNNING;
+      this.audit.record("bp_debug_run_to_line_finished", {
+        sessionId: session.sessionId,
+        status: result.status,
+        targetReached: result.targetReached,
+        cleanedUp: result.cleanedUp,
+        ...(result.temporaryBreakpointId ? { temporaryBreakpointId: result.temporaryBreakpointId } : {})
+      });
+      return ok(session.sessionId, result as AnyRecord, auditId);
+    } catch (error) {
+      this.#applyRunToLineFailureState(session, error);
+      throw error;
+    } finally {
+      this.coordinator.endExecution(session);
+      await this.#flushDeferredDapLifecycleCleanup(session);
+    }
   }
 
   async bpDebugThreads(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -813,6 +852,7 @@ export class DebugSessionManager {
     if (session.providerKind !== "ide") {
       this.coordinator.assertCanControl(session, SessionOwner.MCP, "set breakpoint");
     }
+    this.#assertBreakpointMutationAllowed(session, "set breakpoint");
     this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.providerKind);
     const file = this.security.assertWorkspacePath(args.file);
     this.audit.record("bp_debug_session_set_breakpoint_requested", {
@@ -883,6 +923,7 @@ export class DebugSessionManager {
       this.#throwBreakpointUpdateUnsupported(session.sessionId, session.providerKind);
     }
     this.coordinator.assertCanControl(session, SessionOwner.MCP, "update breakpoint");
+    this.#assertBreakpointMutationAllowed(session, "update breakpoint");
     this.#assertBreakpointCapabilities(session.provider.capabilities, args, session.providerKind);
 
     const patch = this.#breakpointPatchRequest(session, args);
@@ -968,6 +1009,7 @@ export class DebugSessionManager {
     if (!breakpointId) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "breakpointId is required.");
     }
+    this.#assertBreakpointMutationAllowed(session, "remove breakpoint");
     this.audit.record("bp_debug_session_remove_breakpoint_requested", {
       sessionId: session.sessionId,
       breakpointId
@@ -2059,8 +2101,13 @@ export class DebugSessionManager {
     const client = new DapClient(transport);
     const dap = new DapSession({ sessionId, language, client, workspaceRoot });
     const runtimeEvents = new RuntimeEventBuffer(sessionId, this.policy.runtime.maxEventBuffer);
-    const provider = new DapRuntimeProvider(dap, runtimeEvents);
-    const record: DebugSessionRecord = {
+    let record!: DebugSessionRecord;
+    const provider = new DapRuntimeProvider(dap, runtimeEvents, {
+      breakpointReconciler: this.breakpointReconciler,
+      getSession: () => record,
+      assertWorkspacePath: (filePath) => this.security.assertWorkspacePath(filePath)
+    });
+    record = {
       sessionId,
       language,
       workspaceRoot,
@@ -2078,6 +2125,7 @@ export class DebugSessionManager {
     };
     const onTerminated = (): void => {
       record.state = SessionState.TERMINATED;
+      if (this.#deferDapLifecycleCleanup(record, "dap_terminated")) return;
       void this.#cleanupSession(record, { reason: "dap_terminated", disconnectProvider: false });
     };
     const onExited = (body: AnyRecord): void => {
@@ -2087,16 +2135,19 @@ export class DebugSessionManager {
         data: this.#dapExitedMetadata(body)
       });
       this.#archiveRuntimeEvents(record);
+      if (this.#deferDapLifecycleCleanup(record, "dap_exited")) return;
       this.#scheduleDapTerminationCleanup(record);
     };
     const onAdapterError = (): void => {
       record.state = SessionState.TERMINATED;
       runtimeEvents.append({ kind: "terminated", data: { reason: "adapterError" } });
+      if (this.#deferDapLifecycleCleanup(record, "dap_adapter_error")) return;
       void this.#cleanupSession(record, { reason: "dap_adapter_error", disconnectProvider: false });
     };
     const onTransportExit = (): void => {
       record.state = SessionState.TERMINATED;
       runtimeEvents.append({ kind: "terminated", data: { reason: "transportExit" } });
+      if (this.#deferDapLifecycleCleanup(record, "dap_transport_exit")) return;
       void this.#cleanupSession(record, { reason: "dap_transport_exit", disconnectProvider: false });
     };
     const onStartFailed = (): void => {
@@ -2130,6 +2181,7 @@ export class DebugSessionManager {
     if (this.sessions.maybeGet(session.sessionId) !== session) return;
     if (session.state === SessionState.TERMINATED) return;
     this.#clearDapTerminationTimer(session.sessionId);
+    this.#deferredDapLifecycleCleanups.delete(session.sessionId);
     session.state = SessionState.FAILED;
     session.disposeLifecycle?.();
     session.disposeLifecycle = undefined;
@@ -2177,6 +2229,7 @@ export class DebugSessionManager {
     }
   ): Promise<AnyRecord> {
     this.#clearDapTerminationTimer(session.sessionId);
+    this.#deferredDapLifecycleCleanups.delete(session.sessionId);
     if (this.cleaningSessions.has(session.sessionId)) {
       return { acknowledged: true, alreadyCleaning: true, reason };
     }
@@ -2232,6 +2285,7 @@ export class DebugSessionManager {
     this.#clearDapTerminationTimer(session.sessionId);
     const timer = setTimeout(() => {
       this.#dapTerminationTimers.delete(session.sessionId);
+      if (this.#deferDapLifecycleCleanup(session, "dap_exited")) return;
       void this.#cleanupSession(session, { reason: "dap_exited", disconnectProvider: false });
     }, DAP_TERMINATION_GRACE_MS);
     timer.unref?.();
@@ -2243,6 +2297,47 @@ export class DebugSessionManager {
     if (!timer) return;
     clearTimeout(timer);
     this.#dapTerminationTimers.delete(sessionId);
+  }
+
+  #assertBreakpointMutationAllowed(session: DebugSessionRecord, operation: string): void {
+    const active = this.coordinator.executionLocks.get(session.sessionId);
+    if (!active) return;
+    throw new BreakPilotError(
+      ErrorCodes.SESSION_OWNER_CONFLICT,
+      "Breakpoint mutation is not safe while an execution-control operation is in progress.",
+      {
+        sessionId: session.sessionId,
+        operation,
+        active
+      }
+    );
+  }
+
+  #applyRunToLineFailureState(session: DebugSessionRecord, error: unknown): void {
+    if (!(error instanceof BreakPilotError) || error.code !== ErrorCodes.RUN_TO_LINE_CLEANUP_FAILED) return;
+    if (session.dap?.terminated || session.state === SessionState.TERMINATED) {
+      session.state = SessionState.TERMINATED;
+      return;
+    }
+    session.state = session.dap?.isPaused === true ? SessionState.PAUSED : SessionState.RUNNING;
+  }
+
+  #deferDapLifecycleCleanup(session: DebugSessionRecord, reason: string): boolean {
+    if (!this.coordinator.executionLocks.has(session.sessionId)) return false;
+    this.#clearDapTerminationTimer(session.sessionId);
+    this.#deferredDapLifecycleCleanups.set(session.sessionId, { session, reason });
+    return true;
+  }
+
+  async #flushDeferredDapLifecycleCleanup(session: DebugSessionRecord): Promise<void> {
+    const deferred = this.#deferredDapLifecycleCleanups.get(session.sessionId);
+    if (!deferred) return;
+    this.#deferredDapLifecycleCleanups.delete(session.sessionId);
+    if (this.sessions.maybeGet(session.sessionId) !== deferred.session) return;
+    await this.#cleanupSession(deferred.session, {
+      reason: deferred.reason,
+      disconnectProvider: false
+    });
   }
 
   #archiveRuntimeEvents(session: DebugSessionRecord): void {

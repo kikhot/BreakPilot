@@ -1,3 +1,4 @@
+import path from "node:path";
 import type {
   BridgeMessage,
   IdeDebugSessionInfo,
@@ -364,28 +365,63 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async runToLine(args: RunToLineArgs): Promise<RunToLineResult> {
+    const requestedPosition = {
+      filePath: args.filePath,
+      line: args.line,
+      ...(args.column === undefined ? {} : { column: args.column })
+    };
     await this.#confirm(debugControlConfirmationRequest("run_to_line", {
       threadId: args.threadId ?? this.threadId,
       file: args.filePath,
-      line: args.line
+      line: args.line,
+      ...(args.column === undefined ? {} : { column: args.column })
     }));
     const transition = this.#armStopTransition("run_to_line");
     try {
       const result = await this.#command("run_to_line", {
         filePath: args.filePath,
         line: args.line,
+        ...(args.column === undefined ? {} : { column: args.column }),
         threadId: args.threadId ?? this.threadId,
         timeoutMs: args.timeoutMs
       }, IdeMessageTypes.AGENT_RUN_TO_LINE);
+      if (result.status === "stopped") {
+        this.#clearStopTransition(transition);
+        return {
+          status: "stopped",
+          targetReached: false,
+          requestedPosition,
+          cleanedUp: true,
+          message: "The IDE reported that the debug session stopped before a fresh run-to-line pause."
+        };
+      }
       if (result.status === "timeout") {
         this.#clearStopTransition(transition);
-        return result as RunToLineResult;
+        return {
+          status: "timeout",
+          targetReached: false,
+          requestedPosition,
+          cleanedUp: true,
+          ...(typeof result.message === "string" ? { message: result.message } : {}),
+          warnings: ["The IDE did not report a fresh stop before the run-to-line timeout."]
+        };
       }
       const stopped = await this.waitForBreakpoint(args.timeoutMs ?? 30000);
+      const observedPosition = this.#positionFromStopped(stopped);
+      const resultPosition = this.#runToLinePosition(result.position);
+      const position = observedPosition ?? resultPosition;
+      const targetReached = position ? this.#positionMatchesRequested(position, requestedPosition) : false;
+      const warnings = targetReached
+        ? []
+        : ["A fresh IDE stop was observed at a different or unknown source position; execution was not resumed automatically."];
       return {
         status: "paused",
-        position: this.#positionFromStopped(stopped) ?? result.position,
-        frame: stopped.topFrame ?? result.frame
+        targetReached,
+        requestedPosition,
+        cleanedUp: true,
+        ...(position ? { position: this.#publicRunToLinePosition(position) } : {}),
+        ...(stopped.topFrame ?? result.frame ? { frame: stopped.topFrame ?? result.frame } : {}),
+        ...(warnings.length > 0 ? { warnings } : {})
       };
     } catch (error) {
       this.#clearStopTransition(transition);
@@ -693,14 +729,45 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     } as StoppedEvent;
   }
 
-  #positionFromStopped(stopped: AnyRecord): AnyRecord | undefined {
+  #positionFromStopped(stopped: AnyRecord): { filePath: string | number | null; line: number | null; column?: number } | undefined {
     const topFrame = (stopped.topFrame ?? stopped.stopped?.topFrame) as AnyRecord | undefined;
     if (!topFrame) return undefined;
     const source = topFrame.source as AnyRecord | undefined;
     return {
-      filePath: source?.path ?? topFrame.filePath,
-      line: topFrame.line
+      filePath: typeof (source?.path ?? topFrame.filePath) === "string" || typeof (source?.path ?? topFrame.filePath) === "number"
+        ? source?.path ?? topFrame.filePath
+        : null,
+      line: typeof topFrame.line === "number" && Number.isFinite(topFrame.line) ? topFrame.line : null,
+      ...(typeof topFrame.column === "number" && Number.isFinite(topFrame.column) ? { column: topFrame.column } : {})
     };
+  }
+
+  #runToLinePosition(value: unknown): { filePath: string | number | null; line: number | null; column?: number } | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const position = value as AnyRecord;
+    const filePath = position.filePath;
+    const line = position.line;
+    if (!(typeof filePath === "string" || typeof filePath === "number" || filePath === null)) return undefined;
+    if (!(typeof line === "number" || line === null)) return undefined;
+    const column = position.column;
+    return {
+      filePath,
+      line,
+      ...(typeof column === "number" && Number.isFinite(column) ? { column } : {})
+    };
+  }
+
+  #positionMatchesRequested(
+    position: { filePath: string | number | null; line: number | null; column?: number },
+    requested: { filePath: string; line: number; column?: number }
+  ): boolean {
+    if (typeof position.filePath !== "string" || position.line !== requested.line) return false;
+    if (path.resolve(position.filePath) !== path.resolve(requested.filePath)) return false;
+    return requested.column === undefined || position.column === requested.column;
+  }
+
+  #publicRunToLinePosition(position: { filePath: string | number | null; line: number | null }): AnyRecord {
+    return { filePath: position.filePath, line: position.line };
   }
 }
 

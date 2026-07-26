@@ -25,6 +25,17 @@ const nullablePositionSchema: JsonSchema = {
   oneOf: [positionSchema, { type: "null" }]
 };
 
+const runToLineRequestedPositionSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    filePath: { type: "string" },
+    line: { type: "integer", minimum: 1 },
+    column: { type: "integer", minimum: 1 }
+  },
+  required: ["filePath", "line"]
+};
+
 const providerPayloadSchema: JsonSchema = {
   type: "object",
   additionalProperties: true
@@ -134,15 +145,19 @@ export const runToLineSuccessSchema: JsonSchema = {
   additionalProperties: false,
   properties: {
     status: { type: "string", enum: ["paused", "stopped", "timeout"] },
+    targetReached: { type: "boolean" },
+    requestedPosition: runToLineRequestedPositionSchema,
+    resolvedPosition: runToLineRequestedPositionSchema,
     position: positionSchema,
     frame: providerPayloadSchema,
     variables: providerPayloadArraySchema,
     temporaryBreakpointId: { type: "string" },
     cleanedUp: { type: "boolean" },
+    cleanupRequired: { type: "boolean" },
     message: { type: "string" },
     warnings: warningsSchema
   },
-  required: ["status"]
+  required: ["status", "targetReached", "requestedPosition", "cleanedUp"]
 };
 
 export const threadsSuccessSchema: JsonSchema = {

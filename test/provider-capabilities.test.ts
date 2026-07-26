@@ -52,6 +52,26 @@ assert.equal(
   "fallback",
   "DAP source-list reconciliation must be available without a raw adapter update flag"
 );
+assert.equal(
+  dapProviderCapabilities({ supportsGotoTargetsRequest: true }).runToLine,
+  "unsupported",
+  "a raw DAP flag alone cannot prove the provider has causal Task-4 primitives"
+);
+assert.equal(
+  dapProviderCapabilities({ supportsGotoTargetsRequest: true }, { nativeRunToLineAvailable: true }).runToLine,
+  "native",
+  "native run-to-line requires explicit live provider evidence"
+);
+assert.equal(
+  dapProviderCapabilities({}, { nativeRunToLineAvailable: true }).runToLine,
+  "unsupported",
+  "live primitive evidence cannot compensate for an adapter that did not advertise gotoTargets"
+);
+assert.equal(
+  dapProviderCapabilities({}, { nativeRunToLineAvailable: false, fallbackRunToLineAvailable: true }).runToLine,
+  "fallback",
+  "a manager-wired temporary-breakpoint transaction is the only fallback capability source"
+);
 
 const ideUnsupported = {
   pause: "unsupported",
@@ -279,7 +299,12 @@ const unsupportedProvider = {
   },
   runToLine: async () => {
     runToLineCalls += 1;
-    return { status: "paused" as const };
+    return {
+      status: "paused" as const,
+      targetReached: false,
+      requestedPosition: { filePath: "src/Hello.java", line: 12 },
+      cleanedUp: true
+    };
   },
   setVariable: async () => {
     setVariableCalls += 1;

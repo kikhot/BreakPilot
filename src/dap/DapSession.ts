@@ -52,6 +52,7 @@ export class DapSession extends EventEmitter {
   #disposed: boolean;
   #terminalSequence: number;
   #latestStopped: ObservedStop | null;
+  #paused: boolean;
   threadId: number | null;
   terminated: boolean;
 
@@ -88,8 +89,26 @@ export class DapSession extends EventEmitter {
     this.#disposed = false;
     this.#terminalSequence = 0;
     this.#latestStopped = null;
+    this.#paused = false;
     this.threadId = null;
     this.terminated = false;
+  }
+
+  /** Runtime truth derived from DAP events, never from a request response. */
+  get isPaused(): boolean {
+    return this.#paused;
+  }
+
+  get isRunning(): boolean {
+    return !this.#paused && !this.terminated && !this.#disposed;
+  }
+
+  /**
+   * Called immediately before an execution request. A synchronous `stopped`
+   * event that arrives before that request resolves will correctly overwrite it.
+   */
+  markRunning(): void {
+    this.#paused = false;
   }
 
   startClient(): void {
@@ -109,6 +128,7 @@ export class DapSession extends EventEmitter {
       this.emit("initialized");
     });
     this.#listenToClient("stopped", (body: StoppedEvent) => {
+      this.#paused = true;
       this.threadId = body.threadId ?? this.threadId;
       const event = { sessionId: this.sessionId, ...body };
       this.stopSequence += 1;
@@ -120,8 +140,12 @@ export class DapSession extends EventEmitter {
       this.#resolveFreshStopWaiters(observed);
       this.emit("stopped", event);
     });
-    this.#listenToClient("continued", (body: AnyRecord) => this.emit("continued", body));
+    this.#listenToClient("continued", (body: AnyRecord) => {
+      this.#paused = false;
+      this.emit("continued", body);
+    });
     this.#listenToClient("terminated", (body: AnyRecord) => {
+      this.#paused = false;
       this.terminated = true;
       this.#runtimeEventSourceAttached = false;
       this.#terminalSequence += 1;
@@ -129,17 +153,27 @@ export class DapSession extends EventEmitter {
       this.emit("terminated", body);
     });
     this.#listenToClient("exited", (body: AnyRecord) => {
+      this.#paused = false;
+      this.terminated = true;
       this.#runtimeEventSourceAttached = false;
       this.#terminalSequence += 1;
       this.#resolveFreshTerminalWaiters(this.#terminalSequence);
       this.emit("exited", body);
     });
     this.#listenToClient("exit", () => {
+      this.#paused = false;
+      this.terminated = true;
       this.#runtimeEventSourceAttached = false;
+      this.#terminalSequence += 1;
+      this.#resolveFreshTerminalWaiters(this.#terminalSequence);
       this.emit("transportExit");
     });
     this.#listenToClient("adapterError", () => {
+      this.#paused = false;
+      this.terminated = true;
       this.#runtimeEventSourceAttached = false;
+      this.#terminalSequence += 1;
+      this.#resolveFreshTerminalWaiters(this.#terminalSequence);
       this.emit("adapterError");
     });
     this.#runtimeEventSourceAttached = true;
@@ -167,6 +201,7 @@ export class DapSession extends EventEmitter {
   disposeClient(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#paused = false;
     this.#runtimeEventSourceAttached = false;
     if (this.#startGraceTimer) {
       clearTimeout(this.#startGraceTimer);

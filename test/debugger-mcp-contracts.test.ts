@@ -51,6 +51,7 @@ assertHasProperties("bp_debug_run_to_line", [
   "sessionId",
   "filePath",
   "line",
+  "column",
   "threadId",
   "timeout",
   "includeFrame",
@@ -440,6 +441,9 @@ manager.sessions.add({
       runToLineArgs = args;
       return {
         status: "paused",
+        targetReached: true,
+        requestedPosition: { filePath: args.filePath, line: args.line },
+        cleanedUp: true,
         position: { filePath: args.filePath, line: args.line },
         frame: { id: 202, source: { path: args.filePath }, line: args.line }
       };
@@ -620,13 +624,22 @@ const runToLineResult = await router.callTool("bp_debug_run_to_line", {
   timeout: 1000
 });
 assert.deepEqual(runToLineArgs, {
-  filePath: "src/Hello.java",
+  filePath: path.resolve(loadPolicy().workspace.root, "src/Hello.java"),
   line: 24,
   threadId: undefined,
   timeoutMs: 1000
 });
 assert.equal(runToLineResult.status, "paused");
-assert.deepEqual(runToLineResult.position, { filePath: "src/Hello.java", line: 24 });
+assert.equal(runToLineResult.targetReached, true);
+assert.equal(runToLineResult.cleanedUp, true);
+assert.deepEqual(runToLineResult.requestedPosition, {
+  filePath: path.resolve(loadPolicy().workspace.root, "src/Hello.java"),
+  line: 24
+});
+assert.deepEqual(runToLineResult.position, {
+  filePath: path.resolve(loadPolicy().workspace.root, "src/Hello.java"),
+  line: 24
+});
 
 const setValueResult = await router.callTool("bp_debug_set_value", {
   sessionId: "sess_contract",
