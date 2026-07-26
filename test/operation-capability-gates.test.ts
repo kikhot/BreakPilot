@@ -632,6 +632,90 @@ test("metadata arrays retain scalar values without invoking proxy property gette
   });
 });
 
+test("an early metadata descriptor trap omits only that key and retains later safe siblings", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  let getterCalls = 0;
+  const data = Object.defineProperty({ reason: "breakpoint", processId: 42 }, "description", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return "must-not-run";
+    }
+  });
+  const selectivelyHostileData = new Proxy(data, {
+    getOwnPropertyDescriptor(target, key) {
+      if (key === "description") throw new Error("early metadata descriptor trap");
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    }
+  });
+
+  assert.doesNotThrow(() => manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    data: selectivelyHostileData
+  }));
+  manager.appendRuntimeEvent("operation_caps", { kind: "continued" });
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 2
+  });
+
+  assert.equal(getterCalls, 0);
+  assert.equal(response.error, undefined);
+  const items = (response.events as AnyRecord).items as AnyRecord[];
+  assert.deepEqual(items.map((item) => item.sequence), [1, 2]);
+  assert.deepEqual(items[0]?.data, { reason: "breakpoint", processId: 42 });
+  const outputSchema = toolOutputSchemas.bp_debug_control;
+  assert.ok(outputSchema);
+  assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
+});
+
+test("a late metadata descriptor trap retains every earlier safe sibling", async () => {
+  const { router, manager } = sessionRouter({
+    ...unsupportedCapabilities,
+    eventDrain: "native"
+  });
+  const provider = manager.sessions.get("operation_caps").provider;
+  provider.drainEvents = async (args) => manager.readRuntimeEvents("operation_caps", args);
+  const data = {
+    reason: "breakpoint",
+    description: "paused",
+    processId: 42,
+    threadName: "main"
+  };
+  const selectivelyHostileData = new Proxy(data, {
+    getOwnPropertyDescriptor(target, key) {
+      if (key === "areas") throw new Error("late metadata descriptor trap");
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    }
+  });
+
+  assert.doesNotThrow(() => manager.appendRuntimeEvent("operation_caps", {
+    kind: "stopped",
+    data: selectivelyHostileData
+  }));
+
+  const response = await router.callTool("bp_debug_control", {
+    sessionId: "operation_caps",
+    action: "drainEvents",
+    cursor: 0,
+    limit: 1
+  });
+
+  assert.equal(response.error, undefined);
+  assert.deepEqual((response.events as AnyRecord).items[0]?.data, data);
+  const outputSchema = toolOutputSchemas.bp_debug_control;
+  assert.ok(outputSchema);
+  assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
+});
+
 const advancedCapabilityCases = [
   { field: "condition", value: "answer > 0", capability: "conditionalBreakpoints" },
   { field: "hitCondition", value: "2", capability: "hitConditionalBreakpoints" },

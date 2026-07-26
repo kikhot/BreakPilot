@@ -102,6 +102,47 @@ assert.deepEqual(metadata.read({ cursor: 0 }).items[0]?.data, {
   areas: ["stacks", true, null]
 });
 
+// Catches a bounded metadata array dropping its final valid scalar or silently truncating its output.
+const exactMetadataArray = new RuntimeEventBuffer("debug-metadata-exact-array", 2);
+const exactValues = Array.from({ length: 256 }, (_, index) => index);
+exactMetadataArray.append({
+  kind: "stopped",
+  data: { hitBreakpointIds: exactValues }
+});
+assert.deepEqual(exactMetadataArray.read({ cursor: 0 }).items[0]?.data, {
+  hitBreakpointIds: exactValues
+});
+
+// Catches a longer allowed array being emitted as a plausible but incomplete public value.
+const oversizedMetadataArray = new RuntimeEventBuffer("debug-metadata-oversized-array", 2);
+oversizedMetadataArray.append({
+  kind: "stopped",
+  data: {
+    reason: "breakpoint",
+    hitBreakpointIds: Array.from({ length: 257 }, (_, index) => index)
+  }
+});
+assert.deepEqual(oversizedMetadataArray.read({ cursor: 0 }).items[0]?.data, {
+  reason: "breakpoint"
+});
+
+// Catches a single hostile array element discarding the other safely readable scalar entries.
+const selectivelyHostileMetadataArray = new RuntimeEventBuffer("debug-metadata-selective-array", 2);
+const selectivelyHostileValues = new Proxy(["first", "drop", "last"], {
+  getOwnPropertyDescriptor(target, key) {
+    if (key === "1") throw new Error("hostile metadata array element");
+    return Reflect.getOwnPropertyDescriptor(target, key);
+  }
+});
+selectivelyHostileMetadataArray.append({
+  kind: "stopped",
+  data: { reason: "breakpoint", areas: selectivelyHostileValues }
+});
+assert.deepEqual(selectivelyHostileMetadataArray.read({ cursor: 0 }).items[0]?.data, {
+  reason: "breakpoint",
+  areas: ["first", "last"]
+});
+
 // Catches the buffer retaining raw top-level payloads instead of normalized event data.
 const normalized = new RuntimeEventBuffer("debug-normalized", 2);
 normalized.append({

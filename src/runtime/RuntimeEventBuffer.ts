@@ -58,23 +58,30 @@ function isJsonScalar(value: unknown): value is JsonScalar {
     (typeof value === "number" && Number.isFinite(value));
 }
 
+function ownDataValue(value: object, key: PropertyKey): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeMetadataValue(value: unknown): JsonScalar | JsonScalar[] | undefined {
   if (isJsonScalar(value)) return value;
   try {
     if (!Array.isArray(value)) return undefined;
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-    if (!lengthDescriptor || !("value" in lengthDescriptor) ||
-      typeof lengthDescriptor.value !== "number" || !Number.isInteger(lengthDescriptor.value) ||
-      lengthDescriptor.value < 0) {
+    const length = ownDataValue(value, "length");
+    if (typeof length !== "number" || !Number.isInteger(length) || length < 0) {
       return undefined;
     }
+    // Oversized arrays are omitted atomically so public metadata never claims a partial list is complete.
+    if (length > MAX_METADATA_ARRAY_ITEMS) return undefined;
 
     const normalized: JsonScalar[] = [];
-    const length = Math.min(lengthDescriptor.value, MAX_METADATA_ARRAY_ITEMS);
     for (let index = 0; index < length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-      if (!descriptor || !("value" in descriptor) || !isJsonScalar(descriptor.value)) continue;
-      normalized.push(descriptor.value);
+      const item = ownDataValue(value, String(index));
+      if (isJsonScalar(item)) normalized.push(item);
     }
     return normalized;
   } catch {
@@ -89,9 +96,7 @@ export function normalizeRuntimeEventMetadata(value: unknown): AnyRecord | undef
   try {
     if (Array.isArray(value)) return undefined;
     for (const key of runtimeMetadataKeys) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (!descriptor || !("value" in descriptor)) continue;
-      const normalizedValue = normalizeMetadataValue(descriptor.value);
+      const normalizedValue = normalizeMetadataValue(ownDataValue(value, key));
       if (normalizedValue !== undefined) normalized[key] = normalizedValue;
     }
   } catch {
