@@ -136,13 +136,20 @@ test("terminated and exited after a boundary resolve fresh waits without changin
   }
 });
 
-test("terminal events emitted after capture but before waiter registration remain causally observable", async () => {
-  const { client, session } = createSession();
-  const boundary = session.captureStopBoundary();
+test("terminated and exited events emitted after capture but before waiter registration remain causally observable", async () => {
+  for (const terminal of ["terminated", "exited"] as const) {
+    const { client, session } = createSession();
+    const boundary = session.captureStopBoundary();
 
-  client.emitExited({ exitCode: 17 });
+    if (terminal === "terminated") client.emitTerminated({ exitCode: 17 });
+    else client.emitExited({ exitCode: 17 });
 
-  assert.deepEqual(await session.waitForStopOrTerminationAfter(boundary, 100), { terminated: true });
+    assert.deepEqual(
+      await session.waitForStopOrTerminationAfter(boundary, 100),
+      { terminated: true },
+      `${terminal} must remain observable when it arrives before fresh waiter registration`
+    );
+  }
 });
 
 test("fresh waits clean up on timeout and disposal", async () => {
