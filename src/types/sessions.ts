@@ -150,6 +150,39 @@ export interface BreakpointRecord extends BreakpointInput {
   createdAt: string;
 }
 
+export interface BreakpointPatchRequest {
+  breakpointId: string;
+  filePath?: string;
+  line?: number;
+  column?: number | null;
+  condition?: string | null;
+  hitCondition?: string | null;
+  logMessage?: string | null;
+  enabled?: boolean;
+  owner?: "agent" | "user" | "all";
+  requireVerified?: boolean;
+}
+
+export interface BreakpointUpdateResult {
+  operation: "updated" | "relocated";
+  breakpointId: string;
+  previous: BreakpointRecord;
+  current: BreakpointRecord;
+  changedFields: string[];
+  verified: boolean;
+  rollbackApplied?: boolean;
+  warnings?: string[];
+}
+
+export interface ReconciliationFailureDetails {
+  outcome: "indeterminate";
+  retrySafe: false;
+  rollbackApplied: boolean;
+  affectedIds: string[];
+  recommendedAction: string;
+  causeCode?: string;
+}
+
 export interface ProjectBreakpointRecord extends BreakpointInput {
   id: string;
   workspaceRoot: string;

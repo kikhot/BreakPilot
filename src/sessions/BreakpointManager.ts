@@ -28,12 +28,12 @@ export class BreakpointManager {
 
   add(sessionId: string, breakpoint: BreakpointInput): BreakpointRecord {
     const absolute = path.resolve(breakpoint.file);
-    const record = {
+    const record: BreakpointRecord = {
       id: breakpoint.id ?? makeBreakpointId(),
       sessionId,
       file: absolute,
       line: Number(breakpoint.line),
-      column: breakpoint.column ? Number(breakpoint.column) : undefined,
+      column: breakpoint.column === undefined ? undefined : Number(breakpoint.column),
       condition: breakpoint.condition,
       hitCondition: breakpoint.hitCondition,
       logMessage: breakpoint.logMessage,
@@ -51,11 +51,13 @@ export class BreakpointManager {
     const sessionBreakpoints = this.bySession.get(sessionId);
     if (!sessionBreakpoints) throw new Error(`Breakpoint bucket was not initialized for ${sessionId}`);
     sessionBreakpoints.set(record.id, record);
-    return record;
+    return this.#clone(record);
   }
 
   updateVerification(sessionId: string, file: string, dapBreakpoints: DapBreakpoint[]): BreakpointRecord[] {
-    const breakpoints = this.list(sessionId).filter((bp) => path.resolve(bp.file) === path.resolve(file));
+    const normalizedFile = path.resolve(file);
+    const breakpoints = [...(this.bySession.get(sessionId)?.values() ?? [])]
+      .filter((bp) => path.resolve(bp.file) === normalizedFile);
     for (let index = 0; index < breakpoints.length; index += 1) {
       const dap = dapBreakpoints[index];
       if (!dap) continue;
@@ -67,7 +69,7 @@ export class BreakpointManager {
       breakpoint.line = dap.line ?? breakpoint.line;
       breakpoint.column = dap.column ?? breakpoint.column;
     }
-    return breakpoints;
+    return breakpoints.map((breakpoint) => this.#clone(breakpoint));
   }
 
   remove(sessionId: string, breakpointId: string): boolean {
@@ -79,11 +81,46 @@ export class BreakpointManager {
   }
 
   list(sessionId: string): BreakpointRecord[] {
-    return [...(this.bySession.get(sessionId)?.values() ?? [])];
+    return [...(this.bySession.get(sessionId)?.values() ?? [])].map((breakpoint) => this.#clone(breakpoint));
+  }
+
+  get(sessionId: string, id: string): BreakpointRecord | undefined {
+    const breakpoint = this.bySession.get(sessionId)?.get(id);
+    return breakpoint ? this.#clone(breakpoint) : undefined;
   }
 
   listForSource(sessionId: string, file: string): BreakpointRecord[] {
-    return this.list(sessionId).filter((bp) => path.resolve(bp.file) === path.resolve(file));
+    const normalizedFile = path.resolve(file);
+    return [...(this.bySession.get(sessionId)?.values() ?? [])]
+      .filter((bp) => path.resolve(bp.file) === normalizedFile)
+      .map((breakpoint) => this.#clone(breakpoint));
+  }
+
+  listSource(sessionId: string, filePath: string): BreakpointRecord[] {
+    return this.listForSource(sessionId, filePath);
+  }
+
+  replaceSource(sessionId: string, filePath: string, records: BreakpointRecord[]): void {
+    const normalizedFile = path.resolve(filePath);
+    const existing = this.bySession.get(sessionId);
+    if (existing) {
+      for (const [id, breakpoint] of existing.entries()) {
+        if (path.resolve(breakpoint.file) === normalizedFile) existing.delete(id);
+      }
+    }
+
+    if (records.length === 0) return;
+    const sessionBreakpoints = existing ?? new Map<string, BreakpointRecord>();
+    if (!existing) this.bySession.set(sessionId, sessionBreakpoints);
+    for (const record of records) {
+      const replacement = this.#clone(record);
+      replacement.sessionId = sessionId;
+      replacement.file = normalizedFile;
+      // A relocation can insert an existing id into a different source. Delete it
+      // first so the replacement list's order is retained for that source.
+      sessionBreakpoints.delete(replacement.id);
+      sessionBreakpoints.set(replacement.id, replacement);
+    }
   }
 
   addProject(breakpoint: ProjectBreakpointInput): ProjectBreakpointRecord {
@@ -164,5 +201,9 @@ export class BreakpointManager {
 
   #projectKey(workspaceRoot: string, clientId: string): string {
     return `${path.resolve(workspaceRoot)}\0${clientId}`;
+  }
+
+  #clone<T extends BreakpointRecord>(breakpoint: T): T {
+    return structuredClone(breakpoint);
   }
 }
