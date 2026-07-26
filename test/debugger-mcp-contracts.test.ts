@@ -53,23 +53,42 @@ assertHasProperties("bp_debug_run_to_line", [
   "detail"
 ]);
 const breakpointInput = tool("bp_debug_set_breakpoint").inputSchema as AnyRecord;
+assert.equal(breakpointInput.type, "object");
 assert.ok(Array.isArray(breakpointInput.oneOf));
-assert.equal(breakpointInput.oneOf.length, 2);
+assert.equal(breakpointInput.oneOf.length, 5);
 const breakpointLocationInput = breakpointInput.oneOf[0] as AnyRecord;
-const breakpointIdInput = breakpointInput.oneOf[1] as AnyRecord;
+const breakpointPatchByIdInput = breakpointInput.oneOf[1] as AnyRecord;
+const breakpointPatchWithinSourceInput = breakpointInput.oneOf[2] as AnyRecord;
+const breakpointPatchAcrossSourceInput = breakpointInput.oneOf[3] as AnyRecord;
+const breakpointPatchAcrossSourceAliasInput = breakpointInput.oneOf[4] as AnyRecord;
 assert.deepEqual(breakpointLocationInput.required, ["line"]);
 assert.deepEqual(breakpointLocationInput.oneOf, [
   { required: ["filePath"] },
   { required: ["file"] }
 ]);
-assert.deepEqual(breakpointIdInput.required, ["breakpointId"]);
 assert.equal(breakpointLocationInput.additionalProperties, false);
-assert.equal(breakpointIdInput.additionalProperties, false);
 assert.equal("breakpointId" in breakpointLocationInput.properties, false);
-assert.equal("filePath" in breakpointIdInput.properties, false);
-assert.equal("line" in breakpointIdInput.properties, false);
-assert.equal("column" in breakpointIdInput.properties, false);
 assert.ok("column" in breakpointLocationInput.properties);
+
+assert.equal(breakpointLocationInput.properties.enabled.default, true);
+assert.equal(breakpointLocationInput.properties.owner.default, "agent");
+assert.equal(breakpointLocationInput.properties.temporary.default, false);
+
+const breakpointPatchInputs = [
+  breakpointPatchByIdInput,
+  breakpointPatchWithinSourceInput,
+  breakpointPatchAcrossSourceInput,
+  breakpointPatchAcrossSourceAliasInput
+];
+assert.deepEqual(breakpointPatchByIdInput.required, ["breakpointId"]);
+assert.deepEqual(breakpointPatchWithinSourceInput.required, ["breakpointId", "line"]);
+assert.deepEqual(breakpointPatchAcrossSourceInput.required, ["breakpointId", "filePath", "line"]);
+assert.deepEqual(breakpointPatchAcrossSourceAliasInput.required, ["breakpointId", "file", "line"]);
+assert.equal("line" in breakpointPatchByIdInput.properties, false);
+assert.equal("filePath" in breakpointPatchWithinSourceInput.properties, false);
+assert.equal("file" in breakpointPatchWithinSourceInput.properties, false);
+assert.equal("file" in breakpointPatchAcrossSourceInput.properties, false);
+assert.equal("filePath" in breakpointPatchAcrossSourceAliasInput.properties, false);
 
 const breakpointSharedProperties = [
   "projectPath",
@@ -78,15 +97,11 @@ const breakpointSharedProperties = [
   "clientId",
   "ide",
   "enabled",
-  "temporary",
-  "suspendPolicy",
-  "isLogMessage",
-  "isLogStack",
   "owner",
-  "requireVerified",
-  "detail"
+  "requireVerified"
 ];
-for (const branch of [breakpointLocationInput, breakpointIdInput]) {
+for (const branch of breakpointPatchInputs) {
+  assert.equal(branch.additionalProperties, false);
   for (const field of breakpointSharedProperties) {
     assert.ok(field in branch.properties, `breakpoint branch should expose ${field}`);
   }
@@ -95,6 +110,17 @@ for (const branch of [breakpointLocationInput, breakpointIdInput]) {
       { type: "string" },
       { type: "null" }
     ]);
+  }
+  assert.deepEqual(branch.properties.column.oneOf, [
+    { type: "integer", minimum: 1, maximum: 2_147_483_647 },
+    { type: "null" }
+  ]);
+  assert.deepEqual(branch.properties.owner.enum, ["agent", "user", "all"]);
+  for (const field of ["enabled", "owner", "requireVerified"]) {
+    assert.equal("default" in branch.properties[field], false, `patch ${field} must be default-free`);
+  }
+  for (const createOnlyField of ["temporary", "suspendPolicy", "isLogMessage", "isLogStack", "detail"]) {
+    assert.equal(createOnlyField in branch.properties, false, `patch must not accept ${createOnlyField}`);
   }
 }
 

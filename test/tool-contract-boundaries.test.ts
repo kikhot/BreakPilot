@@ -47,6 +47,27 @@ function assertIntegerBoundary(
   }
 }
 
+function assertNullableIntegerBoundary(
+  tool: string,
+  property: string,
+  minimum: number,
+  maximum: number
+): void {
+  const schemas = propertySchemas(definition(tool).inputSchema, property);
+  assert.ok(schemas.length > 0, `${tool}.${property} must be published`);
+  for (const schema of schemas) {
+    if (schema.type === "integer") {
+      assert.equal(schema.minimum, minimum, `${tool}.${property} minimum`);
+      assert.equal(schema.maximum, maximum, `${tool}.${property} maximum`);
+      continue;
+    }
+    assert.deepEqual(schema.oneOf, [
+      { type: "integer", minimum, maximum },
+      { type: "null" }
+    ], `${tool}.${property} must be nullable only in patch branches`);
+  }
+}
+
 const fullCapabilities: RuntimeProviderCapabilities = {
   pause: "native",
   stepping: "native",
@@ -176,6 +197,64 @@ test("value, set-value, and remove selectors reject missing, empty, and mixed ta
   assert.equal(calls.remove, 3, "invalid remove selectors must not dispatch");
 });
 
+test("breakpoint patch branches preserve explicit clears and never inherit create defaults", async () => {
+  const manager = new DebugSessionManager({ policy: loadPolicy("breakpilot.yaml") });
+  const capturedArgs: AnyRecord[] = [];
+  manager.bpDebugSetBreakpoint = async (args) => {
+    capturedArgs.push(structuredClone(args ?? {}));
+    return {
+      breakpointId: "bp_1",
+      filePath: "src/serve.ts",
+      line: 17,
+      verified: true,
+      owner: "agent",
+      enabled: true,
+      temporary: false
+    };
+  };
+  const router = new ToolRouter(manager);
+
+  const update = await router.callTool("bp_debug_set_breakpoint", {
+    breakpointId: "bp_1",
+    condition: null
+  });
+  assert.equal(update.error, undefined);
+  assert.equal(capturedArgs[0]?.condition, null);
+  assert.equal("enabled" in (capturedArgs[0] ?? {}), false, "update branch receives no create default");
+  assert.equal("owner" in (capturedArgs[0] ?? {}), false, "owner is not silently reassigned");
+  assert.equal("temporary" in (capturedArgs[0] ?? {}), false, "update branch receives no create-only default");
+
+  const sameSourceMove = await router.callTool("bp_debug_set_breakpoint", {
+    breakpointId: "bp_1",
+    line: 17
+  });
+  const filePathRelocation = await router.callTool("bp_debug_set_breakpoint", {
+    breakpointId: "bp_1",
+    filePath: "src/relocated.ts",
+    line: 18
+  });
+  const aliasRelocation = await router.callTool("bp_debug_set_breakpoint", {
+    breakpointId: "bp_1",
+    file: "src/legacy.ts",
+    line: 19
+  });
+  assert.equal(sameSourceMove.error, undefined);
+  assert.equal(filePathRelocation.error, undefined);
+  assert.equal(aliasRelocation.error, undefined);
+  assert.equal(capturedArgs[1]?.line, 17);
+  assert.deepEqual(capturedArgs[2], { breakpointId: "bp_1", filePath: "src/relocated.ts", line: 18 });
+  assert.deepEqual(capturedArgs[3], { breakpointId: "bp_1", file: "src/legacy.ts", line: 19 });
+
+  const created = await router.callTool("bp_debug_set_breakpoint", {
+    filePath: "src/create.ts",
+    line: 20
+  });
+  assert.equal(created.error, undefined);
+  assert.equal(capturedArgs[4]?.enabled, true);
+  assert.equal(capturedArgs[4]?.owner, "agent");
+  assert.equal(capturedArgs[4]?.temporary, false);
+});
+
 test("public quantity schemas are bounded integers and invalid values never dispatch", async () => {
   for (const tool of ["bp_debug_threads", "bp_debug_call_stack"]) {
     assertIntegerBoundary(tool, "offset", 0, MAX_OFFSET);
@@ -204,7 +283,7 @@ test("public quantity schemas are bounded integers and invalid values never disp
   assertIntegerBoundary("bp_debug_value", "start", 0, MAX_OFFSET);
   assertIntegerBoundary("bp_debug_value", "count", 1, MAX_LIMIT);
   assertIntegerBoundary("bp_debug_set_breakpoint", "line", 1, MAX_SOURCE_POSITION);
-  assertIntegerBoundary("bp_debug_set_breakpoint", "column", 1, MAX_SOURCE_POSITION);
+  assertNullableIntegerBoundary("bp_debug_set_breakpoint", "column", 1, MAX_SOURCE_POSITION);
   assertIntegerBoundary("bp_debug_remove_breakpoint", "line", 1, MAX_SOURCE_POSITION);
 
   const manager = new DebugSessionManager({ policy: loadPolicy("breakpilot.yaml") });

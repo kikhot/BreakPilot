@@ -217,14 +217,59 @@ const breakpointLocationInput: JsonSchema = {
   ]
 };
 
-const breakpointIdInput: JsonSchema = {
+const breakpointPatchProperties: Record<string, JsonSchema> = {
+  projectPath,
+  workspace,
+  sessionId,
+  clientId,
+  ide,
+  breakpointId: { type: "string" },
+  condition: { oneOf: [{ type: "string" }, { type: "null" }] },
+  hitCondition: { oneOf: [{ type: "string" }, { type: "null" }] },
+  logMessage: { oneOf: [{ type: "string" }, { type: "null" }] },
+  column: { oneOf: [sourceColumn, { type: "null" }] },
+  enabled: { type: "boolean" },
+  owner: { type: "string", enum: ["agent", "user", "all"] },
+  requireVerified: { type: "boolean" }
+};
+
+const breakpointPatchByIdInput: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: breakpointPatchProperties,
+  required: ["breakpointId"]
+};
+
+const breakpointPatchWithinSourceInput: JsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    ...breakpointCommonProperties,
-    breakpointId: { type: "string" }
+    ...breakpointPatchProperties,
+    line: sourceLine
   },
-  required: ["breakpointId"]
+  required: ["breakpointId", "line"]
+};
+
+const breakpointPatchAcrossSourceInput: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...breakpointPatchProperties,
+    filePath: { type: "string" },
+    line: sourceLine
+  },
+  required: ["breakpointId", "filePath", "line"]
+};
+
+const breakpointPatchAcrossSourceAliasInput: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...breakpointPatchProperties,
+    file,
+    line: sourceLine
+  },
+  required: ["breakpointId", "file", "line"]
 };
 
 const valueCommonProperties: Record<string, JsonSchema> = {
@@ -648,7 +693,14 @@ export const toolDefinitions: ToolDefinition[] = [
     name: "bp_debug_set_breakpoint",
     description: "Set an agent-owned source breakpoint. Without sessionId, BreakPilot can route to a project-level IDE client.",
     inputSchema: {
-      oneOf: [breakpointLocationInput, breakpointIdInput]
+      type: "object",
+      oneOf: [
+        breakpointLocationInput,
+        breakpointPatchByIdInput,
+        breakpointPatchWithinSourceInput,
+        breakpointPatchAcrossSourceInput,
+        breakpointPatchAcrossSourceAliasInput
+      ]
     },
     outputSchema: toolOutputSchemas.bp_debug_set_breakpoint
   },

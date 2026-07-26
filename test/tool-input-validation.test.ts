@@ -626,6 +626,7 @@ const manager = new DebugSessionManager({ policy: loadPolicy() });
 let runToLineCalls = 0;
 let statusCalls = 0;
 let breakpointCalls = 0;
+const dispatchedBreakpoints: AnyRecord[] = [];
 let dispatchedRunToLine: AnyRecord | undefined;
 manager.bpDebugRunToLine = async (args) => {
   runToLineCalls += 1;
@@ -636,9 +637,18 @@ manager.bpDebugStatus = async () => {
   statusCalls += 1;
   return { sessions: [] };
 };
-manager.bpDebugSetBreakpoint = async () => {
+manager.bpDebugSetBreakpoint = async (args) => {
   breakpointCalls += 1;
-  return { breakpointId: "bp_test" };
+  dispatchedBreakpoints.push(structuredClone(args ?? {}));
+  return {
+    breakpointId: "bp_test",
+    filePath: "src/Hello.java",
+    line: 12,
+    verified: true,
+    owner: "agent",
+    enabled: true,
+    temporary: false
+  };
 };
 const router = new ToolRouter(manager);
 
@@ -733,13 +743,60 @@ assert.deepEqual(unknownField.error?.details?.issues, [{
 }]);
 assert.equal(statusCalls, 0, "unknown properties must be rejected before dispatch");
 
-const ambiguousBreakpoint = await router.callTool("bp_debug_set_breakpoint", {
+const relocatedBreakpoint = await router.callTool("bp_debug_set_breakpoint", {
   breakpointId: "bp_1",
   filePath: "src/Hello.java",
   line: 12
 });
-assert.equal(ambiguousBreakpoint.error?.code, "INVALID_ARGUMENT");
-assert.equal(breakpointCalls, 0);
+assert.equal(relocatedBreakpoint.error, undefined);
+assert.equal(breakpointCalls, 1);
+assert.deepEqual(dispatchedBreakpoints[0], {
+  breakpointId: "bp_1",
+  filePath: "src/Hello.java",
+  line: 12
+});
+
+const validPatchInputs = [
+  { breakpointId: "bp_1" },
+  { breakpointId: "bp_1", line: 13 },
+  { breakpointId: "bp_1", file: "src/Legacy.java", line: 14 },
+  { breakpointId: "bp_1", column: null, condition: null, hitCondition: null, logMessage: null },
+  { breakpointId: "bp_1", enabled: false, owner: "all", requireVerified: true }
+];
+for (const patchInput of validPatchInputs) {
+  const response = await router.callTool("bp_debug_set_breakpoint", patchInput);
+  assert.equal(response.error, undefined, JSON.stringify(patchInput));
+}
+assert.equal(breakpointCalls, 1 + validPatchInputs.length);
+assert.deepEqual(dispatchedBreakpoints[4], {
+  breakpointId: "bp_1",
+  column: null,
+  condition: null,
+  hitCondition: null,
+  logMessage: null
+});
+assert.equal("enabled" in (dispatchedBreakpoints[1] ?? {}), false, "id-only patches must remain default-free");
+assert.equal("owner" in (dispatchedBreakpoints[1] ?? {}), false, "id-only patches must remain default-free");
+
+const invalidPatchInputs = [
+  { breakpointId: "bp_1", filePath: "src/Relocated.java" },
+  { breakpointId: "bp_1", file: "src/Legacy.java" },
+  { breakpointId: "bp_1", filePath: "src/Canonical.java", file: "src/Legacy.java", line: 15 },
+  { breakpointId: "bp_1", line: null },
+  { breakpointId: "bp_1", enabled: null },
+  { breakpointId: "bp_1", unknownPatchField: true },
+  { breakpointId: "bp_1", temporary: true },
+  { breakpointId: "bp_1", suspendPolicy: "ALL" }
+];
+for (const patchInput of invalidPatchInputs) {
+  const response = await router.callTool("bp_debug_set_breakpoint", patchInput);
+  assert.equal(response.error?.code, "INVALID_ARGUMENT", JSON.stringify(patchInput));
+}
+assert.equal(
+  breakpointCalls,
+  1 + validPatchInputs.length,
+  "invalid breakpoint patch inputs must not dispatch"
+);
 
 const aliasInput = { file: "src/Hello.java", line: 12 };
 const aliasOnly = await router.callTool("bp_debug_run_to_line", aliasInput);
