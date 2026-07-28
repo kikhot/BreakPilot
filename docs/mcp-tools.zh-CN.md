@@ -366,3 +366,7 @@ npm run test:e2e:idea-differential -- \
 raw transcript 只保留在 `.breakpilot/evidence/differential/`。IDEA MCP、bridge 或 paused
 session 不可用时命令以 `EVIDENCE_INFRASTRUCTURE_UNAVAILABLE` 非零退出，不能把跳过或
 synthetic replay 记为现场成功。
+
+采集器从已哈希的 raw 文件字节生成脱敏 transcript；脱敏字段采用 fail-closed allowlist。
+回放会拒绝绝对路径、目录穿越和越界符号链接。MCP 初始化失败为
+`infrastructure_unavailable`，初始化后的场景或验证失败为 `failed`。

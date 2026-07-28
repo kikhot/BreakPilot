@@ -402,3 +402,8 @@ npm run test:e2e:idea-differential -- \
 Raw transcripts are retained only below `.breakpilot/evidence/differential/`.
 Missing IDEA MCP, bridge, or paused-session infrastructure is a non-zero
 `EVIDENCE_INFRASTRUCTURE_UNAVAILABLE`, never a skipped or synthetic success.
+
+Sanitized transcripts are derived from the exact hashed raw-file bytes under a
+fail-closed field allowlist. Replay rejects absolute paths, traversal, and
+out-of-root symlinks. Initialization failures are `infrastructure_unavailable`;
+scenario or verification failures after initialization are `failed`.

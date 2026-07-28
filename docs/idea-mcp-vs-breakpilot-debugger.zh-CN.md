@@ -21,6 +21,8 @@ BreakPilot 已形成跨 IDEA、VS Code 和 headless DAP 的统一 Agent 调试�
 - 差分证据已具备 capture、raw hash、确定性脱敏、lineage 和 offline replay 流水线。
   仓库内 fixture 明确标记为 `synthetic-replay`；只有显式 live E2E 成功并保留 raw digest
   的 bundle 才能标记为 `captured-replay`。
+- bridge v2 重连会推进暂停代次、清除旧 origin 与待发送消息；旧连接生成的变量句柄、命令
+  回执和响应不能穿越连接代际。IDEA 变量读取与 VS Code 一致执行请求级限制和脱敏。
 
 ## 能力对照
 
@@ -80,6 +82,7 @@ allowlist 字段，拒绝泄露原始 stack/variable payload，并用 cursor 报
 4. 安全策略、输出 schema runtime validation、redaction 与 event allowlist 适合自动化调用。
 5. breakpoint reconciliation、temporary run-to-line 和 mutation 都返回可核验结果与恢复语义。
 6. 可离线验证的差分证据流水线能检测 transcript、hash、lineage 或 semantic 任一层篡改。
+   回放路径受 bundle realpath 边界保护，脱敏只接受已审阅字段，并从已哈希 raw 字节生成。
 
 ## IDEA MCP 仍然更好的地方
 
@@ -94,6 +97,8 @@ allowlist 字段，拒绝泄露原始 stack/variable payload，并用 cursor 报
 - 补齐 IDEA 高级断点属性的读取、更新确认和逐字段 applied evidence。
 - 扩大 IDEA event adapter 对 output/thread/process/invalidated 的覆盖，但继续坚持字段 allowlist。
 - 对 native setter 的展示值归一化增加 provider-specific comparator，避免纯格式差异造成假阴性。
+- 为 IDEA bridge 增加不依赖 IntelliJ 网络栈的连接代际集成测试；当前代际推进与句柄失效已由
+  编译测试和共享暂停态测试覆盖，VS Code 已有真实队列丢弃回归测试。
 - 用当前 Spring Boot 样例执行一次经人工审查的 live differential capture。没有 IDEA 原生 MCP
   配置或暂停 session 时，E2E 命令必须非零退出，不能把 synthetic fixture 当作现场证明。
 
@@ -117,4 +122,5 @@ npm run test:e2e:idea-differential -- \
 
 raw transcript 只写入 `.breakpilot/evidence/differential/<runId>/raw/`。SHA-256 证明本地文件
 完整性，不独立证明响应来源；来源可信度由 manifest、provider-local session identity、
-lineage 和现场操作记录共同给出。
+lineage 和现场操作记录共同给出。初始化失败记录为 `infrastructure_unavailable`；初始化成功后
+的工具、脱敏、lineage 或回放失败记录为 `failed`，不会混淆两类结果。
