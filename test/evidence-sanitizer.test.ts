@@ -49,3 +49,40 @@ test("sanitization fails closed without echoing secret values", () => {
 test("provider identities cannot cross transcript boundaries", () => {
   assert.throws(() => sanitizeTranscript("idea", [entry]), EvidenceVerificationError);
 });
+
+test("unknown provider-private fields fail closed", () => {
+  assert.throws(
+    () => sanitizeTranscript("breakpilot", [{ ...entry, payload: { providerPrivateMetadata: "not-reviewed" } }]),
+    (error: unknown) => error instanceof EvidenceVerificationError && error.path === "/0/payload/providerPrivateMetadata"
+  );
+});
+
+test("unknown transcript fields and compound secret names fail closed", () => {
+  assert.throws(
+    () => sanitizeTranscript("breakpilot", [{ ...entry, privateKey: "short-private-key" } as any]),
+    (error: unknown) => error instanceof EvidenceVerificationError && error.path === "/0/privateKey"
+  );
+  assert.throws(
+    () => sanitizeTranscript("breakpilot", [{ ...entry, payload: { values: { dbPassword: "hunter2" } } }]),
+    (error: unknown) => error instanceof EvidenceVerificationError && error.path === "/0/payload/values/dbPassword"
+  );
+  assert.throws(
+    () => sanitizeTranscript("breakpilot", [{ ...entry, payload: { values: { serviceSecret: "shortsecret" } } }]),
+    EvidenceVerificationError
+  );
+  assert.throws(
+    () => sanitizeTranscript("breakpilot", [{ ...entry, payload: { values: { tokenValue: "hunter2" } } }]),
+    (error: unknown) => error instanceof EvidenceVerificationError && error.path === "/0/payload/values/tokenValue"
+  );
+});
+
+test("malformed transcript envelopes fail before payload publication", () => {
+  assert.throws(
+    () => sanitizeTranscript("breakpilot", [{ ...entry, sequence: 0 }]),
+    (error: unknown) => error instanceof EvidenceVerificationError && error.path === "/0/sequence"
+  );
+  assert.throws(
+    () => sanitizeTranscript("breakpilot", [{ ...entry, direction: "private" as any }]),
+    (error: unknown) => error instanceof EvidenceVerificationError && error.path === "/0/direction"
+  );
+});

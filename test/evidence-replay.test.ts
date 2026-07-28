@@ -21,9 +21,93 @@ test("streaming hashes report lower-case digest and exact bytes", async () => {
 });
 
 test("manifest validation requires an honest unavailable revision and raw status", () => {
-  assert.deepEqual(validateEvidenceManifestV1({ schemaVersion: 1, runId: "x", application: { revision: null }, providers: {}, rawRetention: "unavailable" }), [
-    "$.application.revisionReason", "$.providers.idea", "$.providers.breakpilot"
-  ]);
+  const issues = validateEvidenceManifestV1({ schemaVersion: 1, runId: "x", application: { revision: null }, providers: {}, rawRetention: "unavailable" });
+  assert.ok(issues.includes("$.application.revisionReason"));
+  assert.ok(issues.includes("$.providers.idea"));
+  assert.ok(issues.includes("$.providers.breakpilot"));
+});
+
+test("manifest validation rejects invalid outcomes, digests, sanitizer versions, and incomplete raw retention", () => {
+  const invalid: any = {
+    schemaVersion: 1,
+    runId: "run",
+    harness: { revision: null, node: "v25", platform: "darwin-arm64" },
+    breakpilot: { revision: null, hubUrl: "http://127.0.0.1:57987", bridgeUrl: "ws://127.0.0.1:57987/bridge" },
+    application: {
+      root: "/sample",
+      revision: "abc",
+      sourceMarker: { workspaceRelativePath: "Sample.java", line: 2, lineSha256: "0".repeat(64) }
+    },
+    providers: {
+      idea: { transcript: "sanitized/idea.ndjson", sha256: "bad", bytes: -1, serverIdentity: 5, extra: true },
+      breakpilot: { transcript: "sanitized/breakpilot.ndjson", sha256: "0".repeat(64), bytes: 12 }
+    },
+    sanitizer: { id: "unknown", version: 2 },
+    rawRetention: "retained",
+    outcome: "unknown",
+    extra: true
+  };
+  const issues = validateEvidenceManifestV1(invalid);
+  assert.ok(issues.includes("$.outcome"));
+  assert.ok(issues.includes("$.sanitizer"));
+  assert.ok(issues.includes("$.providers.idea.sha256"));
+  assert.ok(issues.includes("$.providers.idea.rawTranscript"));
+  assert.ok(issues.includes("$.providers.breakpilot.rawTranscript"));
+  assert.ok(issues.includes("$.extra"));
+  assert.ok(issues.includes("$.providers.idea.serverIdentity"));
+  assert.ok(issues.includes("$.providers.idea.extra"));
+});
+
+test("manifest validation checks complete provenance shapes", () => {
+  const invalid: any = {
+    schemaVersion: 1,
+    runId: "run",
+    harness: { revision: 5, node: "", platform: 7 },
+    breakpilot: { revision: [], hubUrl: 9, bridgeUrl: null },
+    application: {
+      root: 42,
+      revision: {},
+      sourceMarker: { workspaceRelativePath: "Sample.java", line: 2, lineSha256: "0".repeat(64) }
+    },
+    providers: {
+      idea: { transcript: "", sha256: "", bytes: 0 },
+      breakpilot: { transcript: "", sha256: "", bytes: 0 }
+    },
+    sanitizer: { id: "breakpilot-differential-v1", version: 1 },
+    rawRetention: "unavailable",
+    outcome: "failed"
+  };
+  const issues = validateEvidenceManifestV1(invalid);
+  for (const field of [
+    "$.harness.revision", "$.harness.node", "$.harness.platform",
+    "$.breakpilot.revision", "$.breakpilot.hubUrl", "$.breakpilot.bridgeUrl",
+    "$.application.root", "$.application.revision"
+  ]) assert.ok(issues.includes(field), field);
+});
+
+test("unavailable manifests reject missing sanitized fields and every raw artifact field", () => {
+  const invalid: any = {
+    schemaVersion: 1,
+    runId: "run",
+    harness: { revision: null, node: "v25", platform: "darwin-arm64" },
+    breakpilot: { revision: null, hubUrl: "http://127.0.0.1:57987", bridgeUrl: "ws://127.0.0.1:57987/bridge" },
+    application: {
+      root: "/sample",
+      revision: null,
+      revisionReason: "capture did not start",
+      sourceMarker: { workspaceRelativePath: "Sample.java", line: 2, lineSha256: "0".repeat(64) }
+    },
+    providers: {
+      idea: { transcript: "", bytes: 0, rawBytes: 0 },
+      breakpilot: { transcript: "", sha256: "", bytes: 0 }
+    },
+    sanitizer: { id: "breakpilot-differential-v1", version: 1 },
+    rawRetention: "unavailable",
+    outcome: "infrastructure_unavailable"
+  };
+  const issues = validateEvidenceManifestV1(invalid);
+  assert.ok(issues.includes("$.providers.idea.sha256"));
+  assert.ok(issues.includes("$.providers.idea.rawBytes"));
 });
 
 test("offline replay verifies hashes, lineage, and provider semantics", async () => {
@@ -57,4 +141,17 @@ test("offline replay rejects broken lineage and semantic artifacts", async () =>
   semantic.values["analysis.score"].idea = 99;
   await writeFile(semanticPath, JSON.stringify(semantic));
   await assert.rejects(() => verifyEvidenceBundle(semanticCopy), (error: any) => error?.category === "semantic");
+});
+
+test("offline replay rejects transcript paths outside the evidence root", async () => {
+  const copy = await mkdtemp(path.join(tmpdir(), "breakpilot-evidence-path-"));
+  await cp(fixture, copy, { recursive: true });
+  const manifestPath = path.join(copy, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.providers.idea.transcript = "../outside.ndjson";
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await assert.rejects(
+    () => verifyEvidenceBundle(copy),
+    (error: any) => error?.category === "path" && error?.path === "$.providers.idea.transcript"
+  );
 });

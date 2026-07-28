@@ -1,7 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
-import { sha256File } from "./DifferentialEvidenceHash.ts";
 import { sanitizeTranscript } from "./DifferentialEvidenceSanitizer.ts";
 import {
   EvidenceVerificationError,
@@ -17,9 +17,50 @@ async function readJson<T>(filePath: string): Promise<T> {
   return JSON.parse(await readFile(filePath, "utf8")) as T;
 }
 
-async function readNdjson(filePath: string): Promise<TranscriptEntry[]> {
-  const content = await readFile(filePath, "utf8");
-  return content.split("\n").filter(Boolean).map((line) => JSON.parse(line) as TranscriptEntry);
+function digestBytes(bytes: Buffer): { sha256: string; bytes: number } {
+  return {
+    sha256: createHash("sha256").update(bytes).digest("hex").toLowerCase(),
+    bytes: bytes.length
+  };
+}
+
+async function readEvidenceFile(filePath: string): Promise<{
+  content: string;
+  digest: { sha256: string; bytes: number };
+}> {
+  const bytes = await readFile(filePath);
+  return {
+    content: bytes.toString("utf8"),
+    digest: digestBytes(bytes)
+  };
+}
+
+function parseNdjson(content: string, artifactPath: string): TranscriptEntry[] {
+  try {
+    return content.split("\n").filter(Boolean).map((line) => JSON.parse(line) as TranscriptEntry);
+  } catch {
+    throw new EvidenceVerificationError("transcript", artifactPath, "Evidence transcript is not valid NDJSON.");
+  }
+}
+
+async function evidencePath(root: string, relative: string, field: string): Promise<string> {
+  if (path.isAbsolute(relative)) {
+    throw new EvidenceVerificationError("path", field, "Evidence artifact path must be relative.");
+  }
+  const candidate = path.resolve(root, relative);
+  if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) {
+    throw new EvidenceVerificationError("path", field, "Evidence artifact path escapes the bundle root.");
+  }
+  try {
+    const resolved = await realpath(candidate);
+    if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+      throw new EvidenceVerificationError("path", field, "Evidence artifact symlink escapes the bundle root.");
+    }
+    return resolved;
+  } catch (error) {
+    if (error instanceof EvidenceVerificationError) throw error;
+    throw new EvidenceVerificationError("path", field, "Evidence artifact is missing or unreadable.");
+  }
 }
 
 function resolvePointer(value: unknown, jsonPointer: string): unknown {
@@ -82,8 +123,8 @@ export function extractSemanticArtifact(
 }
 
 export async function verifyEvidenceBundle(directory: string): Promise<SemanticDifferentialArtifactV1> {
-  const root = path.resolve(directory);
-  const manifest = await readJson<EvidenceManifestV1>(path.join(root, "manifest.json"));
+  const root = await realpath(path.resolve(directory));
+  const manifest = await readJson<EvidenceManifestV1>(await evidencePath(root, "manifest.json", "$.manifest"));
   const issues = validateEvidenceManifestV1(manifest);
   if (issues.length) throw new EvidenceVerificationError("manifest", issues[0]!, "Evidence manifest is invalid.");
   if (manifest.outcome !== "captured") {
@@ -92,12 +133,13 @@ export async function verifyEvidenceBundle(directory: string): Promise<SemanticD
 
   const transcripts = {} as Record<TranscriptProvider, TranscriptEntry[]>;
   const declaredSanitizedDigests = await readJson<Record<TranscriptProvider, { sha256: string; bytes: number }>>(
-    path.join(root, "sanitized", "SHA256SUMS.json")
+    await evidencePath(root, "sanitized/SHA256SUMS.json", "$.sanitizedDigests")
   );
   for (const provider of ["idea", "breakpilot"] as const) {
     const descriptor = manifest.providers[provider];
-    const transcriptPath = path.join(root, descriptor.transcript);
-    const digest = await sha256File(transcriptPath);
+    const transcriptPath = await evidencePath(root, descriptor.transcript, `$.providers.${provider}.transcript`);
+    const transcriptFile = await readEvidenceFile(transcriptPath);
+    const digest = transcriptFile.digest;
     if (digest.sha256 !== descriptor.sha256 || digest.bytes !== descriptor.bytes) {
       throw new EvidenceVerificationError("hash", descriptor.transcript, "Sanitized transcript digest mismatch.");
     }
@@ -107,7 +149,7 @@ export async function verifyEvidenceBundle(directory: string): Promise<SemanticD
     ) {
       throw new EvidenceVerificationError("hash", "sanitized/SHA256SUMS.json", "Sanitized digest index mismatch.");
     }
-    const entries = await readNdjson(transcriptPath);
+    const entries = parseNdjson(transcriptFile.content, descriptor.transcript);
     const resanitized = sanitizeTranscript(provider, entries).entries;
     if (stableEntries(resanitized) !== stableEntries(entries)) {
       throw new EvidenceVerificationError("sanitizer", descriptor.transcript, "Sanitized transcript is not idempotent.");
@@ -117,16 +159,26 @@ export async function verifyEvidenceBundle(directory: string): Promise<SemanticD
       if (!descriptor.rawTranscript || !descriptor.rawSha256 || descriptor.rawBytes === undefined) {
         throw new EvidenceVerificationError("manifest", `$.providers.${provider}`, "Retained raw evidence is missing its digest.");
       }
-      const rawDigest = await sha256File(path.join(root, descriptor.rawTranscript));
+      const rawPath = await evidencePath(root, descriptor.rawTranscript, `$.providers.${provider}.rawTranscript`);
+      const rawFile = await readEvidenceFile(rawPath);
+      const rawDigest = rawFile.digest;
       if (rawDigest.sha256 !== descriptor.rawSha256 || rawDigest.bytes !== descriptor.rawBytes) {
         throw new EvidenceVerificationError("hash", descriptor.rawTranscript, "Raw transcript digest mismatch.");
+      }
+      const derivedFromRaw = sanitizeTranscript(provider, parseNdjson(rawFile.content, descriptor.rawTranscript)).entries;
+      if (stableEntries(derivedFromRaw) !== stableEntries(entries)) {
+        throw new EvidenceVerificationError(
+          "sanitizer",
+          descriptor.rawTranscript,
+          "Sanitized transcript was not derived from the retained raw transcript."
+        );
       }
     }
   }
 
-  const lineage = await readJson<LineageFileV1>(path.join(root, "lineage.json"));
+  const lineage = await readJson<LineageFileV1>(await evidencePath(root, "lineage.json", "$.lineage"));
   const artifact = extractSemanticArtifact(manifest, transcripts, lineage);
-  const expected = await readJson<SemanticDifferentialArtifactV1>(path.join(root, "semantic.json"));
+  const expected = await readJson<SemanticDifferentialArtifactV1>(await evidencePath(root, "semantic.json", "$.semantic"));
   if (JSON.stringify(expected) !== JSON.stringify(artifact)) {
     throw new EvidenceVerificationError("semantic", "semantic.json", "Generated semantic artifact mismatch.");
   }

@@ -31,7 +31,8 @@ process.stdin.on("data", (chunk) => {
       result: {
         sessionId: `${provider}-session-from-native-response`,
         position: { line: 2 },
-        values: { "analysis.score": 28 }
+        values: { "analysis.score": 28 },
+        ...(message.params?.arguments?.returnUnknown === true ? { providerPrivateMetadata: "unreviewed" } : {})
       }
     })}\n`);
   }

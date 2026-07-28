@@ -1,6 +1,6 @@
 import { spawn, execFile as execFileCallback, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -13,6 +13,7 @@ import {
   type CaptureConfig,
   type CaptureResult,
   type CapturedMcpCommand,
+  type EvidenceFileDigest,
   type EvidenceManifestV1,
   type LineageFileV1,
   type TranscriptEntry,
@@ -21,6 +22,32 @@ import {
 
 const execFile = promisify(execFileCallback);
 const INFRASTRUCTURE_CODE = "EVIDENCE_INFRASTRUCTURE_UNAVAILABLE";
+
+export function sanitizeHashedRawTranscript(
+  provider: TranscriptProvider,
+  rawText: string,
+  digest: EvidenceFileDigest
+): TranscriptEntry[] {
+  if (sha256Text(rawText) !== digest.sha256 || Buffer.byteLength(rawText) !== digest.bytes) {
+    throw new EvidenceVerificationError("hash", `raw/${provider}.ndjson`, "Raw transcript bytes changed after hashing.");
+  }
+  const lines = rawText.split("\n");
+  if (lines.at(-1) !== "") {
+    throw new EvidenceVerificationError("capture", `raw/${provider}.ndjson`, "Raw transcript must end with a newline.");
+  }
+  lines.pop();
+  let parsed: TranscriptEntry[];
+  try {
+    parsed = lines.filter(Boolean).map((line) => JSON.parse(line) as TranscriptEntry);
+  } catch {
+    throw new EvidenceVerificationError("capture", `raw/${provider}.ndjson`, "Raw transcript is not valid NDJSON.");
+  }
+  const canonical = parsed.map((entry) => JSON.stringify(entry)).join("\n") + (parsed.length ? "\n" : "");
+  if (canonical !== rawText) {
+    throw new EvidenceVerificationError("capture", `raw/${provider}.ndjson`, "Raw transcript is not canonical NDJSON.");
+  }
+  return sanitizeTranscript(provider, parsed).entries;
+}
 
 class StdioMcpClient {
   readonly #child: ChildProcessWithoutNullStreams;
@@ -158,6 +185,31 @@ async function atomicJson(filePath: string, value: unknown): Promise<void> {
   await rename(temporary, filePath);
 }
 
+async function rejectSymlinkComponents(root: string, target: string): Promise<void> {
+  let current = root;
+  for (const segment of path.relative(root, target).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    try {
+      if ((await lstat(current)).isSymbolicLink()) {
+        throw new EvidenceVerificationError("capture", "$.outputRoot", "Raw evidence path cannot contain symbolic links.");
+      }
+    } catch (error) {
+      if (error instanceof EvidenceVerificationError) throw error;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw error;
+    }
+  }
+}
+
+async function removeUnverifiedArtifacts(directory: string): Promise<void> {
+  await Promise.all([
+    rm(path.join(directory, "raw"), { recursive: true, force: true }),
+    rm(path.join(directory, "sanitized"), { recursive: true, force: true }),
+    rm(path.join(directory, "lineage.json"), { force: true }),
+    rm(path.join(directory, "semantic.json"), { force: true })
+  ]);
+}
+
 function unavailableManifest(config: CaptureConfig, runId: string, marker: EvidenceManifestV1["application"]["sourceMarker"]): EvidenceManifestV1 {
   const empty = { transcript: "", sha256: "", bytes: 0 };
   return {
@@ -173,9 +225,28 @@ function unavailableManifest(config: CaptureConfig, runId: string, marker: Evide
   };
 }
 
+function failedManifest(config: CaptureConfig, runId: string, marker: EvidenceManifestV1["application"]["sourceMarker"]): EvidenceManifestV1 {
+  return {
+    ...unavailableManifest(config, runId, marker),
+    application: {
+      root: config.sampleRoot,
+      revision: null,
+      revisionReason: "scenario failed after debugger MCP initialization",
+      sourceMarker: marker
+    },
+    outcome: "failed"
+  };
+}
+
 export async function captureDifferentialEvidence(config: CaptureConfig): Promise<CaptureResult> {
   const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}`;
-  const outputRoot = path.resolve(config.outputRoot ?? path.join(config.sampleRoot, ".breakpilot/evidence/differential"));
+  const sampleRoot = await realpath(config.sampleRoot);
+  const configuredSampleRoot = path.resolve(config.sampleRoot);
+  const configuredEvidenceRoot = path.join(configuredSampleRoot, ".breakpilot", "evidence", "differential");
+  const requiredEvidenceRoot = path.join(sampleRoot, ".breakpilot", "evidence", "differential");
+  const requestedOutputRoot = path.resolve(config.outputRoot ?? configuredEvidenceRoot);
+  const relativeOutputRoot = path.relative(configuredSampleRoot, requestedOutputRoot);
+  let outputRoot = path.resolve(sampleRoot, relativeOutputRoot);
   const evidenceSegments = outputRoot.split(path.sep);
   const evidenceIndex = evidenceSegments.lastIndexOf(".breakpilot");
   if (
@@ -189,6 +260,19 @@ export async function captureDifferentialEvidence(config: CaptureConfig): Promis
       "Raw evidence output must remain below .breakpilot/evidence/differential."
     );
   }
+  if (outputRoot !== requiredEvidenceRoot && !outputRoot.startsWith(`${requiredEvidenceRoot}${path.sep}`)) {
+    throw new EvidenceVerificationError("capture", "$.outputRoot", "Raw evidence output must belong to the sample workspace.");
+  }
+  await rejectSymlinkComponents(sampleRoot, outputRoot);
+  await mkdir(outputRoot, { recursive: true });
+  outputRoot = await realpath(outputRoot);
+  const resolvedEvidenceRoot = await realpath(requiredEvidenceRoot);
+  if (!resolvedEvidenceRoot.startsWith(`${sampleRoot}${path.sep}`)) {
+    throw new EvidenceVerificationError("capture", "$.outputRoot", "Raw evidence root symlink escapes the sample workspace.");
+  }
+  if (outputRoot !== resolvedEvidenceRoot && !outputRoot.startsWith(`${resolvedEvidenceRoot}${path.sep}`)) {
+    throw new EvidenceVerificationError("capture", "$.outputRoot", "Raw evidence output symlink escapes the sample workspace.");
+  }
   let hub: URL;
   let bridge: URL;
   try {
@@ -201,7 +285,6 @@ export async function captureDifferentialEvidence(config: CaptureConfig): Promis
     throw new EvidenceVerificationError("capture", "$.bridgeUrl", "Hub and bridge must use the same one-port endpoint.");
   }
   const directory = path.join(outputRoot, runId);
-  const sampleRoot = await realpath(config.sampleRoot);
   const sourcePath = await realpath(path.resolve(sampleRoot, config.sourceMarker.path));
   if (!sourcePath.startsWith(`${sampleRoot}${path.sep}`)) {
     throw new EvidenceVerificationError("source", "$.sourceMarker.path", "Source marker escapes the sample root.");
@@ -249,6 +332,14 @@ export async function captureDifferentialEvidence(config: CaptureConfig): Promis
       const initialized: any = await clients[provider].initialize();
       serverIdentity[provider] = typeof initialized?.serverInfo?.name === "string" ? initialized.serverInfo.name : undefined;
     }
+  } catch {
+    for (const client of Object.values(clients)) client?.close();
+    const manifest = unavailableManifest(config, runId, marker);
+    await atomicJson(path.join(directory, "manifest.json"), manifest);
+    return { directory, manifest, error: { code: INFRASTRUCTURE_CODE, message: "Debugger MCP infrastructure was unavailable during initialization." } };
+  }
+
+  try {
     for (const step of config.steps) {
       const attempts = Math.max(1, (step.retries ?? 0) + 1);
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -279,67 +370,90 @@ export async function captureDifferentialEvidence(config: CaptureConfig): Promis
     }
   } catch (error) {
     for (const client of Object.values(clients)) client?.close();
-    if (error instanceof EvidenceVerificationError) throw error;
-    const manifest = unavailableManifest(config, runId, marker);
+    const manifest = failedManifest(config, runId, marker);
+    await removeUnverifiedArtifacts(directory);
     await atomicJson(path.join(directory, "manifest.json"), manifest);
-    return { directory, manifest, error: { code: INFRASTRUCTURE_CODE, message: "Debugger MCP infrastructure was unavailable or did not complete the scenario." } };
+    return {
+      directory,
+      manifest,
+      error: {
+        code: "EVIDENCE_VERIFICATION_FAILED",
+        message: error instanceof EvidenceVerificationError ? error.message : "Debugger MCP scenario did not complete successfully."
+      }
+    };
   } finally {
     for (const client of Object.values(clients)) client?.close();
   }
 
-  const appRevision = await gitRevision(config.sampleRoot);
-  const harnessRevision = await gitRevision(path.resolve("."));
-  const providers = {} as EvidenceManifestV1["providers"];
-  const sanitizedEntries = {} as Record<TranscriptProvider, TranscriptEntry[]>;
-  for (const provider of ["idea", "breakpilot"] as const) {
-    const rawRelative = `raw/${provider}.ndjson`;
-    const sanitizedRelative = `sanitized/${provider}.ndjson`;
-    const rawDigest = await sha256File(path.join(directory, rawRelative));
-    sanitizedEntries[provider] = sanitizeTranscript(provider, entries[provider]).entries;
-    await writeFile(
-      path.join(directory, sanitizedRelative),
-      sanitizedEntries[provider].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
-      "utf8"
-    );
-    const digest = await sha256File(path.join(directory, sanitizedRelative));
-    providers[provider] = {
-      serverIdentity: serverIdentity[provider],
-      sessionIdentity: sessionIdentity[provider],
-      transcript: sanitizedRelative,
-      sha256: digest.sha256,
-      bytes: digest.bytes,
-      rawTranscript: rawRelative,
-      rawSha256: rawDigest.sha256,
-      rawBytes: rawDigest.bytes
+  try {
+    const appRevision = await gitRevision(config.sampleRoot);
+    const harnessRevision = await gitRevision(path.resolve("."));
+    const providers = {} as EvidenceManifestV1["providers"];
+    const sanitizedEntries = {} as Record<TranscriptProvider, TranscriptEntry[]>;
+    for (const provider of ["idea", "breakpilot"] as const) {
+      const rawRelative = `raw/${provider}.ndjson`;
+      const sanitizedRelative = `sanitized/${provider}.ndjson`;
+      const rawPath = path.join(directory, rawRelative);
+      const rawDigest = await sha256File(rawPath);
+      const rawText = await readFile(rawPath, "utf8");
+      sanitizedEntries[provider] = sanitizeHashedRawTranscript(provider, rawText, rawDigest);
+      await writeFile(
+        path.join(directory, sanitizedRelative),
+        sanitizedEntries[provider].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+        "utf8"
+      );
+      const digest = await sha256File(path.join(directory, sanitizedRelative));
+      providers[provider] = {
+        serverIdentity: serverIdentity[provider],
+        sessionIdentity: sessionIdentity[provider],
+        transcript: sanitizedRelative,
+        sha256: digest.sha256,
+        bytes: digest.bytes,
+        rawTranscript: rawRelative,
+        rawSha256: rawDigest.sha256,
+        rawBytes: rawDigest.bytes
+      };
+    }
+    const manifest: EvidenceManifestV1 = {
+      schemaVersion: 1,
+      runId,
+      harness: { revision: harnessRevision.revision, node: process.version, platform: `${os.platform()}-${os.arch()}` },
+      breakpilot: { revision: harnessRevision.revision, hubUrl: config.hubUrl, bridgeUrl: config.bridgeUrl },
+      application: { root: config.sampleRoot, ...appRevision, sourceMarker: marker },
+      providers,
+      sanitizer: { id: SANITIZER_ID, version: SANITIZER_VERSION },
+      rawRetention: "retained",
+      outcome: "captured"
+    };
+    const lineage: LineageFileV1 = {
+      schemaVersion: 1,
+      assertions: config.lineage.map((assertion) => ({
+        ...assertion,
+        transcript: providers[assertion.provider].transcript,
+        transcriptSha256: providers[assertion.provider].sha256
+      }))
+    };
+    const semantic = extractSemanticArtifact(manifest, sanitizedEntries, lineage);
+    await atomicJson(path.join(directory, "manifest.json"), manifest);
+    await atomicJson(path.join(directory, "lineage.json"), lineage);
+    await atomicJson(path.join(directory, "semantic.json"), semantic);
+    await atomicJson(path.join(directory, "sanitized", "SHA256SUMS.json"), {
+      idea: { sha256: providers.idea.sha256, bytes: providers.idea.bytes },
+      breakpilot: { sha256: providers.breakpilot.sha256, bytes: providers.breakpilot.bytes }
+    });
+    await verifyEvidenceBundle(directory);
+    return { directory, manifest };
+  } catch (error) {
+    const manifest = failedManifest(config, runId, marker);
+    await removeUnverifiedArtifacts(directory);
+    await atomicJson(path.join(directory, "manifest.json"), manifest);
+    return {
+      directory,
+      manifest,
+      error: {
+        code: "EVIDENCE_VERIFICATION_FAILED",
+        message: error instanceof Error ? error.message : "Evidence finalization failed."
+      }
     };
   }
-  const manifest: EvidenceManifestV1 = {
-    schemaVersion: 1,
-    runId,
-    harness: { revision: harnessRevision.revision, node: process.version, platform: `${os.platform()}-${os.arch()}` },
-    breakpilot: { revision: harnessRevision.revision, hubUrl: config.hubUrl, bridgeUrl: config.bridgeUrl },
-    application: { root: config.sampleRoot, ...appRevision, sourceMarker: marker },
-    providers,
-    sanitizer: { id: SANITIZER_ID, version: SANITIZER_VERSION },
-    rawRetention: "retained",
-    outcome: "captured"
-  };
-  const lineage: LineageFileV1 = {
-    schemaVersion: 1,
-    assertions: config.lineage.map((assertion) => ({
-      ...assertion,
-      transcript: providers[assertion.provider].transcript,
-      transcriptSha256: providers[assertion.provider].sha256
-    }))
-  };
-  const semantic = extractSemanticArtifact(manifest, sanitizedEntries, lineage);
-  await atomicJson(path.join(directory, "manifest.json"), manifest);
-  await atomicJson(path.join(directory, "lineage.json"), lineage);
-  await atomicJson(path.join(directory, "semantic.json"), semantic);
-  await atomicJson(path.join(directory, "sanitized", "SHA256SUMS.json"), {
-    idea: { sha256: providers.idea.sha256, bytes: providers.idea.bytes },
-    breakpilot: { sha256: providers.breakpilot.sha256, bytes: providers.breakpilot.bytes }
-  });
-  await verifyEvidenceBundle(directory);
-  return { directory, manifest };
 }
