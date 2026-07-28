@@ -9,7 +9,10 @@ import {
 export const SANITIZER_ID = "breakpilot-differential-v1" as const;
 export const SANITIZER_VERSION = 1 as const;
 
-const forbiddenKey = /^(authorization|cookie|headers?|environment|env|token|accessToken|apiKey|privateKey|secret|password)$/i;
+const forbiddenKeys = new Set([
+  "authorization", "cookie", "header", "headers", "environment", "env", "token",
+  "accesstoken", "apikey", "privatekey", "secret", "password"
+]);
 const idKey = /(session|thread|frame|variable|request|process|breakpoint|client|confirmation).*id$|^id$/i;
 const portKey = /port$/i;
 const pidKey = /^(pid|processId)$/i;
@@ -56,7 +59,8 @@ function sanitizeValue(value: unknown, state: TokenState, at: string, key?: stri
   const output: Record<string, unknown> = {};
   for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
     const childPath = pointer(at, childKey);
-    if (forbiddenKey.test(childKey)) {
+    const normalizedKey = childKey.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    if (forbiddenKeys.has(normalizedKey) || normalizedKey.endsWith("token") || normalizedKey.endsWith("apikey")) {
       throw new EvidenceVerificationError("sanitizer", childPath, "Sensitive evidence field is not permitted.");
     }
     output[childKey] = sanitizeValue(child, state, childPath, childKey);

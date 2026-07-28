@@ -1,6 +1,6 @@
 import { spawn, execFile as execFileCallback, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -35,16 +35,23 @@ class StdioMcpClient {
     });
     this.#child.stdout.setEncoding("utf8");
     this.#child.stdout.on("data", (chunk: string) => this.#read(chunk));
+    this.#child.stderr.resume();
     this.#child.on("error", (error) => this.#rejectAll(error));
     this.#child.on("exit", (code) => this.#rejectAll(new Error(`MCP process exited with code ${String(code)}.`)));
   }
 
   async initialize(): Promise<unknown> {
-    return this.request("initialize", {
+    const result = await this.request("initialize", {
       protocolVersion: "2025-11-25",
       capabilities: {},
       clientInfo: { name: "breakpilot-evidence", version: "1" }
     });
+    this.notify("notifications/initialized", {});
+    return result;
+  }
+
+  notify(method: string, params: unknown): void {
+    this.#child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
   }
 
   request(method: string, params: unknown, timeoutMs = 10000): Promise<unknown> {
@@ -169,9 +176,34 @@ function unavailableManifest(config: CaptureConfig, runId: string, marker: Evide
 export async function captureDifferentialEvidence(config: CaptureConfig): Promise<CaptureResult> {
   const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}`;
   const outputRoot = path.resolve(config.outputRoot ?? path.join(config.sampleRoot, ".breakpilot/evidence/differential"));
+  const evidenceSegments = outputRoot.split(path.sep);
+  const evidenceIndex = evidenceSegments.lastIndexOf(".breakpilot");
+  if (
+    evidenceIndex < 0 ||
+    evidenceSegments[evidenceIndex + 1] !== "evidence" ||
+    evidenceSegments[evidenceIndex + 2] !== "differential"
+  ) {
+    throw new EvidenceVerificationError(
+      "capture",
+      "$.outputRoot",
+      "Raw evidence output must remain below .breakpilot/evidence/differential."
+    );
+  }
+  let hub: URL;
+  let bridge: URL;
+  try {
+    hub = new URL(config.hubUrl);
+    bridge = new URL(config.bridgeUrl);
+  } catch {
+    throw new EvidenceVerificationError("capture", "$.hubUrl", "Evidence endpoints are invalid.");
+  }
+  if (hub.hostname !== bridge.hostname || hub.port !== bridge.port || bridge.pathname !== "/bridge") {
+    throw new EvidenceVerificationError("capture", "$.bridgeUrl", "Hub and bridge must use the same one-port endpoint.");
+  }
   const directory = path.join(outputRoot, runId);
-  const sourcePath = path.resolve(config.sampleRoot, config.sourceMarker.path);
-  if (!sourcePath.startsWith(`${path.resolve(config.sampleRoot)}${path.sep}`)) {
+  const sampleRoot = await realpath(config.sampleRoot);
+  const sourcePath = await realpath(path.resolve(sampleRoot, config.sourceMarker.path));
+  if (!sourcePath.startsWith(`${sampleRoot}${path.sep}`)) {
     throw new EvidenceVerificationError("source", "$.sourceMarker.path", "Source marker escapes the sample root.");
   }
   const source = await readFile(sourcePath, "utf8");
@@ -245,8 +277,9 @@ export async function captureDifferentialEvidence(config: CaptureConfig): Promis
         }
       }
     }
-  } catch {
+  } catch (error) {
     for (const client of Object.values(clients)) client?.close();
+    if (error instanceof EvidenceVerificationError) throw error;
     const manifest = unavailableManifest(config, runId, marker);
     await atomicJson(path.join(directory, "manifest.json"), manifest);
     return { directory, manifest, error: { code: INFRASTRUCTURE_CODE, message: "Debugger MCP infrastructure was unavailable or did not complete the scenario." } };

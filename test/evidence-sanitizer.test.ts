@@ -40,6 +40,10 @@ test("sanitization fails closed without echoing secret values", () => {
       return true;
     }
   );
+  assert.throws(
+    () => sanitizeTranscript("breakpilot", [{ ...entry, payload: { "x-api-key": "short-secret" } }]),
+    EvidenceVerificationError
+  );
 });
 
 test("provider identities cannot cross transcript boundaries", () => {

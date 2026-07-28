@@ -19,6 +19,7 @@ process.stdin.on("data", (chunk) => {
       })}\n`);
       continue;
     }
+    if (message.id === undefined) continue;
     calls += 1;
     if (provider === "idea" && message.params?.arguments?.failOnce === true && calls === 1) {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "transient debugger failure" } })}\n`);

@@ -67,3 +67,21 @@ test("source marker mismatch fails before debugger processes start", async () =>
   config.sourceMarker.lineTextSha256 = "0".repeat(64);
   await assert.rejects(() => captureDifferentialEvidence(config), EvidenceVerificationError);
 });
+
+test("raw capture cannot be redirected outside the ignored evidence tree", async () => {
+  const config = await fakeConfig();
+  config.outputRoot = path.join(config.sampleRoot, "unsafe-output");
+  await assert.rejects(
+    () => captureDifferentialEvidence(config),
+    (error: unknown) => error instanceof EvidenceVerificationError && error.path === "$.outputRoot"
+  );
+});
+
+test("capture rejects obsolete split-port hub and bridge configuration", async () => {
+  const config = await fakeConfig();
+  config.bridgeUrl = "ws://127.0.0.1:27891/bridge";
+  await assert.rejects(
+    () => captureDifferentialEvidence(config),
+    (error: unknown) => error instanceof EvidenceVerificationError && error.path === "$.bridgeUrl"
+  );
+});
