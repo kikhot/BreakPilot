@@ -8,6 +8,7 @@ import com.intellij.execution.RunManager
 import com.intellij.execution.RunnerAndConfigurationSettings
 import com.intellij.execution.actions.ConfigurationContext
 import com.intellij.execution.executors.DefaultDebugExecutor
+import com.intellij.execution.runners.ExecutionEnvironmentBuilder
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
@@ -30,6 +31,7 @@ class CommandExecutor(
     fun handle(message: BridgeMessage) {
         when (message.type) {
             MessageTypes.AgentStartDebug -> ApplicationManager.getApplication().invokeLater { startDebug(message) }
+            MessageTypes.AgentRequestStack -> requestStack(message)
             MessageTypes.AgentContinue -> execute(message, "continue") { it.resume() }
             MessageTypes.AgentPause -> execute(message, "pause") { it.pause() }
             MessageTypes.AgentStepOver -> execute(message, "step_over") { it.stepOver(false) }
@@ -53,8 +55,7 @@ class CommandExecutor(
                 return
             }
             try {
-                ProgramRunnerUtil.executeConfiguration(settings, DefaultDebugExecutor.getDebugExecutorInstance())
-                sendResult(message, "start_debug", mapOf("ok" to true, "runConfigName" to runConfigName))
+                executeWithOrigin(settings, message)
             } catch (error: Throwable) {
                 sendError(message, "start_debug", "IDE_COMMAND_FAILED", error.message ?: error.javaClass.name)
             }
@@ -86,18 +87,7 @@ class CommandExecutor(
             if (!runManager.hasSettings(target.settings)) {
                 runManager.setTemporaryConfiguration(target.settings)
             }
-            ProgramRunnerUtil.executeConfiguration(target.settings, DefaultDebugExecutor.getDebugExecutorInstance())
-            sendResult(
-                message,
-                "start_debug",
-                mapOf(
-                    "ok" to true,
-                    "filePath" to sourcePath,
-                    "line" to line,
-                    "configurationName" to target.settings.name,
-                    "sourceElement" to target.sourceElement
-                )
-            )
+            executeWithOrigin(target.settings, message)
         } catch (error: Throwable) {
             sendError(message, "start_debug", "IDE_COMMAND_FAILED", error.message ?: error.javaClass.name)
         }
@@ -152,6 +142,8 @@ class CommandExecutor(
                 requestId = message.requestId,
                 sessionId = message.sessionId,
                 ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 result = mapOf("configurations" to configurations)
             )
         )
@@ -185,6 +177,8 @@ class CommandExecutor(
                 requestId = message.requestId,
                 sessionId = message.sessionId,
                 ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 result = mapOf(
                     "filePath" to sourcePath,
                     "runPoints" to runPoints
@@ -200,6 +194,8 @@ class CommandExecutor(
                 requestId = message.requestId,
                 sessionId = message.sessionId,
                 ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 error = mapOf(
                     "code" to code,
                     "message" to text
@@ -215,6 +211,7 @@ class CommandExecutor(
             return
         }
         try {
+            tracker.armOrigin(message.ideSessionId, message.originRequestId ?: message.requestId)
             action(session)
             sendResult(message, command, mapOf("ok" to true))
         } catch (error: Throwable) {
@@ -239,6 +236,14 @@ class CommandExecutor(
     }
 
     private fun setVariable(message: BridgeMessage) {
+        val ref = message.ref as? String
+        if (ref != null) {
+            variableReader.setNativeValue(message.ideSessionId, ref, message.newValue, message.expectedPauseEpoch) { result, error ->
+                if (error != null) sendError(message, "set_variable", error, error)
+                else sendResult(message, "set_variable", result ?: emptyMap())
+            }
+            return
+        }
         if (message.path.isEmpty() || message.newValue.isNullOrBlank()) {
             sendError(message, "set_variable", "INVALID_ARGUMENT", "path and newValue are required.")
             return
@@ -289,6 +294,8 @@ class CommandExecutor(
                 requestId = message.requestId,
                 sessionId = message.sessionId,
                 ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 command = command,
                 result = result
             )
@@ -302,6 +309,8 @@ class CommandExecutor(
                 requestId = message.requestId,
                 sessionId = message.sessionId,
                 ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 command = command,
                 error = mapOf(
                     "code" to code,
@@ -309,5 +318,39 @@ class CommandExecutor(
                 )
             )
         )
+    }
+
+    private fun executeWithOrigin(settings: RunnerAndConfigurationSettings, message: BridgeMessage) {
+        val environment = ExecutionEnvironmentBuilder
+            .create(DefaultDebugExecutor.getDebugExecutorInstance(), settings)
+            .build()
+        environment.putUserData(BreakPilotExecutionOrigin.key, message.originRequestId ?: message.requestId)
+        ProgramRunnerUtil.executeConfiguration(environment, false, true)
+    }
+
+    private fun requestStack(message: BridgeMessage) {
+        val session = tracker.find(message.ideSessionId)
+        val epoch = tracker.pauseEpoch(message.ideSessionId)
+        if (session == null || epoch == null) {
+            sendError(message, "request_stack", "IDE_SESSION_NOT_FOUND", "IDE debug session was not found.")
+            return
+        }
+        if (message.expectedPauseEpoch != epoch) {
+            sendError(message, "request_stack", "STALE_RUNTIME_HANDLE", "Stack request belongs to another paused state.")
+            return
+        }
+        StackReader().read(session, message.threadId, message.offset ?: 0, message.limit ?: 20, epoch) { page ->
+            bridge.send(
+                BridgeMessage(
+                    type = MessageTypes.IdeStackSnapshot,
+                    requestId = message.requestId,
+                    sessionId = message.sessionId,
+                    ideSessionId = message.ideSessionId,
+                    originRequestId = message.originRequestId,
+                    pauseEpoch = epoch,
+                    result = page
+                )
+            )
+        }
     }
 }

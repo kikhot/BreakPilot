@@ -27,6 +27,12 @@ class VariableReader(
     private val tracker: IdeSessionTracker
 ) {
     private val presentationAlarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, project)
+    private val handles = PauseScopedHandleRegistry()
+    private val modifier = IdeaValueModifierAdapter()
+
+    init {
+        tracker.onEpochChanged { handles.invalidate(it) }
+    }
 
     fun handle(message: BridgeMessage, bridge: BridgeClient) {
         val session = tracker.find(message.ideSessionId)
@@ -37,6 +43,8 @@ class VariableReader(
                     requestId = message.requestId,
                     sessionId = message.sessionId,
                     ideSessionId = message.ideSessionId,
+                    originRequestId = message.originRequestId,
+                    pauseEpoch = message.expectedPauseEpoch,
                     error = mapOf(
                         "code" to "IDE_SESSION_NOT_FOUND",
                         "message" to "IDE debug session was not found."
@@ -46,6 +54,35 @@ class VariableReader(
             return
         }
         val options = message.options
+        val epoch = tracker.pauseEpoch(message.ideSessionId)
+        if (message.expectedPauseEpoch != null && message.expectedPauseEpoch != epoch) {
+            sendError(bridge, message, "STALE_RUNTIME_HANDLE", "Runtime request belongs to another paused state.")
+            return
+        }
+        val ref = message.ref as? String
+        if (ref != null) {
+            val entry = handles.resolve(ref, message.ideSessionId ?: "", epoch ?: -1)
+            if (entry == null) {
+                sendError(bridge, message, "STALE_RUNTIME_HANDLE", "Runtime reference is stale or foreign.")
+                return
+            }
+            entry.value.computeChildren(CollectingCompositeNode(numberOption(options, "maxItems", 20)) { children ->
+                val items = mutableListOf<Map<String, Any?>>()
+                if (children.isEmpty()) {
+                    sendRefResult(bridge, message, ref, epoch ?: 0, items)
+                    return@CollectingCompositeNode
+                }
+                var remaining = children.size
+                children.forEach { (name, value) ->
+                    readValue(name, value, 20, 1, 2000, sessionId = message.ideSessionId, pauseEpoch = epoch) { variable ->
+                        items += variable
+                        remaining -= 1
+                        if (remaining == 0) sendRefResult(bridge, message, ref, epoch ?: 0, items)
+                    }
+                }
+            })
+            return
+        }
         currentSnapshot(session, options) { snapshot ->
             bridge.send(
                 BridgeMessage(
@@ -53,6 +90,8 @@ class VariableReader(
                     requestId = message.requestId,
                     sessionId = message.sessionId,
                     ideSessionId = message.ideSessionId,
+                    originRequestId = message.originRequestId,
+                    pauseEpoch = epoch,
                     snapshot = snapshot
                 )
             )
@@ -74,7 +113,7 @@ class VariableReader(
                 callback(baseSnapshot(session, stack.threads, emptyList(), emptyMap(), options, stack.threadId, true))
                 return@readStackSnapshot
             }
-            readFrameVariables(frame, maxItems, maxDepth, maxStringLength) { variables ->
+            readFrameVariables(session, frame, maxItems, maxDepth, maxStringLength) { variables ->
                 callback(
                     baseSnapshot(
                         session,
@@ -106,7 +145,7 @@ class VariableReader(
             XExpressionImpl.fromText(expression),
             object : XDebuggerEvaluator.XEvaluationCallback {
                 override fun evaluated(result: XValue) {
-                    readValue("result", result, 10, 1, 2000, 5000) { variable ->
+                    readValue("result", result, 10, 1, 2000, 5000, ideSessionId, tracker.pauseEpoch(ideSessionId)) { variable ->
                         callback(mapOf("value" to variable), null)
                     }
                 }
@@ -261,6 +300,7 @@ class VariableReader(
     }
 
     private fun readFrameVariables(
+        session: XDebugSession,
         frame: XStackFrame,
         maxItems: Int,
         maxDepth: Int,
@@ -275,7 +315,7 @@ class VariableReader(
             }
             var remaining = children.size
             children.forEach { (name, value) ->
-                readValue(name, value, maxItems, maxDepth, maxStringLength) { variable ->
+                readValue(name, value, maxItems, maxDepth, maxStringLength, sessionId = tracker.sessionId(session), pauseEpoch = tracker.pauseEpoch(tracker.sessionId(session))) { variable ->
                     output[name] = variable
                     remaining -= 1
                     if (remaining == 0) callback(output)
@@ -292,6 +332,8 @@ class VariableReader(
         maxDepth: Int,
         maxStringLength: Int,
         presentationTimeoutMs: Long = 1000,
+        sessionId: String? = null,
+        pauseEpoch: Long? = null,
         callback: (Map<String, Any?>) -> Unit
     ) {
         readPresentation(value, maxStringLength, presentationTimeoutMs) { presentation ->
@@ -303,6 +345,24 @@ class VariableReader(
                 "variablesReference" to 0,
                 "truncated" to false
             )
+            if (sessionId != null && pauseEpoch != null) {
+                val ref = handles.register(
+                    IdeaHandleEntry(
+                        sessionId = sessionId,
+                        pauseEpoch = pauseEpoch,
+                        value = value,
+                        name = name,
+                        frameKey = null,
+                        evaluateName = value.evaluationExpression,
+                        modifiable = value.modifier != null
+                    )
+                )
+                result["ref"] = ref
+                result["variablesReference"] = ref
+                result["pauseEpoch"] = pauseEpoch
+                result["modifiable"] = value.modifier != null
+                result["mutationMode"] = if (value.modifier != null) "native" else null
+            }
             if (!presentation.type.isNullOrBlank()) {
                 result["type"] = presentation.type
             }
@@ -336,7 +396,7 @@ class VariableReader(
                         val nested = linkedMapOf<String, Any?>()
                         var remaining = children.size
                         children.forEach { (childName, childValue) ->
-                            readValue(childName, childValue, maxItems, maxDepth - 1, maxStringLength) { child ->
+                            readValue(childName, childValue, maxItems, maxDepth - 1, maxStringLength, sessionId = sessionId, pauseEpoch = pauseEpoch) { child ->
                                 nested[childName] = child
                                 remaining -= 1
                                 if (remaining == 0) {
@@ -374,6 +434,75 @@ class VariableReader(
         } catch (error: Throwable) {
             node.finishUnavailable(error.message ?: error.javaClass.name)
         }
+    }
+
+    fun setNativeValue(
+        ideSessionId: String?,
+        ref: String,
+        newValue: String?,
+        expectedEpoch: Long?,
+        callback: (Map<String, Any?>?, String?) -> Unit
+    ) {
+        if (ideSessionId == null || newValue == null || expectedEpoch == null) {
+            callback(null, "INVALID_ARGUMENT")
+            return
+        }
+        val entry = handles.resolve(ref, ideSessionId, expectedEpoch)
+        if (entry == null) {
+            callback(null, "STALE_RUNTIME_HANDLE")
+            return
+        }
+        modifier.setValue(
+            entry,
+            newValue,
+            expectedEpoch,
+            { tracker.pauseEpoch(ideSessionId) },
+            { done -> readPresentation(entry.value, 2000) { presentation -> done(presentation.valuePreview) } }
+        ) { outcome ->
+            if (!outcome.applied && outcome.message != null) {
+                callback(null, outcome.message)
+            } else {
+                callback(
+                    mapOf(
+                        "ref" to ref,
+                        "oldValue" to outcome.oldValue,
+                        "newValue" to outcome.newValue,
+                        "applied" to outcome.applied,
+                        "verified" to outcome.verified,
+                        "mutationMode" to "native"
+                    ),
+                    null
+                )
+            }
+        }
+    }
+
+    private fun sendError(bridge: BridgeClient, message: BridgeMessage, code: String, text: String) {
+        bridge.send(
+            BridgeMessage(
+                type = MessageTypes.IdeVariablesSnapshot,
+                requestId = message.requestId,
+                sessionId = message.sessionId,
+                ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
+                error = mapOf("code" to code, "message" to text)
+            )
+        )
+    }
+
+    private fun sendRefResult(bridge: BridgeClient, message: BridgeMessage, ref: String, epoch: Long, items: List<Map<String, Any?>>) {
+        bridge.send(
+            BridgeMessage(
+                type = MessageTypes.IdeVariablesSnapshot,
+                requestId = message.requestId,
+                sessionId = message.sessionId,
+                ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = epoch,
+                result = mapOf("ref" to ref, "pauseEpoch" to epoch, "items" to items)
+            )
+        )
     }
 
     private fun frameMap(frame: XStackFrame): Map<String, Any?> {

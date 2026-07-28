@@ -3,6 +3,7 @@ import { BridgeClient } from "../bridge/BridgeClient";
 import { AnyRecord, BridgeMessage, MessageTypes } from "../bridge/MessageProtocol";
 import { DebugSessionTracker } from "./DebugSessionTracker";
 import { VariableReader } from "./VariableReader";
+import { StackReader } from "./StackReader";
 
 export class CommandExecutor {
   constructor(
@@ -13,6 +14,12 @@ export class CommandExecutor {
 
   async handle(message: BridgeMessage) {
     switch (message.type) {
+      case MessageTypes.AgentStartDebug:
+        await this.startDebug(message);
+        break;
+      case MessageTypes.AgentRequestStack:
+        await this.readStack(message);
+        break;
       case MessageTypes.AgentContinue:
         await this.executeDebugCommand(message, "continue", "workbench.action.debug.continue");
         break;
@@ -62,6 +69,7 @@ export class CommandExecutor {
       return;
     }
     try {
+      this.tracker.armOrigin(message.ideSessionId, message.originRequestId ?? message.requestId);
       await vscode.commands.executeCommand(vscodeCommand);
       this.sendResult(message, command, { ok: true });
     } catch (error) {
@@ -108,9 +116,12 @@ export class CommandExecutor {
       ...(message.payload ?? {}),
       frameId: message.frameId ?? message.options?.frameId ?? message.payload?.frameId,
       threadId: message.threadId ?? message.options?.threadId ?? message.payload?.threadId
-    });
+    }, message.ref);
     if (response.error) {
-      this.sendError(message, "set_variable", "SET_VARIABLE_FAILED", response.error);
+      const code = response.error === "STALE_RUNTIME_HANDLE" || response.error === "VARIABLE_NOT_MUTABLE"
+        ? response.error
+        : "SET_VARIABLE_FAILED";
+      this.sendError(message, "set_variable", code, response.error);
       return;
     }
     this.sendResult(message, "set_variable", response.result ?? {});
@@ -145,6 +156,8 @@ export class CommandExecutor {
         requestId: message.requestId,
         sessionId: message.sessionId,
         ideSessionId: message.ideSessionId,
+        originRequestId: message.originRequestId,
+        pauseEpoch: message.expectedPauseEpoch,
         result: {
           filePath: message.filePath ?? message.file,
           runPoints: []
@@ -166,8 +179,66 @@ export class CommandExecutor {
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      originRequestId: message.originRequestId,
+      pauseEpoch: message.expectedPauseEpoch,
       result: { configurations }
     });
+  }
+
+  private async startDebug(message: BridgeMessage) {
+    const configurations = vscode.workspace.getConfiguration("launch").get<AnyRecord[]>("configurations", []);
+    const runConfigName = typeof message.runConfigName === "string" ? message.runConfigName : undefined;
+    const selected = runConfigName
+      ? configurations.find((configuration) => configuration.name === runConfigName)
+      : configurations[0];
+    if (!selected) {
+      this.sendError(message, "start_debug", "RUN_CONFIG_NOT_FOUND", "VS Code launch configuration was not found.");
+      return;
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const configuration: vscode.DebugConfiguration = {
+      ...selected,
+      type: String(selected.type ?? ""),
+      name: String(selected.name ?? runConfigName ?? "BreakPilot"),
+      request: String(selected.request ?? "launch"),
+      __breakpilotOriginRequestId: message.originRequestId ?? message.requestId
+    };
+    const started = await vscode.debug.startDebugging(folder, configuration);
+    if (!started) {
+      this.sendError(message, "start_debug", "IDE_COMMAND_FAILED", "VS Code rejected the debug start request.");
+    }
+  }
+
+  private async readStack(message: BridgeMessage) {
+    const session = this.targetSession(message);
+    const pauseEpoch = this.tracker.pauseEpoch(message.ideSessionId);
+    if (!session || pauseEpoch === undefined) {
+      this.sendError(message, "request_stack", "IDE_SESSION_NOT_FOUND", "VS Code debug session was not found.");
+      return;
+    }
+    if (message.expectedPauseEpoch !== pauseEpoch) {
+      this.sendError(message, "request_stack", "STALE_RUNTIME_HANDLE", "Stack request belongs to another paused state.");
+      return;
+    }
+    const threadId = typeof message.threadId === "number" ? message.threadId : this.tracker.sessionInfo(message.ideSessionId)?.threadId;
+    if (threadId === undefined) {
+      this.sendError(message, "request_stack", "INVALID_ARGUMENT", "A paused thread is required.");
+      return;
+    }
+    try {
+      const page = await new StackReader(session).read(threadId, message.offset ?? 0, message.limit ?? 20, pauseEpoch);
+      this.bridge.send({
+        type: MessageTypes.IdeStackSnapshot,
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        ideSessionId: message.ideSessionId,
+        originRequestId: message.originRequestId,
+        pauseEpoch,
+        result: page
+      });
+    } catch (error) {
+      this.sendError(message, "request_stack", "STACK_READ_FAILED", this.errorMessage(error));
+    }
   }
 
   private targetSession(message: BridgeMessage): vscode.DebugSession | undefined {
@@ -191,6 +262,8 @@ export class CommandExecutor {
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      originRequestId: message.originRequestId,
+      pauseEpoch: message.expectedPauseEpoch,
       command,
       result
     });
@@ -202,6 +275,8 @@ export class CommandExecutor {
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      originRequestId: message.originRequestId,
+      pauseEpoch: message.expectedPauseEpoch,
       command,
       error: {
         code,

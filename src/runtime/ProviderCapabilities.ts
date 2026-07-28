@@ -92,7 +92,7 @@ export function ideProviderCapabilities(raw: AnyRecord = {}): RuntimeProviderCap
         : setVariableMode === "evaluateAssignment"
           ? "evaluateAssignment"
           : "native",
-    breakpointUpdate: "unsupported",
+    breakpointUpdate: raw.breakpointUpdate === true ? "fallback" : "unsupported",
     conditionalBreakpoints: enabled(raw, "conditionalBreakpoints", "supportsConditionalBreakpoints")
       ? "native"
       : "unsupported",
@@ -102,6 +102,6 @@ export function ideProviderCapabilities(raw: AnyRecord = {}): RuntimeProviderCap
     tracepoints: enabled(raw, "tracepoints", "logPoints", "supportsLogPoints")
       ? "native"
       : "unsupported",
-    eventDrain: "unsupported"
+    eventDrain: raw.eventStream === true ? "native" : "unsupported"
   };
 }

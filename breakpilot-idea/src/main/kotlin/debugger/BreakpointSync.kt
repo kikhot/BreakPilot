@@ -45,6 +45,10 @@ class BreakpointSync(
                 BridgeMessage(
                     type = MessageTypes.IdeBreakpointAdded,
                     requestId = requestId,
+                    sessionId = message.sessionId,
+                    ideSessionId = message.ideSessionId,
+                    originRequestId = message.originRequestId,
+                    pauseEpoch = message.expectedPauseEpoch,
                     breakpointId = breakpoint.id,
                     breakpoint = breakpoint,
                     error = mapOf(
@@ -65,6 +69,10 @@ class BreakpointSync(
                     BridgeMessage(
                         type = MessageTypes.IdeBreakpointAdded,
                         requestId = requestId,
+                        sessionId = message.sessionId,
+                        ideSessionId = message.ideSessionId,
+                        originRequestId = message.originRequestId,
+                        pauseEpoch = message.expectedPauseEpoch,
                         breakpointId = breakpoint.id,
                         breakpoint = breakpoint,
                         error = mapOf(
@@ -90,6 +98,10 @@ class BreakpointSync(
             BridgeMessage(
                 type = MessageTypes.IdeBreakpointAdded,
                 requestId = requestId,
+                sessionId = message.sessionId,
+                ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 breakpointId = breakpoint.id,
                 breakpoint = breakpoint.copy(verified = true)
             )
@@ -111,6 +123,10 @@ class BreakpointSync(
             BridgeMessage(
                 type = MessageTypes.IdeBreakpointRemoved,
                 requestId = message.requestId,
+                sessionId = message.sessionId,
+                ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 breakpointId = agentId,
                 removed = removed
             )
@@ -156,6 +172,8 @@ class BreakpointSync(
                 requestId = message.requestId,
                 sessionId = message.sessionId,
                 ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 result = mapOf("breakpoints" to breakpoints)
             )
         )

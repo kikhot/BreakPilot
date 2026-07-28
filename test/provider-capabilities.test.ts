@@ -99,7 +99,8 @@ assert.deepEqual(ideProviderCapabilities({
   stepping: "native",
   runToLine: "native",
   variableReferences: "snapshot",
-  setValue: "native"
+  setValue: "native",
+  breakpointUpdate: "fallback"
 });
 assert.deepEqual(ideProviderCapabilities({
   setVariable: true,

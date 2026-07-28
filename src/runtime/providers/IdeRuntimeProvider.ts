@@ -13,6 +13,8 @@ import type {
   RunToLineArgs,
   RunToLineResult,
   RuntimeDebugProvider,
+  DrainEventsArgs,
+  RuntimeEventPage,
   RuntimeStackRequest,
   RuntimeStackResult,
   ThreadId
@@ -37,6 +39,7 @@ import { makeId } from "../../utils/ids.ts";
 import { createDeferred, withTimeout } from "../../utils/timeout.ts";
 import type { RuntimeProviderCapabilities } from "../../types/capabilities.ts";
 import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../ProviderCapabilities.ts";
+import { RuntimeEventBuffer } from "../RuntimeEventBuffer.ts";
 
 type StopTransitionBoundary = {
   operation: string;
@@ -56,6 +59,7 @@ export interface IdeRuntimeProviderOptions {
   workspaceRoot: string;
   language?: DebugLanguage;
   confirmationTimeoutMs?: number;
+  runtimeEvents?: RuntimeEventBuffer;
 }
 
 export class IdeRuntimeProvider implements RuntimeDebugProvider {
@@ -68,6 +72,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   language: DebugLanguage;
   confirmationTimeoutMs: number;
   pendingStopTransition: StopTransitionBoundary | null;
+  runtimeEvents?: RuntimeEventBuffer;
 
   constructor({
     sessionId,
@@ -75,7 +80,8 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     ideSession,
     workspaceRoot,
     language = ideSession.language ?? "idea",
-    confirmationTimeoutMs = 30000
+    confirmationTimeoutMs = 30000,
+    runtimeEvents
   }: IdeRuntimeProviderOptions) {
     this.sessionId = sessionId;
     this.bridge = bridge;
@@ -84,6 +90,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     this.workspaceRoot = workspaceRoot;
     this.language = language;
     this.confirmationTimeoutMs = confirmationTimeoutMs;
+    this.runtimeEvents = runtimeEvents;
     this.pendingStopTransition = null;
   }
 
@@ -94,8 +101,10 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     const features = sessionInfo?.negotiatedDebuggerFeatures;
     return ideProviderCapabilities({
       ...mergeIdeCapabilityRecords(client, session),
+      breakpointUpdate: features?.breakpointUpdate === true,
       variableHandles: features?.variableHandles === true,
-      nativeSetVariable: features?.nativeSetVariable === true
+      nativeSetVariable: features?.nativeSetVariable === true,
+      eventStream: features?.eventStream === true && Boolean(this.runtimeEvents)
     });
   }
 
@@ -103,7 +112,40 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     return this.#sessionInfo()?.threadId ?? null;
   }
 
-  async setBreakpoints(_filePath: string, breakpoints: BreakpointRecord[]): Promise<DapBreakpoint[]> {
+  async drainEvents(args: DrainEventsArgs = {}): Promise<RuntimeEventPage> {
+    if (!this.runtimeEvents || this.capabilities.eventDrain !== "native") {
+      throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "IDE event stream is not available.", {
+        sessionId: this.sessionId,
+        ideSessionId: this.ideSessionId,
+        capability: "eventDrain"
+      });
+    }
+    return this.runtimeEvents.read(args);
+  }
+
+  async setBreakpoints(filePath: string, breakpoints: BreakpointRecord[]): Promise<DapBreakpoint[]> {
+    if (this.capabilities.breakpointUpdate !== "unsupported") {
+      const desiredIds = new Set(breakpoints.map((breakpoint) => breakpoint.id));
+      const current = await this.listBreakpoints({ filePath, owner: "agent", includeDisabled: true });
+      const normalizedSource = path.resolve(filePath);
+      for (const breakpoint of current) {
+        if (
+          breakpoint.owner !== "agent" ||
+          path.resolve(breakpoint.file) !== normalizedSource ||
+          desiredIds.has(breakpoint.id)
+        ) {
+          continue;
+        }
+        const removal = await this.removeBreakpoint(breakpoint);
+        if (removal.removed !== true) {
+          throw new BreakPilotError(
+            ErrorCodes.BREAKPOINT_UPDATE_FAILED,
+            "IDE did not acknowledge removal of a stale BreakPilot breakpoint.",
+            { sessionId: this.sessionId, breakpointId: breakpoint.id, filePath }
+          );
+        }
+      }
+    }
     const results: DapBreakpoint[] = [];
     for (const breakpoint of breakpoints) {
       const response = await this.#request(
@@ -155,9 +197,15 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       : Array.isArray(response.breakpoints)
         ? response.breakpoints
         : [];
-    return rawBreakpoints
+    const breakpoints = rawBreakpoints
       .map((breakpoint, index) => this.#breakpointFromIde(breakpoint, index))
       .filter((breakpoint): breakpoint is BreakpointRecord => Boolean(breakpoint));
+    return breakpoints.filter((breakpoint) => {
+      if (filter.filePath && path.resolve(breakpoint.file) !== path.resolve(filter.filePath)) return false;
+      if (filter.owner && filter.owner !== "all" && breakpoint.owner !== filter.owner) return false;
+      if (filter.includeDisabled === false && !breakpoint.enabled) return false;
+      return true;
+    });
   }
 
   async waitForBreakpoint(timeoutMs = 30000): Promise<StoppedEvent> {

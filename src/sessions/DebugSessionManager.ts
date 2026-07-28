@@ -1031,7 +1031,7 @@ export class DebugSessionManager {
     // an unresolved session must not silently fall through to project-level
     // IDE breakpoint creation.
     const session = this.#resolveSession(args);
-    if (session.provider.kind !== "dap" || session.provider.capabilities.breakpointUpdate === "unsupported") {
+    if (session.provider.capabilities.breakpointUpdate === "unsupported") {
       this.#throwBreakpointUpdateUnsupported(session.sessionId, session.provider.kind);
     }
     this.coordinator.assertCanControl(session, SessionOwner.MCP, "update breakpoint");
@@ -1206,7 +1206,8 @@ export class DebugSessionManager {
       ideSession,
       workspaceRoot,
       language: args.lang ?? args.language ?? ideSession.language ?? "idea",
-      confirmationTimeoutMs: this.policy.ide.confirmationTimeoutMs
+      confirmationTimeoutMs: this.policy.ide.confirmationTimeoutMs,
+      runtimeEvents
     });
     const record: DebugSessionRecord = {
       sessionId,
@@ -2646,7 +2647,6 @@ export class DebugSessionManager {
   }
 
   #archiveRuntimeEvents(session: DebugSessionRecord): void {
-    if (session.provider.kind !== "dap") return;
     const events = session.runtimeEvents;
     if (!events || events.read({ cursor: 0, limit: 1 }).items.length === 0) return;
     this.#archivedRuntimeEvents.delete(session.sessionId);
@@ -2718,6 +2718,9 @@ export class DebugSessionManager {
     this.ideBridge.on(IdeMessageTypes.IDE_SESSION_TERMINATED, (event: unknown) => {
       this.#applyIdeLifecycleEvent(event, SessionState.TERMINATED, "ide_session_terminated");
     });
+    this.ideBridge.on(IdeMessageTypes.IDE_DEBUG_EVENT, (event: unknown) => {
+      this.#appendIdeRuntimeEvent(event);
+    });
     this.ideBridge.on("disconnect", (event: unknown) => {
       const clientId = this.#decodeIdeBridgeClientId(event);
       if (!clientId) return;
@@ -2735,6 +2738,43 @@ export class DebugSessionManager {
     if (!clientId || !ideSessionId) return;
     this.#updateAdoptedIdeSession(ideSessionId, clientId, state);
     if (cleanupReason) void this.#cleanupAdoptedIdeSession(ideSessionId, clientId, cleanupReason);
+  }
+
+  #appendIdeRuntimeEvent(event: unknown): void {
+    const decoded = this.#decodeIdeBridgeEvent(event);
+    if (!decoded) return;
+    const clientId = this.#decodedBridgeOpaqueId(decoded.clientId);
+    const ideSessionId = this.#decodedBridgeOpaqueId(decoded.message.ideSessionId);
+    if (!clientId || !ideSessionId) return;
+    const record = [...this.sessions.sessions.values()].find((session) =>
+      this.#matchesAuthoritativeIdeTuple(session, clientId, ideSessionId)
+    );
+    if (!record || !(record.provider instanceof IdeRuntimeProvider)) return;
+    const liveSession = this.ideBridge?.registry.findSession(ideSessionId, clientId);
+    if (!liveSession?.negotiatedDebuggerFeatures.eventStream) return;
+    if (
+      liveSession.pauseEpoch !== undefined &&
+      decoded.message.pauseEpoch !== liveSession.pauseEpoch
+    ) {
+      return;
+    }
+    const rawEvent = this.#safeOwnDataRecord(decoded.message.event);
+    if (!rawEvent) return;
+    const kind = rawEvent.kind;
+    if (typeof kind !== "string" || !runtimeEventKinds.includes(kind as RuntimeEvent["kind"])) return;
+    const runtimeEvent: RuntimeEventInput = { kind: kind as RuntimeEvent["kind"] };
+    if (typeof rawEvent.breakpointId === "string") runtimeEvent.breakpointId = rawEvent.breakpointId;
+    if (
+      typeof rawEvent.threadId === "string" ||
+      (typeof rawEvent.threadId === "number" && Number.isFinite(rawEvent.threadId))
+    ) {
+      runtimeEvent.threadId = rawEvent.threadId;
+    }
+    if (typeof rawEvent.message === "string") runtimeEvent.message = rawEvent.message;
+    if (typeof rawEvent.category === "string") runtimeEvent.category = rawEvent.category;
+    if (rawEvent.position !== undefined) runtimeEvent.position = rawEvent.position;
+    if (rawEvent.data !== undefined) runtimeEvent.data = rawEvent.data;
+    this.#runtimeEventsFor(record.sessionId).append(runtimeEvent);
   }
 
   #decodeIdeBridgeEvent(event: unknown): { clientId?: string; message: AnyRecord } | null {

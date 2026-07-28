@@ -125,6 +125,8 @@ class ConsentManager(private val project: Project) {
                 confirmationId = message.confirmationId,
                 sessionId = message.sessionId,
                 ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch,
                 action = message.action ?: "allow",
                 rememberScope = rememberScope
             )
@@ -137,7 +139,9 @@ class ConsentManager(private val project: Project) {
                 type = MessageTypes.UserRejectContinue,
                 confirmationId = message.confirmationId,
                 sessionId = message.sessionId,
-                ideSessionId = message.ideSessionId
+                ideSessionId = message.ideSessionId,
+                originRequestId = message.originRequestId,
+                pauseEpoch = message.expectedPauseEpoch
             )
         )
     }

@@ -117,6 +117,8 @@ export class BreakpointSync {
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      pauseEpoch: message.expectedPauseEpoch,
+      originRequestId: message.originRequestId,
       breakpointId: breakpoint.id,
       breakpoint: {
         ...breakpoint,
@@ -145,6 +147,8 @@ export class BreakpointSync {
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      pauseEpoch: message.expectedPauseEpoch,
+      originRequestId: message.originRequestId,
       breakpointId: agentId,
       removed
     });
@@ -175,6 +179,8 @@ export class BreakpointSync {
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      pauseEpoch: message.expectedPauseEpoch,
+      originRequestId: message.originRequestId,
       result: { breakpoints }
     });
   }
@@ -204,6 +210,8 @@ export class BreakpointSync {
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      pauseEpoch: message.expectedPauseEpoch,
+      originRequestId: message.originRequestId,
       breakpointId: breakpoint.id,
       breakpoint,
       error: {

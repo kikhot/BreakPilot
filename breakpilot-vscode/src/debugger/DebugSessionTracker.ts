@@ -9,6 +9,10 @@ type StoredSession = {
   threadId?: number;
   topFrame?: AnyRecord;
   stopped?: AnyRecord;
+  pauseEpoch: number;
+  originRequestId?: string;
+  pendingOriginRequestId?: string;
+  debuggerFeatures: Record<string, boolean>;
 };
 
 type DebugStackItem = {
@@ -22,6 +26,7 @@ type DebugStackItem = {
 
 export class DebugSessionTracker {
   private readonly sessions = new Map<string, StoredSession>();
+  private readonly epochListeners = new Set<(ideSessionId: string) => void>();
 
   constructor(
     private readonly bridge: BridgeClient,
@@ -73,6 +78,20 @@ export class DebugSessionTracker {
     return active ? this.sessions.get(this.sessionId(active)) : undefined;
   }
 
+  onEpochChanged(listener: (ideSessionId: string) => void): vscode.Disposable {
+    this.epochListeners.add(listener);
+    return new vscode.Disposable(() => this.epochListeners.delete(listener));
+  }
+
+  pauseEpoch(ideSessionId?: string): number | undefined {
+    return this.sessionInfo(ideSessionId)?.pauseEpoch;
+  }
+
+  armOrigin(ideSessionId: string | undefined, originRequestId: string | undefined): void {
+    const info = this.sessionInfo(ideSessionId);
+    if (info && originRequestId) info.pendingOriginRequestId = originRequestId;
+  }
+
   async captureTopFrame(session: vscode.DebugSession, threadId?: number, frameId?: number): Promise<AnyRecord> {
     const resolvedThreadId = threadId ?? this.sessionInfo(this.sessionId(session))?.threadId;
     if (resolvedThreadId == null) {
@@ -98,15 +117,27 @@ export class DebugSessionTracker {
     this.sessions.set(ideSessionId, {
       session,
       ideSessionId,
-      state: "running"
+      state: "running",
+      pauseEpoch: 0,
+      originRequestId: this.originFromSession(session),
+      debuggerFeatures: {
+        breakpointUpdate: true,
+        eventStream: true,
+        stackPagination: true,
+        variableHandles: true,
+        nativeSetVariable: false,
+        causalDebugStart: true
+      }
     });
-    this.bridge.send(this.sessionMessage(MessageTypes.IdeSessionStarted, session, "running"));
   }
 
   private terminate(session: vscode.DebugSession) {
     const ideSessionId = this.sessionId(session);
     const info = this.sessions.get(ideSessionId);
-    if (info) info.state = "terminated";
+    if (info) {
+      info.state = "terminated";
+      this.advanceEpoch(info);
+    }
     this.onSessionTerminated(ideSessionId);
     this.bridge.send(this.sessionMessage(MessageTypes.IdeSessionTerminated, session, "terminated"));
     this.sessions.delete(ideSessionId);
@@ -126,6 +157,15 @@ export class DebugSessionTracker {
   }
 
   private async handleAdapterMessage(session: vscode.DebugSession, message: AnyRecord) {
+    if (message.type === "response" && message.command === "initialize" && message.success !== false) {
+      const info = this.sessions.get(this.sessionId(session));
+      if (info) {
+        const body = (message.body ?? {}) as AnyRecord;
+        info.debuggerFeatures.nativeSetVariable = body.supportsSetVariable === true;
+        this.bridge.send(this.sessionMessage(MessageTypes.IdeSessionStarted, session, info.state, info.stopped));
+      }
+      return;
+    }
     if (message.type !== "event") return;
     const event = String(message.event ?? "");
     const body = (message.body ?? {}) as AnyRecord;
@@ -140,6 +180,16 @@ export class DebugSessionTracker {
         topFrame
       };
       this.markPaused(session, stopped);
+      this.sendDebugEvent(session, "stopped", {
+        threadId,
+        position: this.positionFromFrame(topFrame),
+        data: {
+          reason: stopped.reason,
+          description: stopped.description,
+          allThreadsStopped: body.allThreadsStopped,
+          hitBreakpointIds: body.hitBreakpointIds
+        }
+      });
       if ((body.reason ?? "breakpoint") === "breakpoint") {
         this.bridge.send({
           ...this.sessionMessage(MessageTypes.IdeBreakpointHit, session, "paused", stopped),
@@ -151,6 +201,24 @@ export class DebugSessionTracker {
     }
     if (event === "continued") {
       this.markRunning(session, body);
+      this.sendDebugEvent(session, "continued", {
+        threadId: this.numberValue(body.threadId),
+        data: { allThreadsStopped: body.allThreadsContinued }
+      });
+      return;
+    }
+    if (event === "output") {
+      this.sendDebugEvent(session, "output", {
+        category: typeof body.category === "string" ? body.category : undefined,
+        message: typeof body.output === "string" ? body.output : undefined
+      });
+      return;
+    }
+    if (event === "thread" || event === "process" || event === "invalidated") {
+      this.sendDebugEvent(session, event === "invalidated" ? "invalidated" : event, {
+        threadId: this.numberValue(body.threadId),
+        data: body
+      });
       return;
     }
     if (event === "terminated" || event === "exited") {
@@ -163,10 +231,12 @@ export class DebugSessionTracker {
     const info = this.sessions.get(ideSessionId);
     if (!info) return;
     info.state = "paused";
+    this.advanceEpoch(info);
     info.threadId = this.numberValue(stopped.threadId);
     info.topFrame = stopped.topFrame as AnyRecord | undefined;
     info.stopped = stopped;
     this.bridge.send(this.sessionMessage(MessageTypes.IdeSessionPaused, session, "paused", stopped));
+    info.pendingOriginRequestId = undefined;
   }
 
   private markRunning(session: vscode.DebugSession, _body: AnyRecord = {}) {
@@ -175,6 +245,7 @@ export class DebugSessionTracker {
     if (info) {
       info.state = "running";
       info.stopped = undefined;
+      this.advanceEpoch(info);
     }
     this.bridge.send(this.sessionMessage(MessageTypes.IdeSessionResumed, session, "running"));
   }
@@ -218,8 +289,40 @@ export class DebugSessionTracker {
             description: stopped.description ?? "VS Code debug session paused.",
             topFrame
           }
-        : undefined
+        : undefined,
+      debuggerProtocolVersion: 2,
+      debuggerFeatures: info?.debuggerFeatures ?? this.bridge.debuggerFeatures(),
+      pauseEpoch: info?.pauseEpoch ?? 0,
+      originRequestId: info?.pendingOriginRequestId ?? info?.originRequestId
     };
+  }
+
+  private advanceEpoch(info: StoredSession): void {
+    info.pauseEpoch += 1;
+    for (const listener of this.epochListeners) listener(info.ideSessionId);
+  }
+
+  private originFromSession(session: vscode.DebugSession): string | undefined {
+    const value = session.configuration?.__breakpilotOriginRequestId;
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  }
+
+  private sendDebugEvent(session: vscode.DebugSession, kind: string, event: AnyRecord): void {
+    const info = this.sessions.get(this.sessionId(session));
+    if (!info) return;
+    this.bridge.send({
+      type: MessageTypes.IdeDebugEvent,
+      ideSessionId: info.ideSessionId,
+      pauseEpoch: info.pauseEpoch,
+      event: { kind, ...event }
+    });
+  }
+
+  private positionFromFrame(frame: AnyRecord): AnyRecord | undefined {
+    const source = frame.source as AnyRecord | undefined;
+    const filePath = typeof source?.path === "string" ? source.path : undefined;
+    const line = this.numberValue(frame.line);
+    return filePath || line ? { filePath, line } : undefined;
   }
 
   private frameFromStackItem(item: DebugStackItem): AnyRecord {

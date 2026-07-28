@@ -16,6 +16,9 @@ class IdeSessionTracker(
     private val onSessionTerminated: (String) -> Unit = {}
 ) {
     private val sessions = mutableMapOf<String, XDebugSession>()
+    private val pauseEpochs = mutableMapOf<String, Long>()
+    private val pendingOrigins = mutableMapOf<String, String>()
+    private val epochListeners = mutableListOf<(String) -> Unit>()
 
     fun start() {
         XDebuggerManager.getInstance(project).debugSessions.forEach { register(it) }
@@ -30,6 +33,7 @@ class IdeSessionTracker(
                     val session = debugProcess.session
                     val ideSessionId = sessionId(session)
                     sessions.remove(ideSessionId)
+                    advanceEpoch(ideSessionId)
                     onSessionTerminated(ideSessionId)
                     bridge.send(
                         BridgeMessage(
@@ -54,28 +58,46 @@ class IdeSessionTracker(
         return "idea_${System.identityHashCode(session).toString(36)}"
     }
 
+    fun pauseEpoch(ideSessionId: String?): Long? = ideSessionId?.let { pauseEpochs[it] }
+
+    fun onEpochChanged(listener: (String) -> Unit) {
+        epochListeners += listener
+    }
+
+    fun armOrigin(ideSessionId: String?, originRequestId: String?) {
+        if (ideSessionId != null && originRequestId != null) pendingOrigins[ideSessionId] = originRequestId
+    }
+
     fun register(session: XDebugSession) {
         val ideSessionId = sessionId(session)
         if (sessions.containsKey(ideSessionId)) return
         sessions[ideSessionId] = session
+        pauseEpochs[ideSessionId] = 0
         bridge.send(sessionMessage(MessageTypes.IdeSessionStarted, session, "running"))
         session.addSessionListener(
             object : XDebugSessionListener {
                 override fun sessionPaused() {
+                    advanceEpoch(ideSessionId)
                     bridge.send(sessionMessage(MessageTypes.IdeSessionPaused, session, "paused"))
+                    sendDebugEvent(session, "stopped", mapOf("data" to mapOf("reason" to "breakpoint")))
+                    pendingOrigins.remove(ideSessionId)
                 }
 
                 override fun sessionResumed() {
+                    advanceEpoch(ideSessionId)
                     bridge.send(sessionMessage(MessageTypes.IdeSessionResumed, session, "running"))
+                    sendDebugEvent(session, "continued")
                 }
 
                 override fun sessionStopped() {
                     sessions.remove(ideSessionId)
+                    advanceEpoch(ideSessionId)
                     onSessionTerminated(ideSessionId)
                     bridge.send(sessionMessage(MessageTypes.IdeSessionTerminated, session, "terminated"))
                 }
 
                 override fun stackFrameChanged() {
+                    advanceEpoch(ideSessionId)
                     bridge.send(sessionMessage(MessageTypes.IdeSessionPaused, session, "paused"))
                 }
             }
@@ -99,6 +121,35 @@ class IdeSessionTracker(
                 "threadId" to 0,
                 "description" to "IDE debug session paused.",
                 "topFrame" to frame
+            ),
+            debuggerProtocolVersion = 2,
+            debuggerFeatures = mapOf(
+                "breakpointUpdate" to true,
+                "eventStream" to true,
+                "stackPagination" to true,
+                "variableHandles" to true,
+                "nativeSetVariable" to true,
+                "causalDebugStart" to true
+            ),
+            pauseEpoch = pauseEpochs[sessionId(session)] ?: 0,
+            originRequestId = pendingOrigins[sessionId(session)]
+                ?: session.executionEnvironment?.getUserData(BreakPilotExecutionOrigin.key)
+        )
+    }
+
+    private fun advanceEpoch(ideSessionId: String) {
+        pauseEpochs[ideSessionId] = (pauseEpochs[ideSessionId] ?: 0) + 1
+        epochListeners.forEach { it(ideSessionId) }
+    }
+
+    private fun sendDebugEvent(session: XDebugSession, kind: String, extra: Map<String, Any?> = emptyMap()) {
+        val ideSessionId = sessionId(session)
+        bridge.send(
+            BridgeMessage(
+                type = MessageTypes.IdeDebugEvent,
+                ideSessionId = ideSessionId,
+                pauseEpoch = pauseEpochs[ideSessionId] ?: 0,
+                event = mapOf("kind" to kind) + extra
             )
         )
     }

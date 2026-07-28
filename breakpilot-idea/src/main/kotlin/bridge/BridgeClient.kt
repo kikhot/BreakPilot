@@ -85,6 +85,15 @@ class BridgeClient(private val project: Project) : Disposable {
                 type = MessageTypes.IdeRegister,
                 ide = "idea",
                 workspaceRoot = project.basePath,
+                debuggerProtocolVersion = 2,
+                debuggerFeatures = mapOf(
+                    "breakpointUpdate" to true,
+                    "eventStream" to true,
+                    "stackPagination" to true,
+                    "variableHandles" to true,
+                    "nativeSetVariable" to true,
+                    "causalDebugStart" to true
+                ),
                 capabilities = mapOf(
                     "visualBreakpoints" to true,
                     "debugCommands" to true,

@@ -8,6 +8,7 @@ export type BridgeMessage = {
   ideSessionId?: string;
   workspaceRoot?: string;
   requestId?: string;
+  originRequestId?: string;
   confirmationId?: string;
   action?: string;
   actionKind?: string;
@@ -16,6 +17,7 @@ export type BridgeMessage = {
   description?: string;
   expressionPreview?: string;
   sessionName?: string;
+  runConfigName?: string;
   file?: string;
   filePath?: string;
   line?: number;
@@ -32,6 +34,14 @@ export type BridgeMessage = {
   active?: boolean;
   threadId?: number;
   frameId?: number;
+  ref?: number | string;
+  offset?: number;
+  limit?: number;
+  pauseEpoch?: number;
+  expectedPauseEpoch?: number;
+  debuggerProtocolVersion?: number;
+  debuggerFeatures?: Record<string, boolean>;
+  event?: AnyRecord;
   reason?: string;
   breakpoint?: AgentBreakpoint;
   breakpointId?: string;
@@ -85,12 +95,15 @@ export const MessageTypes = {
   IdeStackSnapshot: "ide_stack_snapshot",
   IdeVariablesSnapshot: "ide_variables_snapshot",
   IdeCommandResult: "ide_command_result",
+  IdeDebugEvent: "ide_debug_event",
   AgentSetBreakpoint: "agent_set_breakpoint",
   AgentRemoveBreakpoint: "agent_remove_breakpoint",
   AgentClearBreakpoints: "agent_clear_breakpoints",
   AgentListBreakpoints: "agent_list_breakpoints",
   AgentListRunConfigurations: "agent_list_run_configurations",
+  AgentRequestStack: "agent_request_stack",
   AgentRequestVariables: "agent_request_variables",
+  AgentStartDebug: "agent_start_debug",
   AgentContinue: "agent_continue",
   AgentPause: "agent_pause",
   AgentStepOver: "agent_step_over",

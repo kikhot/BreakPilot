@@ -11,6 +11,7 @@ import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import type { BridgeMessage, IdeDebugSessionInfo } from "../src/types/ide.ts";
 
 const features = {
+  breakpointUpdate: true,
   stackPagination: true,
   variableHandles: true,
   nativeSetVariable: true
@@ -203,4 +204,50 @@ test("negotiated features upgrade only the proven provider capabilities", () => 
   const { provider } = fixture();
   assert.equal(provider.capabilities.variableReferences, "native");
   assert.equal(provider.capabilities.setValue, "native");
+  assert.equal(provider.capabilities.breakpointUpdate, "fallback");
+});
+
+test("IDE source replacement removes only stale agent breakpoints before applying desired state", async () => {
+  const { bridge, provider } = fixture();
+  const replacement = provider.setBreakpoints("/workspace/App.java", [{
+    id: "bp-new",
+    sessionId: provider.sessionId,
+    file: "/workspace/App.java",
+    line: 20,
+    enabled: true,
+    temporary: false,
+    owner: "agent",
+    verified: false,
+    createdAt: new Date(0).toISOString()
+  }]);
+
+  await nextTurn();
+  const list = bridge.last(IdeMessageTypes.AGENT_LIST_BREAKPOINTS);
+  bridge.reply(list, {
+    type: IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT,
+    result: { breakpoints: [
+      { id: "bp-stale", file: "/workspace/App.java", line: 10, owner: "agent", enabled: true, verified: true },
+      { id: "user-bp", file: "/workspace/App.java", line: 11, owner: "user", enabled: true, verified: true }
+    ] }
+  });
+
+  await nextTurn();
+  const remove = bridge.last(IdeMessageTypes.AGENT_REMOVE_BREAKPOINT);
+  assert.equal(remove.breakpointId, "bp-stale");
+  bridge.reply(remove, { type: IdeMessageTypes.IDE_BREAKPOINT_REMOVED, breakpointId: "bp-stale", removed: true });
+
+  await nextTurn();
+  const add = bridge.last(IdeMessageTypes.AGENT_SET_BREAKPOINT);
+  assert.equal(add.breakpoint?.id, "bp-new");
+  bridge.reply(add, {
+    type: IdeMessageTypes.IDE_BREAKPOINT_ADDED,
+    breakpointId: "bp-new",
+    breakpoint: { ...add.breakpoint, verified: true, adapterBreakpointId: "ide-20" }
+  });
+
+  const evidence = await replacement;
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0]?.verified, true);
+  assert.equal(evidence[0]?.line, 20);
+  assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT && message.breakpointId === "user-bp"), false);
 });

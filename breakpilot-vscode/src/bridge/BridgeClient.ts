@@ -53,7 +53,9 @@ export class BridgeClient {
         type: MessageTypes.IdeRegister,
         ide: "vscode",
         workspaceRoot: this.workspaceRoot(),
-        capabilities: this.capabilities()
+        capabilities: this.capabilities(),
+        debuggerProtocolVersion: 2,
+        debuggerFeatures: this.debuggerFeatures()
       });
       this.flushPending();
       this.heartbeat = setInterval(() => {
@@ -132,6 +134,17 @@ export class BridgeClient {
       breakpointHitTracking: true,
       evaluate: true,
       provider: "vscode-debug-api"
+    };
+  }
+
+  debuggerFeatures(): Record<string, boolean> {
+    return {
+      breakpointUpdate: true,
+      eventStream: true,
+      stackPagination: true,
+      variableHandles: true,
+      nativeSetVariable: true,
+      causalDebugStart: true
     };
   }
 

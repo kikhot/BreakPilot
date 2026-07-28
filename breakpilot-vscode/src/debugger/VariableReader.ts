@@ -2,13 +2,14 @@ import * as vscode from "vscode";
 import { BridgeClient } from "../bridge/BridgeClient";
 import { AnyRecord, BridgeMessage, MessageTypes } from "../bridge/MessageProtocol";
 import { DebugSessionTracker } from "./DebugSessionTracker";
+import { PauseScopedHandleRegistry } from "./PauseScopedHandleRegistry";
 
 type SnapshotOptions = {
   profile?: string;
   threadId?: number;
   frameId?: number;
   frameIndex?: number;
-  variablesReference?: number;
+  variablesReference?: number | string;
   includeScopes?: string[];
   includeCategories?: string[];
   objectFields?: "none" | "preview" | "shallow" | "deep" | string;
@@ -46,10 +47,14 @@ type FrameSelection = {
 };
 
 export class VariableReader {
+  private readonly handles = new PauseScopedHandleRegistry();
+
   constructor(
     private readonly bridge: BridgeClient,
     private readonly tracker: DebugSessionTracker
-  ) {}
+  ) {
+    this.tracker.onEpochChanged((ideSessionId) => this.handles.invalidateSession(ideSessionId));
+  }
 
   async handle(message: BridgeMessage) {
     if (message.type !== MessageTypes.AgentRequestVariables) return;
@@ -59,12 +64,43 @@ export class VariableReader {
       return;
     }
     try {
+      const pauseEpoch = this.tracker.pauseEpoch(message.ideSessionId);
+      if (message.expectedPauseEpoch !== undefined && message.expectedPauseEpoch !== pauseEpoch) {
+        this.sendSnapshotError(message, "STALE_RUNTIME_HANDLE", "Runtime reference belongs to another paused state.");
+        return;
+      }
+      if (typeof message.ref === "string") {
+        const descriptor = this.handles.resolve(message.ref, String(message.ideSessionId), pauseEpoch ?? -1);
+        if (!descriptor) {
+          this.sendSnapshotError(message, "STALE_RUNTIME_HANDLE", "Runtime reference is stale or belongs to another session.");
+          return;
+        }
+        const limits = this.limits(this.optionsFromMessage(message));
+        const variables = await this.readVariablesReference(
+          session,
+          descriptor.dapVariablesReference,
+          limits,
+          this.optionsFromMessage(message)
+        );
+        this.bridge.send({
+          type: MessageTypes.IdeVariablesSnapshot,
+          requestId: message.requestId,
+          sessionId: message.sessionId,
+          ideSessionId: message.ideSessionId,
+          originRequestId: message.originRequestId,
+          pauseEpoch,
+          result: { ref: message.ref, pauseEpoch, items: Object.values(variables) }
+        });
+        return;
+      }
       const snapshot = await this.currentSnapshot(session, this.optionsFromMessage(message));
       this.bridge.send({
         type: MessageTypes.IdeVariablesSnapshot,
         requestId: message.requestId,
         sessionId: message.sessionId,
         ideSessionId: message.ideSessionId,
+        originRequestId: message.originRequestId,
+        pauseEpoch,
         snapshot
       });
     } catch (error) {
@@ -74,7 +110,7 @@ export class VariableReader {
 
   async currentSnapshot(session: vscode.DebugSession, options: SnapshotOptions = {}): Promise<AnyRecord> {
     const limits = this.limits(options);
-    if (options.variablesReference != null) {
+    if (typeof options.variablesReference === "number") {
       const variables = await this.readVariablesReference(session, options.variablesReference, limits, options);
       return this.baseSnapshot(session, options, {
         threadId: this.numberOption(options.threadId),
@@ -159,8 +195,39 @@ export class VariableReader {
     ideSessionId: string | undefined,
     path: string[] | undefined,
     newValue: string | undefined,
-    options: AnyRecord = {}
+    options: AnyRecord = {},
+    ref?: number | string
   ): Promise<{ result?: AnyRecord; error?: string }> {
+    if (typeof ref === "string") {
+      if (!newValue) return { error: "newValue is required." };
+      const session = this.tracker.find(ideSessionId);
+      const pauseEpoch = this.tracker.pauseEpoch(ideSessionId);
+      const descriptor = this.handles.resolve(ref, String(ideSessionId), pauseEpoch ?? -1);
+      if (!session || !descriptor) return { error: "STALE_RUNTIME_HANDLE" };
+      if (!descriptor.parentVariablesReference || descriptor.modifiable === false) return { error: "VARIABLE_NOT_MUTABLE" };
+      try {
+        const before = await this.childValue(session, descriptor.parentVariablesReference, descriptor.name);
+        await session.customRequest("setVariable", {
+          variablesReference: descriptor.parentVariablesReference,
+          name: descriptor.name,
+          value: newValue
+        });
+        const after = await this.childValue(session, descriptor.parentVariablesReference, descriptor.name);
+        return {
+          result: {
+            ref,
+            oldValue: before ?? null,
+            newValue,
+            applied: true,
+            verified: after === newValue,
+            mutationMode: "native",
+            value: { name: descriptor.name, valuePreview: after ?? newValue }
+          }
+        };
+      } catch (error) {
+        return { error: this.errorMessage(error) };
+      }
+    }
     if (!path?.length || !newValue) return { error: "path and newValue are required." };
     const expression = `${path.join(".")} = ${newValue}`;
     const evaluated = await this.evaluate(ideSessionId, expression, options);
@@ -222,7 +289,13 @@ export class VariableReader {
     const variables = (response?.variables ?? []) as DapVariable[];
     const output: AnyRecord = {};
     for (const variable of variables.slice(0, limits.maxItems)) {
-      output[variable.name] = await this.serializeVariable(session, variable, limits, options, depth);
+      output[variable.name] = await this.serializeVariable(
+        session,
+        variable,
+        limits,
+        { ...options, __parentVariablesReference: variablesReference } as SnapshotOptions,
+        depth
+      );
     }
     return output;
   }
@@ -239,11 +312,27 @@ export class VariableReader {
       this.redact(variable.name, variable.value ?? "", options.redactPatterns ?? []),
       limits.maxStringLength
     );
+    const ideSessionId = this.tracker.sessionId(session);
+    const pauseEpoch = this.tracker.pauseEpoch(ideSessionId) ?? 0;
+    const ref = variablesReference > 0
+      ? this.handles.register({
+          sessionId: ideSessionId,
+          pauseEpoch,
+          dapVariablesReference: variablesReference,
+          parentVariablesReference: this.numberOption((options as AnyRecord).__parentVariablesReference),
+          name: variable.name,
+          evaluateName: variable.evaluateName,
+          modifiable: true
+        })
+      : 0;
     const result: AnyRecord = {
       name: variable.name,
       kind: variablesReference > 0 ? "object" : "primitive",
       valuePreview,
-      variablesReference,
+      variablesReference: ref,
+      ref,
+      pauseEpoch,
+      modifiable: this.numberOption((options as AnyRecord).__parentVariablesReference) != null,
       truncated: false
     };
     if (variable.type) result.type = this.truncate(variable.type, limits.maxStringLength);
@@ -341,7 +430,7 @@ export class VariableReader {
   }
 
   private optionsFromMessage(message: BridgeMessage): SnapshotOptions {
-    return (message.options ?? {}) as SnapshotOptions;
+    return { ...(message.options ?? {}), variablesReference: message.ref ?? message.options?.variablesReference } as SnapshotOptions;
   }
 
   private limits(options: SnapshotOptions): Required<Pick<SnapshotOptions, "maxDepth" | "maxItems" | "maxStringLength">> {
@@ -389,11 +478,19 @@ export class VariableReader {
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      originRequestId: message.originRequestId,
+      pauseEpoch: message.expectedPauseEpoch,
       error: {
         code,
         message: text
       }
     });
+  }
+
+  private async childValue(session: vscode.DebugSession, parentRef: number, name: string): Promise<string | undefined> {
+    const response = await session.customRequest("variables", { variablesReference: parentRef });
+    const child = ((response?.variables ?? []) as DapVariable[]).find((variable) => variable.name === name);
+    return child?.value;
   }
 
   private errorMessage(error: unknown): string {

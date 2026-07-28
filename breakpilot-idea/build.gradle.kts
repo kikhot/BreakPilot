@@ -15,9 +15,14 @@ repositories {
 }
 
 dependencies {
+    testImplementation(kotlin("test"))
     intellijPlatform {
         local("/Applications/IntelliJ IDEA.app")
     }
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 kotlin {

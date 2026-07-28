@@ -8,6 +8,7 @@ data class BridgeMessage(
     val ideSessionId: String? = null,
     val workspaceRoot: String? = null,
     val requestId: String? = null,
+    val originRequestId: String? = null,
     val confirmationId: String? = null,
     val action: String? = null,
     val actionKind: String? = null,
@@ -32,6 +33,14 @@ data class BridgeMessage(
     val active: Boolean? = null,
     val threadId: Int? = null,
     val frameId: Int? = null,
+    val ref: Any? = null,
+    val offset: Int? = null,
+    val limit: Int? = null,
+    val pauseEpoch: Long? = null,
+    val expectedPauseEpoch: Long? = null,
+    val debuggerProtocolVersion: Int? = null,
+    val debuggerFeatures: Map<String, Boolean> = emptyMap(),
+    val event: Map<String, Any?> = emptyMap(),
     val reason: String? = null,
     val description: String? = null,
     val breakpointId: String? = null,
@@ -83,11 +92,13 @@ object MessageTypes {
     const val IdeStackSnapshot = "ide_stack_snapshot"
     const val IdeVariablesSnapshot = "ide_variables_snapshot"
     const val IdeCommandResult = "ide_command_result"
+    const val IdeDebugEvent = "ide_debug_event"
     const val AgentSetBreakpoint = "agent_set_breakpoint"
     const val AgentRemoveBreakpoint = "agent_remove_breakpoint"
     const val AgentClearBreakpoints = "agent_clear_breakpoints"
     const val AgentListBreakpoints = "agent_list_breakpoints"
     const val AgentListRunConfigurations = "agent_list_run_configurations"
+    const val AgentRequestStack = "agent_request_stack"
     const val AgentRequestVariables = "agent_request_variables"
     const val AgentStartDebug = "agent_start_debug"
     const val AgentContinue = "agent_continue"

@@ -126,6 +126,8 @@ export class ConsentManager {
       confirmationId: message.confirmationId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
+      pauseEpoch: message.expectedPauseEpoch,
+      originRequestId: message.originRequestId,
       action: message.action ?? "allow",
       rememberScope
     });
@@ -136,7 +138,9 @@ export class ConsentManager {
       type: MessageTypes.UserRejectContinue,
       confirmationId: message.confirmationId,
       sessionId: message.sessionId,
-      ideSessionId: message.ideSessionId
+      ideSessionId: message.ideSessionId,
+      pauseEpoch: message.expectedPauseEpoch,
+      originRequestId: message.originRequestId
     });
   }
 }
