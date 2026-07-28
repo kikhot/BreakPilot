@@ -653,7 +653,8 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       [IdeMessageTypes.IDE_COMMAND_RESULT],
       payload.timeoutMs ?? 5000,
       (message) => message.command === command,
-      requestId
+      requestId,
+      command === "evaluate" || command === "set_variable"
     );
     const bridgeError = bridgeErrorPayload(response.error);
     if (bridgeError) {
@@ -681,6 +682,13 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       if (message.confirmationId !== confirmationId) return;
       if (causal) {
         if (message.ideSessionId !== this.ideSessionId || message.sessionId !== this.sessionId) return;
+        if (message.originRequestId !== confirmationId) return;
+        const currentPauseEpoch = this.#sessionInfo()?.pauseEpoch;
+        if (currentPauseEpoch !== expectedPauseEpoch) {
+          this.bridge.off("message", listener);
+          deferred.reject(this.#staleCorrelationError(expectedPauseEpoch, currentPauseEpoch, "confirmation"));
+          return;
+        }
         if (message.pauseEpoch !== expectedPauseEpoch) {
           this.bridge.off("message", listener);
           deferred.reject(this.#staleCorrelationError(expectedPauseEpoch, message.pauseEpoch, "confirmation"));
@@ -710,6 +718,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       this.#send({
         type: "agent_request_confirmation",
         confirmationId,
+        originRequestId: confirmationId,
         ...(expectedPauseEpoch === undefined ? {} : { expectedPauseEpoch }),
         action: request.action,
         actionKind: request.actionKind,
@@ -744,7 +753,8 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     responseTypes: string[],
     timeoutMs: number,
     predicate: (message: BridgeMessage) => boolean = () => true,
-    requestedId?: string
+    requestedId?: string,
+    requireCurrentPause = false
   ): Promise<BridgeMessage> {
     const requestId = requestedId ?? makeId("ide_req");
     const sessionInfo = this.#sessionInfo();
@@ -759,6 +769,15 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       if (!responseTypes.includes(message.type)) return;
       if (causal) {
         if (message.ideSessionId !== this.ideSessionId || message.sessionId !== this.sessionId) return;
+        if (message.originRequestId !== requestId) return;
+        const currentPauseEpoch = this.#sessionInfo()?.pauseEpoch;
+        const pauseScopedRead = requireCurrentPause || message.type === IdeMessageTypes.IDE_STACK_SNAPSHOT ||
+          message.type === IdeMessageTypes.IDE_VARIABLES_SNAPSHOT;
+        if (pauseScopedRead && currentPauseEpoch !== expectedPauseEpoch) {
+          this.bridge.off("message", listener);
+          deferred.reject(this.#staleCorrelationError(expectedPauseEpoch, currentPauseEpoch, type));
+          return;
+        }
         if (message.pauseEpoch !== expectedPauseEpoch) {
           this.bridge.off("message", listener);
           deferred.reject(this.#staleCorrelationError(expectedPauseEpoch, message.pauseEpoch, type));

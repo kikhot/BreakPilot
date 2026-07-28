@@ -92,6 +92,25 @@ export class DebugSessionTracker {
     if (info && originRequestId) info.pendingOriginRequestId = originRequestId;
   }
 
+  invalidateBridgeGeneration(): void {
+    for (const info of this.sessions.values()) {
+      info.pendingOriginRequestId = undefined;
+      this.advanceEpoch(info);
+    }
+  }
+
+  resendKnownSessionStates(): void {
+    for (const info of this.sessions.values()) {
+      const type =
+        info.state === "paused"
+          ? MessageTypes.IdeSessionPaused
+          : info.state === "terminated"
+            ? MessageTypes.IdeSessionTerminated
+            : MessageTypes.IdeSessionStarted;
+      this.bridge.send(this.sessionMessage(type, info.session, info.state, info.stopped));
+    }
+  }
+
   async captureTopFrame(session: vscode.DebugSession, threadId?: number, frameId?: number): Promise<AnyRecord> {
     const resolvedThreadId = threadId ?? this.sessionInfo(this.sessionId(session))?.threadId;
     if (resolvedThreadId == null) {
@@ -248,18 +267,6 @@ export class DebugSessionTracker {
       this.advanceEpoch(info);
     }
     this.bridge.send(this.sessionMessage(MessageTypes.IdeSessionResumed, session, "running"));
-  }
-
-  private resendKnownSessionStates() {
-    for (const info of this.sessions.values()) {
-      const type =
-        info.state === "paused"
-          ? MessageTypes.IdeSessionPaused
-          : info.state === "terminated"
-            ? MessageTypes.IdeSessionTerminated
-            : MessageTypes.IdeSessionStarted;
-      this.bridge.send(this.sessionMessage(type, info.session, info.state, info.stopped));
-    }
   }
 
   private sessionMessage(

@@ -63,6 +63,7 @@ class V2RuntimeBridge extends EventEmitter {
         sessionId: request.sessionId,
         ideSessionId: request.ideSessionId,
         requestId: request.requestId,
+        originRequestId: request.originRequestId,
         pauseEpoch: request.expectedPauseEpoch,
         ...response
       }

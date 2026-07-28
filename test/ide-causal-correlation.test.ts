@@ -52,6 +52,13 @@ class CausalBridge extends EventEmitter {
   }
 
   receive(message: BridgeMessage, clientId = "causal-client"): void {
+    const correlated = this.sent.find((candidate) =>
+      (message.requestId && candidate.requestId === message.requestId) ||
+      (message.confirmationId && candidate.confirmationId === message.confirmationId)
+    );
+    if (message.originRequestId === undefined && correlated?.originRequestId) {
+      message = { ...message, originRequestId: correlated.originRequestId };
+    }
     const lifecycle = new Set<string>([
       IdeMessageTypes.IDE_SESSION_PAUSED,
       IdeMessageTypes.IDE_SESSION_STOPPED,
@@ -130,6 +137,19 @@ test("v2 provider ignores same-client replies outside the exact session tuple", 
   });
   await assertPending(pending);
 
+  bridge.emit("message", {
+    clientId: "causal-client",
+    message: {
+      type: IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT,
+      requestId: request.requestId,
+      sessionId: request.sessionId,
+      ideSessionId: request.ideSessionId,
+      pauseEpoch: request.expectedPauseEpoch,
+      result: { breakpoints: [] }
+    }
+  });
+  await assertPending(pending);
+
   bridge.receive({
     type: IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT,
     requestId: request.requestId,
@@ -164,6 +184,33 @@ test("v2 provider rejects a stale reply on the otherwise trusted tuple", async (
     ideSessionId: request.ideSessionId,
     pauseEpoch: 4,
     result: { breakpoints: [] }
+  });
+
+  await assert.rejects(
+    pending,
+    (error: unknown) => (error as { code?: string }).code === ErrorCodes.STALE_RUNTIME_HANDLE
+  );
+});
+
+test("v2 provider rejects an old reply after the live session advances", async () => {
+  const { bridge, provider } = fixture();
+  const pending = provider.getCallStack(7, { offset: 0, limit: 20 });
+  const request = bridge.last(IdeMessageTypes.AGENT_REQUEST_STACK);
+
+  bridge.receive({
+    type: IdeMessageTypes.IDE_SESSION_PAUSED,
+    ideSessionId: request.ideSessionId,
+    pauseEpoch: 6,
+    threadId: 7,
+    topFrame: frame(11)
+  });
+  bridge.receive({
+    type: IdeMessageTypes.IDE_STACK_SNAPSHOT,
+    requestId: request.requestId,
+    sessionId: request.sessionId,
+    ideSessionId: request.ideSessionId,
+    pauseEpoch: request.expectedPauseEpoch,
+    result: { stackFrames: [], offset: 0, completeness: "complete" }
   });
 
   await assert.rejects(

@@ -1,6 +1,7 @@
 package debugger
 
 import com.intellij.xdebugger.frame.XValueModifier
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class NativeMutationOutcome(
     val applied: Boolean,
@@ -19,25 +20,48 @@ class IdeaValueModifierAdapter {
         readBack: ((String?) -> Unit) -> Unit,
         callback: (NativeMutationOutcome) -> Unit
     ) {
+        val completed = AtomicBoolean(false)
+        val preReadHandled = AtomicBoolean(false)
+        fun complete(outcome: NativeMutationOutcome) {
+            if (completed.compareAndSet(false, true)) callback(outcome)
+        }
         entry.value.modifierAsync.whenComplete { modifier, error ->
             if (error != null || modifier == null) {
-                callback(NativeMutationOutcome(false, false, null, newValue, error?.message ?: "VARIABLE_NOT_MUTABLE"))
+                complete(NativeMutationOutcome(false, false, null, newValue, error?.message ?: "VARIABLE_NOT_MUTABLE"))
+                return@whenComplete
+            }
+            if (currentEpoch() != expectedEpoch) {
+                complete(NativeMutationOutcome(false, false, null, newValue, "STALE_RUNTIME_HANDLE"))
                 return@whenComplete
             }
             readBack { oldValue ->
+                if (!preReadHandled.compareAndSet(false, true) || completed.get()) return@readBack
+                if (currentEpoch() != expectedEpoch) {
+                    complete(NativeMutationOutcome(false, false, oldValue, newValue, "STALE_RUNTIME_HANDLE"))
+                    return@readBack
+                }
                 modifier.setValue(newValue, object : XValueModifier.XModificationCallback {
                     override fun valueModified() {
                         if (currentEpoch() != expectedEpoch) {
-                            callback(NativeMutationOutcome(false, false, oldValue, newValue, "STALE_RUNTIME_HANDLE"))
+                            complete(NativeMutationOutcome(true, false, oldValue, newValue, "STALE_RUNTIME_HANDLE"))
                             return
                         }
                         readBack { value ->
-                            callback(NativeMutationOutcome(true, value == newValue, oldValue, newValue))
+                            val stillCurrent = currentEpoch() == expectedEpoch
+                            complete(
+                                NativeMutationOutcome(
+                                    true,
+                                    stillCurrent && value == newValue,
+                                    oldValue,
+                                    newValue,
+                                    if (stillCurrent) null else "STALE_RUNTIME_HANDLE"
+                                )
+                            )
                         }
                     }
 
                     override fun errorOccurred(errorMessage: String) {
-                        callback(NativeMutationOutcome(false, false, oldValue, newValue, errorMessage))
+                        complete(NativeMutationOutcome(false, false, oldValue, newValue, errorMessage))
                     }
                 })
             }

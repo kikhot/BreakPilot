@@ -1,13 +1,16 @@
 package debugger
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.xdebugger.XDebugSession
 import com.intellij.xdebugger.frame.XExecutionStack
 import com.intellij.xdebugger.frame.XStackFrame
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 object StackPaginationModel {
-    fun completeness(frameCount: Int, last: Boolean): String =
-        if (last) "complete" else if (frameCount == 0) "unknown" else "partial"
+    fun completeness(frameCount: Int, last: Boolean, locallyTruncated: Boolean = false): String =
+        if (last && !locallyTruncated) "complete" else if (frameCount == 0) "unknown" else "partial"
 
     fun nextOffset(offset: Int, frameCount: Int, completeness: String): Int? =
         if (completeness == "partial" && frameCount > 0) offset + frameCount else null
@@ -30,24 +33,41 @@ class StackReader {
             return
         }
         val frames = mutableListOf<XStackFrame>()
+        val completionLock = Any()
         var finished = false
-        fun finish(last: Boolean, reason: String? = null) {
-            if (finished) return
-            finished = true
-            val selected = frames.take(limit.coerceAtLeast(0))
-            val completeness = StackPaginationModel.completeness(selected.size, last)
+        var timeout: ScheduledFuture<*>? = null
+        fun finish(last: Boolean, reason: String? = null, locallyTruncated: Boolean = false) {
+            val selected = synchronized(completionLock) {
+                if (finished) return
+                finished = true
+                frames.take(limit.coerceAtLeast(0))
+            }
+            timeout?.cancel(false)
+            val completeness = StackPaginationModel.completeness(selected.size, last, locallyTruncated)
             ApplicationManager.getApplication().invokeLater {
                 callback(page(System.identityHashCode(stack), selected, offset, pauseEpoch, completeness, reason))
             }
         }
+        timeout = AppExecutorUtil.getAppScheduledExecutorService().schedule(
+            { finish(false, "timeout") },
+            5,
+            TimeUnit.SECONDS
+        )
         stack.computeStackFrames(offset.coerceAtLeast(0), object : XExecutionStack.XStackFrameContainer {
             override fun addStackFrames(stackFrames: List<XStackFrame>, last: Boolean) {
-                frames += stackFrames.take((limit - frames.size).coerceAtLeast(0))
-                if (last || frames.size >= limit) finish(last, if (last) null else "limit")
+                synchronized(completionLock) {
+                    if (finished) return
+                    val remaining = (limit - frames.size).coerceAtLeast(0)
+                    val locallyTruncated = stackFrames.size > remaining
+                    frames += stackFrames.take(remaining)
+                    if (last || frames.size >= limit) {
+                        finish(last, if (locallyTruncated || !last) "limit" else null, locallyTruncated || !last)
+                    }
+                }
             }
 
             override fun errorOccurred(errorMessage: String) = finish(false, "provider")
-            override fun isObsolete(): Boolean = finished
+            override fun isObsolete(): Boolean = synchronized(completionLock) { finished }
         })
     }
 

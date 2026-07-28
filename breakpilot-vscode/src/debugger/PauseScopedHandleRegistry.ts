@@ -10,6 +10,8 @@ export type HandleDescriptor = {
   threadId?: number;
   frameId?: number;
   modifiable?: boolean;
+  valuePreview?: string;
+  type?: string;
 };
 
 export class PauseScopedHandleRegistry {

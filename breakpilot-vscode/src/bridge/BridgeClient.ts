@@ -14,9 +14,11 @@ export class BridgeClient {
   private currentInstanceId?: string;
   private explicitBridgeUrl?: string;
   private state: BridgeConnectionState = "disconnected";
+  private generation = 0;
   private disposed = false;
   private listeners = new Set<(message: BridgeMessage) => void>();
   private pending: BridgeMessage[] = [];
+  private readonly requestGenerations = new Map<string, number>();
   private readonly connectionEmitter = new vscode.EventEmitter<BridgeConnectionState>();
 
   readonly onDidChangeConnectionState = this.connectionEmitter.event;
@@ -45,10 +47,14 @@ export class BridgeClient {
     this.currentUrl = target.url;
     this.currentInstanceId = target.instanceId;
     this.socket?.close();
-    this.socket = new WebSocket(target.url);
-    this.socket.onopen = () => {
+    const generation = ++this.generation;
+    const socket = new WebSocket(target.url);
+    this.socket = socket;
+    this.requestGenerations.clear();
+    socket.onopen = () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
       if (this.reconnect) clearTimeout(this.reconnect);
-      this.setState("connected");
+      this.pending.splice(0);
       this.send({
         type: MessageTypes.IdeRegister,
         ide: "vscode",
@@ -57,12 +63,13 @@ export class BridgeClient {
         debuggerProtocolVersion: 2,
         debuggerFeatures: this.debuggerFeatures()
       });
-      this.flushPending();
+      this.setState("connected");
       this.heartbeat = setInterval(() => {
         this.send({ type: MessageTypes.IdeHeartbeat });
       }, 5000);
     };
-    this.socket.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (!this.isCurrentSocket(socket, generation)) return;
       const message = this.parseMessage(event.data);
       if (!message) return;
       if (message.type === MessageTypes.BridgeWelcome && !this.workspaceMatches(message.workspaceRoot)) {
@@ -74,15 +81,22 @@ export class BridgeClient {
         this.socket?.close();
         return;
       }
+      this.rememberRequestGeneration(message, generation);
       for (const listener of this.listeners) listener(message);
     };
-    this.socket.onclose = () => {
+    socket.onclose = () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
       if (this.heartbeat) clearInterval(this.heartbeat);
+      this.pending.splice(0);
+      this.requestGenerations.clear();
       this.socket = undefined;
       this.setState("disconnected");
       this.scheduleReconnect();
     };
-    this.socket.onerror = () => {
+    socket.onerror = () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
+      this.pending.splice(0);
+      this.requestGenerations.clear();
       this.socket = undefined;
       this.setState("disconnected");
       this.scheduleReconnect();
@@ -95,8 +109,11 @@ export class BridgeClient {
   }
 
   send(message: BridgeMessage) {
+    const correlationId = this.correlationId(message);
+    if (correlationId && this.requestGenerations.get(correlationId) !== this.generation) return;
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ ...message, timestamp: new Date().toISOString() }));
+      if (correlationId) this.requestGenerations.delete(correlationId);
       return;
     }
     if (message.type !== MessageTypes.IdeHeartbeat) {
@@ -107,6 +124,8 @@ export class BridgeClient {
 
   dispose() {
     this.disposed = true;
+    this.generation += 1;
+    this.requestGenerations.clear();
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.reconnect) clearTimeout(this.reconnect);
     this.watcher?.dispose();
@@ -195,10 +214,13 @@ export class BridgeClient {
   }
 
   private closeSocket() {
+    this.generation += 1;
+    this.requestGenerations.clear();
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     this.socket?.close();
     this.socket = undefined;
+    this.pending.splice(0);
     this.setState("disconnected");
   }
 
@@ -206,11 +228,6 @@ export class BridgeClient {
     if (this.disposed) return;
     if (this.reconnect) clearTimeout(this.reconnect);
     this.reconnect = setTimeout(() => this.connect(), 2000);
-  }
-
-  private flushPending() {
-    const queued = this.pending.splice(0);
-    for (const message of queued) this.send(message);
   }
 
   private parseMessage(data: unknown): BridgeMessage | null {
@@ -243,5 +260,28 @@ export class BridgeClient {
 
   private emitLocal(message: BridgeMessage) {
     for (const listener of this.listeners) listener(message);
+  }
+
+  private isCurrentSocket(socket: WebSocket, generation: number): boolean {
+    return this.socket === socket && this.generation === generation && !this.disposed;
+  }
+
+  private correlationId(message: BridgeMessage): string | undefined {
+    return typeof message.requestId === "string"
+      ? message.requestId
+      : typeof message.confirmationId === "string"
+        ? message.confirmationId
+        : undefined;
+  }
+
+  private rememberRequestGeneration(message: BridgeMessage, generation: number): void {
+    const correlationId = this.correlationId(message);
+    if (!correlationId) return;
+    this.requestGenerations.set(correlationId, generation);
+    while (this.requestGenerations.size > 200) {
+      const oldest = this.requestGenerations.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.requestGenerations.delete(oldest);
+    }
   }
 }

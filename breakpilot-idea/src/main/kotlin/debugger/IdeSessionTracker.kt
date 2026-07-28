@@ -68,6 +68,21 @@ class IdeSessionTracker(
         if (ideSessionId != null && originRequestId != null) pendingOrigins[ideSessionId] = originRequestId
     }
 
+    fun invalidateBridgeGeneration() {
+        sessions.keys.toList().forEach { ideSessionId ->
+            pendingOrigins.remove(ideSessionId)
+            advanceEpoch(ideSessionId)
+        }
+    }
+
+    fun resendKnownSessionStates() {
+        sessions.values.forEach { session ->
+            val type = if (session.isPaused) MessageTypes.IdeSessionPaused else MessageTypes.IdeSessionStarted
+            val state = if (session.isPaused) "paused" else "running"
+            bridge.send(sessionMessage(type, session, state))
+        }
+    }
+
     fun register(session: XDebugSession) {
         val ideSessionId = sessionId(session)
         if (sessions.containsKey(ideSessionId)) return

@@ -1,6 +1,7 @@
 package plugin
 
 import bridge.BridgeClient
+import bridge.MessageTypes
 import debugger.BreakpointSync
 import debugger.CommandExecutor
 import debugger.IdeSessionTracker
@@ -29,6 +30,10 @@ class BreakPilotIdeaProjectService(private val project: Project) : Disposable {
 
     init {
         bridge.onMessage { message ->
+            if (message.type == MessageTypes.BridgeConnected || message.type == MessageTypes.BridgeDisconnected) {
+                tracker.invalidateBridgeGeneration()
+                if (message.type == MessageTypes.BridgeConnected) tracker.resendKnownSessionStates()
+            }
             breakpoints.handle(message)
             commands.handle(message)
             if (message.type == "agent_request_variables") {

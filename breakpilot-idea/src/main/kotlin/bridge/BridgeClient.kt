@@ -17,6 +17,8 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ConcurrentHashMap
 
 class BridgeClient(private val project: Project) : Disposable {
     private val defaultBridgeUrl = "ws://127.0.0.1:57987/bridge"
@@ -24,12 +26,15 @@ class BridgeClient(private val project: Project) : Disposable {
     private val listeners = mutableListOf<(BridgeMessage) -> Unit>()
     private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val disposed = AtomicBoolean(false)
-    private var socket: WebSocket? = null
+    @Volatile private var socket: WebSocket? = null
+    private val connectionLock = Any()
+    private val connectionGeneration = AtomicLong(0)
     private var explicitBridgeUrl: String? = null
     private var currentBridgeUrl: String? = null
     private var currentInstanceId: String? = null
     private var heartbeat: ScheduledFuture<*>? = null
     private val pending = mutableListOf<BridgeMessage>()
+    private val requestGenerations = ConcurrentHashMap<String, Long>()
 
     fun connect(url: String? = null) {
         if (url != null) explicitBridgeUrl = url
@@ -40,7 +45,16 @@ class BridgeClient(private val project: Project) : Disposable {
             return
         }
         if (socket != null && currentBridgeUrl == target.url && currentInstanceId == target.instanceId) return
-        socket?.abort()
+        val oldSocket: WebSocket?
+        val generation = synchronized(connectionLock) {
+            val next = connectionGeneration.incrementAndGet()
+            oldSocket = socket
+            socket = null
+            next
+        }
+        requestGenerations.clear()
+        synchronized(pending) { pending.clear() }
+        oldSocket?.abort()
         currentBridgeUrl = target.url
         currentInstanceId = target.instanceId
         val client = HttpClient.newBuilder()
@@ -48,9 +62,9 @@ class BridgeClient(private val project: Project) : Disposable {
             .build()
         client.newWebSocketBuilder()
             .connectTimeout(Duration.ofSeconds(3))
-            .buildAsync(URI.create(target.url), Listener())
+            .buildAsync(URI.create(target.url), Listener(generation))
             .exceptionally {
-                scheduleReconnect()
+                if (connectionGeneration.get() == generation) scheduleReconnect()
                 null
             }
     }
@@ -64,19 +78,19 @@ class BridgeClient(private val project: Project) : Disposable {
     }
 
     private fun enqueueOrSend(message: BridgeMessage) {
-        val current = socket
-        if (current == null) {
-            pending += message
-            return
+        synchronized(connectionLock) {
+            val correlationId = message.requestId ?: message.confirmationId
+            val generation = connectionGeneration.get()
+            if (correlationId != null && requestGenerations[correlationId] != generation) return
+            val current = socket
+            if (current == null) {
+                synchronized(pending) { pending += message }
+                return
+            }
+            val outbound = message.copy(timestamp = Instant.now().toString())
+            current.sendText(gson.toJson(outbound), true)
+            if (correlationId != null) requestGenerations.remove(correlationId)
         }
-        val outbound = message.copy(timestamp = Instant.now().toString())
-        current.sendText(gson.toJson(outbound), true)
-    }
-
-    private fun flushPending() {
-        val queued = pending.toList()
-        pending.clear()
-        queued.forEach { send(it) }
     }
 
     private fun sendRegister() {
@@ -138,16 +152,21 @@ class BridgeClient(private val project: Project) : Disposable {
 
     override fun dispose() {
         disposed.set(true)
+        connectionGeneration.incrementAndGet()
+        requestGenerations.clear()
         heartbeat?.cancel(false)
         socket?.sendClose(WebSocket.NORMAL_CLOSURE, "disposed")
         scheduler.shutdownNow()
     }
 
     private fun closeSocket() {
+        connectionGeneration.incrementAndGet()
+        requestGenerations.clear()
         heartbeat?.cancel(false)
         heartbeat = null
         socket?.abort()
         socket = null
+        synchronized(pending) { pending.clear() }
     }
 
     private fun emitLocal(message: BridgeMessage) {
@@ -156,18 +175,33 @@ class BridgeClient(private val project: Project) : Disposable {
         }
     }
 
-    private inner class Listener : WebSocket.Listener {
+    private inner class Listener(private val generation: Long) : WebSocket.Listener {
         private val incoming = StringBuilder()
 
         override fun onOpen(webSocket: WebSocket) {
-            socket = webSocket
+            val accepted = synchronized(connectionLock) {
+                if (disposed.get() || connectionGeneration.get() != generation) false
+                else {
+                    socket = webSocket
+                    true
+                }
+            }
+            if (!accepted) {
+                webSocket.abort()
+                return
+            }
             webSocket.request(1)
+            synchronized(pending) { pending.clear() }
             sendRegister()
-            flushPending()
+            emitLocal(BridgeMessage(type = MessageTypes.BridgeConnected, workspaceRoot = project.basePath))
             scheduleHeartbeat()
         }
 
         override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*> {
+            if (!isCurrent(webSocket, generation)) {
+                webSocket.request(1)
+                return CompletableFuture.completedFuture(null)
+            }
             incoming.append(data)
             if (last) {
                 val text = incoming.toString()
@@ -183,7 +217,10 @@ class BridgeClient(private val project: Project) : Disposable {
                     webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "bridge rejected")
                     return CompletableFuture.completedFuture(null)
                 }
+                val correlationId = message.requestId ?: message.confirmationId
+                if (correlationId != null) requestGenerations[correlationId] = generation
                 ApplicationManager.getApplication().invokeLater {
+                    if (!isCurrent(webSocket, generation)) return@invokeLater
                     listeners.forEach { it(message) }
                 }
             }
@@ -192,16 +229,36 @@ class BridgeClient(private val project: Project) : Disposable {
         }
 
         override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*> {
-            socket = null
-            heartbeat?.cancel(false)
-            scheduleReconnect()
+            if (clearCurrent(webSocket, generation)) {
+                synchronized(pending) { pending.clear() }
+                requestGenerations.clear()
+                heartbeat?.cancel(false)
+                emitLocal(BridgeMessage(type = MessageTypes.BridgeDisconnected, workspaceRoot = project.basePath))
+                scheduleReconnect()
+            }
             return CompletableFuture.completedFuture(null)
         }
 
         override fun onError(webSocket: WebSocket, error: Throwable) {
+            if (clearCurrent(webSocket, generation)) {
+                synchronized(pending) { pending.clear() }
+                requestGenerations.clear()
+                heartbeat?.cancel(false)
+                emitLocal(BridgeMessage(type = MessageTypes.BridgeDisconnected, workspaceRoot = project.basePath))
+                scheduleReconnect()
+            }
+        }
+    }
+
+    private fun isCurrent(webSocket: WebSocket, generation: Long): Boolean = synchronized(connectionLock) {
+        socket === webSocket && connectionGeneration.get() == generation && !disposed.get()
+    }
+
+    private fun clearCurrent(webSocket: WebSocket, generation: Long): Boolean = synchronized(connectionLock) {
+        if (socket !== webSocket || connectionGeneration.get() != generation) false
+        else {
             socket = null
-            heartbeat?.cancel(false)
-            scheduleReconnect()
+            true
         }
     }
 

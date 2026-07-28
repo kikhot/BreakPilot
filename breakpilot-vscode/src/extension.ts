@@ -41,6 +41,10 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
     bridge.onDidChangeConnectionState((state) => {
+      if (state === "connected" || state === "disconnected" || state === "rejected") {
+        tracker.invalidateBridgeGeneration();
+        if (state === "connected") tracker.resendKnownSessionStates();
+      }
       panel.append({
         type: "bridge_connection_state",
         state,

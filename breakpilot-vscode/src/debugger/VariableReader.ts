@@ -17,6 +17,9 @@ type SnapshotOptions = {
   maxItems?: number;
   maxStringLength?: number;
   redactPatterns?: string[];
+  __pauseEpoch?: number;
+  __parentVariablesReference?: number;
+  __truncation?: { truncated: boolean };
 };
 
 type DapScope = {
@@ -75,13 +78,29 @@ export class VariableReader {
           this.sendSnapshotError(message, "STALE_RUNTIME_HANDLE", "Runtime reference is stale or belongs to another session.");
           return;
         }
-        const limits = this.limits(this.optionsFromMessage(message));
-        const variables = await this.readVariablesReference(
-          session,
-          descriptor.dapVariablesReference,
-          limits,
-          this.optionsFromMessage(message)
-        );
+        const truncation = { truncated: false };
+        const options = { ...this.optionsFromMessage(message), __pauseEpoch: pauseEpoch, __truncation: truncation };
+        const limits = this.limits(options);
+        const variables = descriptor.dapVariablesReference > 0
+          ? await this.readVariablesReference(session, descriptor.dapVariablesReference, limits, options)
+          : {
+              [descriptor.name]: {
+                name: descriptor.name,
+                kind: "primitive",
+                valuePreview: descriptor.valuePreview ?? "",
+                value: descriptor.valuePreview ?? "",
+                type: descriptor.type,
+                variablesReference: 0,
+                ref: message.ref,
+                pauseEpoch,
+                modifiable: descriptor.modifiable === true,
+                truncated: false
+              }
+            };
+        if (this.tracker.pauseEpoch(message.ideSessionId) !== pauseEpoch) {
+          this.sendSnapshotError(message, "STALE_RUNTIME_HANDLE", "Paused state changed while variables were being read.", this.tracker.pauseEpoch(message.ideSessionId));
+          return;
+        }
         this.bridge.send({
           type: MessageTypes.IdeVariablesSnapshot,
           requestId: message.requestId,
@@ -89,11 +108,15 @@ export class VariableReader {
           ideSessionId: message.ideSessionId,
           originRequestId: message.originRequestId,
           pauseEpoch,
-          result: { ref: message.ref, pauseEpoch, items: Object.values(variables) }
+          result: { ref: message.ref, pauseEpoch, items: Object.values(variables), truncated: truncation.truncated }
         });
         return;
       }
-      const snapshot = await this.currentSnapshot(session, this.optionsFromMessage(message));
+      const snapshot = await this.currentSnapshot(session, { ...this.optionsFromMessage(message), __pauseEpoch: pauseEpoch });
+      if (this.tracker.pauseEpoch(message.ideSessionId) !== pauseEpoch) {
+        this.sendSnapshotError(message, "STALE_RUNTIME_HANDLE", "Paused state changed while variables were being read.", this.tracker.pauseEpoch(message.ideSessionId));
+        return;
+      }
       this.bridge.send({
         type: MessageTypes.IdeVariablesSnapshot,
         requestId: message.requestId,
@@ -111,7 +134,8 @@ export class VariableReader {
   async currentSnapshot(session: vscode.DebugSession, options: SnapshotOptions = {}): Promise<AnyRecord> {
     const limits = this.limits(options);
     if (typeof options.variablesReference === "number") {
-      const variables = await this.readVariablesReference(session, options.variablesReference, limits, options);
+      const truncation = { truncated: false };
+      const variables = await this.readVariablesReference(session, options.variablesReference, limits, { ...options, __truncation: truncation });
       return this.baseSnapshot(session, options, {
         threadId: this.numberOption(options.threadId),
         frameId: this.numberOption(options.frameId),
@@ -126,7 +150,8 @@ export class VariableReader {
           }
         },
         availableCategories: ["locals"],
-        availableScopes: [`variablesReference:${options.variablesReference}`]
+        availableScopes: [`variablesReference:${options.variablesReference}`],
+        partial: truncation.truncated
       });
     }
 
@@ -137,9 +162,18 @@ export class VariableReader {
     const variables: AnyRecord = {};
     const availableScopes: string[] = [];
     const availableCategories = new Set<string>();
+    let partial = selectedScopes.length > limits.maxItems;
 
     for (const scope of selectedScopes.slice(0, limits.maxItems)) {
       const category = this.scopeCategory(scope.name);
+      const scopeTruncation = { truncated: false };
+      const scopeVariables = await this.readVariablesReference(
+        session,
+        scope.variablesReference,
+        limits,
+        { ...options, __truncation: scopeTruncation }
+      );
+      partial ||= scopeTruncation.truncated;
       availableScopes.push(scope.name);
       availableCategories.add(category);
       variables[category] = {
@@ -147,9 +181,10 @@ export class VariableReader {
         category,
         rawScopes: [...(((variables[category] as AnyRecord | undefined)?.rawScopes as string[] | undefined) ?? []), scope.name],
         expensive: Boolean(scope.expensive),
+        truncated: Boolean((variables[category] as AnyRecord | undefined)?.truncated) || scopeTruncation.truncated,
         variables: {
           ...(((variables[category] as AnyRecord | undefined)?.variables as AnyRecord | undefined) ?? {}),
-          ...(await this.readVariablesReference(session, scope.variablesReference, limits, options))
+          ...scopeVariables
         }
       };
     }
@@ -160,7 +195,8 @@ export class VariableReader {
       stackFrames: frame.stackFrames,
       variables,
       availableCategories: [...availableCategories],
-      availableScopes
+      availableScopes,
+      partial
     });
   }
 
@@ -199,33 +235,70 @@ export class VariableReader {
     ref?: number | string
   ): Promise<{ result?: AnyRecord; error?: string }> {
     if (typeof ref === "string") {
-      if (!newValue) return { error: "newValue is required." };
+      if (newValue === undefined) return { error: "newValue is required." };
       const session = this.tracker.find(ideSessionId);
       const pauseEpoch = this.tracker.pauseEpoch(ideSessionId);
       const descriptor = this.handles.resolve(ref, String(ideSessionId), pauseEpoch ?? -1);
       if (!session || !descriptor) return { error: "STALE_RUNTIME_HANDLE" };
       if (!descriptor.parentVariablesReference || descriptor.modifiable === false) return { error: "VARIABLE_NOT_MUTABLE" };
+      let before: string | undefined;
       try {
-        const before = await this.childValue(session, descriptor.parentVariablesReference, descriptor.name);
+        before = await this.childValue(session, descriptor.parentVariablesReference, descriptor.name);
+        if (!this.handleStillCurrent(ref, String(ideSessionId), descriptor.pauseEpoch)) {
+          return { error: "STALE_RUNTIME_HANDLE" };
+        }
+      } catch (error) {
+        return { error: this.errorMessage(error) };
+      }
+      try {
         await session.customRequest("setVariable", {
           variablesReference: descriptor.parentVariablesReference,
           name: descriptor.name,
           value: newValue
         });
+        if (!this.handleStillCurrent(ref, String(ideSessionId), descriptor.pauseEpoch)) {
+          return {
+            result: {
+              ref,
+              oldValue: before ?? null,
+              newValue,
+              applied: true,
+              verified: false,
+              mutationMode: "native",
+              pauseChangedAfterDispatch: true
+            }
+          };
+        }
+      } catch (error) {
+        return { error: this.errorMessage(error) };
+      }
+      try {
         const after = await this.childValue(session, descriptor.parentVariablesReference, descriptor.name);
+        const currentAfterReadback = this.handleStillCurrent(ref, String(ideSessionId), descriptor.pauseEpoch);
         return {
           result: {
             ref,
             oldValue: before ?? null,
             newValue,
             applied: true,
-            verified: after === newValue,
+            verified: currentAfterReadback && after === newValue,
             mutationMode: "native",
-            value: { name: descriptor.name, valuePreview: after ?? newValue }
+            value: { name: descriptor.name, valuePreview: after ?? newValue },
+            ...(!currentAfterReadback ? { pauseChangedDuringReadback: true } : {})
           }
         };
       } catch (error) {
-        return { error: this.errorMessage(error) };
+        return {
+          result: {
+            ref,
+            oldValue: before ?? null,
+            newValue,
+            applied: true,
+            verified: false,
+            mutationMode: "native",
+            verificationError: this.errorMessage(error)
+          }
+        };
       }
     }
     if (!path?.length || !newValue) return { error: "path and newValue are required." };
@@ -287,6 +360,7 @@ export class VariableReader {
       count: limits.maxItems
     });
     const variables = (response?.variables ?? []) as DapVariable[];
+    if (variables.length > limits.maxItems && options.__truncation) options.__truncation.truncated = true;
     const output: AnyRecord = {};
     for (const variable of variables.slice(0, limits.maxItems)) {
       output[variable.name] = await this.serializeVariable(
@@ -308,21 +382,25 @@ export class VariableReader {
     depth: number
   ): Promise<AnyRecord> {
     const variablesReference = this.numberOption(variable.variablesReference) ?? 0;
-    const valuePreview = this.truncate(
-      this.redact(variable.name, variable.value ?? "", options.redactPatterns ?? []),
-      limits.maxStringLength
-    );
+    const redacted = this.shouldRedact(variable.name, variable.value ?? "", options.redactPatterns ?? []);
+    const displayedValue = redacted ? "[redacted]" : variable.value ?? "";
+    const valuePreview = this.truncate(displayedValue, limits.maxStringLength);
     const ideSessionId = this.tracker.sessionId(session);
-    const pauseEpoch = this.tracker.pauseEpoch(ideSessionId) ?? 0;
-    const ref = variablesReference > 0
+    const pauseEpoch = options.__pauseEpoch ?? this.tracker.pauseEpoch(ideSessionId) ?? 0;
+    const parentVariablesReference = this.numberOption(options.__parentVariablesReference);
+    const canRegister = !redacted && this.tracker.pauseEpoch(ideSessionId) === pauseEpoch &&
+      (variablesReference > 0 || parentVariablesReference != null);
+    const ref = canRegister
       ? this.handles.register({
           sessionId: ideSessionId,
           pauseEpoch,
           dapVariablesReference: variablesReference,
-          parentVariablesReference: this.numberOption((options as AnyRecord).__parentVariablesReference),
+          parentVariablesReference,
           name: variable.name,
           evaluateName: variable.evaluateName,
-          modifiable: true
+          modifiable: parentVariablesReference != null,
+          valuePreview,
+          type: variable.type
         })
       : 0;
     const result: AnyRecord = {
@@ -332,8 +410,9 @@ export class VariableReader {
       variablesReference: ref,
       ref,
       pauseEpoch,
-      modifiable: this.numberOption((options as AnyRecord).__parentVariablesReference) != null,
-      truncated: false
+      modifiable: parentVariablesReference != null,
+      truncated: displayedValue.length > limits.maxStringLength,
+      redacted
     };
     if (variable.type) result.type = this.truncate(variable.type, limits.maxStringLength);
     if (variable.evaluateName) result.evaluateName = variable.evaluateName;
@@ -350,7 +429,23 @@ export class VariableReader {
       return result;
     }
     try {
-      result.value = await this.readVariablesReference(session, variablesReference, limits, options, depth - 1);
+      const childTruncation = { truncated: false };
+      result.value = await this.readVariablesReference(
+        session,
+        variablesReference,
+        limits,
+        { ...options, __truncation: childTruncation },
+        depth - 1
+      );
+      if (childTruncation.truncated) {
+        result.truncated = true;
+        if (options.__truncation) options.__truncation.truncated = true;
+      }
+      const declaredChildren = (variable.namedVariables ?? 0) + (variable.indexedVariables ?? 0);
+      if (declaredChildren > 0 && Object.keys(result.value as AnyRecord).length < declaredChildren) {
+        result.truncated = true;
+        if (options.__truncation) options.__truncation.truncated = true;
+      }
     } catch (error) {
       result.presentationError = this.errorMessage(error);
       result.truncated = true;
@@ -380,6 +475,7 @@ export class VariableReader {
       variables: AnyRecord;
       availableCategories: string[];
       availableScopes: string[];
+      partial?: boolean;
     }
   ): AnyRecord {
     const limits = this.limits(options);
@@ -394,7 +490,8 @@ export class VariableReader {
       variables: data.variables,
       availableCategories: data.availableCategories,
       availableScopes: data.availableScopes,
-      limits
+      limits,
+      partial: data.partial === true
     };
   }
 
@@ -456,11 +553,11 @@ export class VariableReader {
   }
 
   private redact(name: string, value: string, patterns: string[]): string {
-    if (patterns.length === 0) return value;
-    if (patterns.some((pattern) => this.patternMatches(pattern, name) || this.patternMatches(pattern, value))) {
-      return "[redacted]";
-    }
-    return value;
+    return this.shouldRedact(name, value, patterns) ? "[redacted]" : value;
+  }
+
+  private shouldRedact(name: string, value: string, patterns: string[]): boolean {
+    return patterns.some((pattern) => this.patternMatches(pattern, name) || this.patternMatches(pattern, value));
   }
 
   private patternMatches(pattern: string, value: string): boolean {
@@ -472,14 +569,14 @@ export class VariableReader {
     }
   }
 
-  private sendSnapshotError(message: BridgeMessage, code: string, text: string) {
+  private sendSnapshotError(message: BridgeMessage, code: string, text: string, pauseEpoch = message.expectedPauseEpoch) {
     this.bridge.send({
       type: MessageTypes.IdeVariablesSnapshot,
       requestId: message.requestId,
       sessionId: message.sessionId,
       ideSessionId: message.ideSessionId,
       originRequestId: message.originRequestId,
-      pauseEpoch: message.expectedPauseEpoch,
+      pauseEpoch,
       error: {
         code,
         message: text
@@ -491,6 +588,11 @@ export class VariableReader {
     const response = await session.customRequest("variables", { variablesReference: parentRef });
     const child = ((response?.variables ?? []) as DapVariable[]).find((variable) => variable.name === name);
     return child?.value;
+  }
+
+  private handleStillCurrent(ref: string, ideSessionId: string, pauseEpoch: number): boolean {
+    return this.tracker.pauseEpoch(ideSessionId) === pauseEpoch &&
+      this.handles.resolve(ref, ideSessionId, pauseEpoch) !== undefined;
   }
 
   private errorMessage(error: unknown): string {

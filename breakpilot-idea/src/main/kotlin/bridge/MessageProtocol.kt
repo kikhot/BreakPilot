@@ -78,6 +78,7 @@ object MessageTypes {
     const val BridgeWelcome = "bridge_welcome"
     const val BridgeRejected = "bridge_rejected"
     const val BridgeDisconnected = "bridge_disconnected"
+    const val BridgeConnected = "bridge_connected"
     const val IdeRegister = "ide_register"
     const val IdeHeartbeat = "ide_heartbeat"
     const val IdeSessionStarted = "ide_session_started"

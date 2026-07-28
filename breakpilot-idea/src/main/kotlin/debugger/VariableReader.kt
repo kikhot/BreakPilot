@@ -22,6 +22,23 @@ import com.intellij.xdebugger.frame.presentation.XValuePresentation
 import com.intellij.xdebugger.impl.breakpoints.XExpressionImpl
 import javax.swing.Icon
 
+object IdeaValueRedaction {
+    fun redact(name: String, value: String, patterns: List<String>): String =
+        if (shouldRedact(name, value, patterns)) "[redacted]" else value
+
+    fun shouldRedact(name: String, value: String, patterns: List<String>): Boolean =
+        patterns.any { patternMatches(it, name) || patternMatches(it, value) }
+
+    private fun patternMatches(pattern: String, value: String): Boolean {
+        if (pattern.isEmpty() || value.isEmpty()) return false
+        return try {
+            Regex(pattern).containsMatchIn(value)
+        } catch (_: IllegalArgumentException) {
+            value.contains(pattern)
+        }
+    }
+}
+
 class VariableReader(
     private val project: Project,
     private val tracker: IdeSessionTracker
@@ -66,24 +83,54 @@ class VariableReader(
                 sendError(bridge, message, "STALE_RUNTIME_HANDLE", "Runtime reference is stale or foreign.")
                 return
             }
-            entry.value.computeChildren(CollectingCompositeNode(numberOption(options, "maxItems", 20)) { children ->
+            val maxItems = numberOption(options, "maxItems", 20)
+            val maxDepth = numberOption(options, "maxDepth", 1)
+            val maxStringLength = numberOption(options, "maxStringLength", 2000)
+            val redactPatterns = stringListOption(options, "redactPatterns")
+            entry.value.computeChildren(CollectingCompositeNode(maxItems) { children, truncated ->
                 val items = mutableListOf<Map<String, Any?>>()
                 if (children.isEmpty()) {
-                    sendRefResult(bridge, message, ref, epoch ?: 0, items)
+                    val currentEpoch = tracker.pauseEpoch(message.ideSessionId)
+                    if (currentEpoch != epoch) {
+                        sendError(bridge, message, "STALE_RUNTIME_HANDLE", "Paused state changed while variables were being read.", currentEpoch)
+                    } else {
+                        sendRefResult(bridge, message, ref, epoch ?: 0, items, truncated)
+                    }
                     return@CollectingCompositeNode
                 }
                 var remaining = children.size
                 children.forEach { (name, value) ->
-                    readValue(name, value, 20, 1, 2000, sessionId = message.ideSessionId, pauseEpoch = epoch) { variable ->
+                    readValue(
+                        name,
+                        value,
+                        maxItems,
+                        maxDepth,
+                        maxStringLength,
+                        sessionId = message.ideSessionId,
+                        pauseEpoch = epoch,
+                        redactPatterns = redactPatterns
+                    ) { variable ->
                         items += variable
                         remaining -= 1
-                        if (remaining == 0) sendRefResult(bridge, message, ref, epoch ?: 0, items)
+                        if (remaining == 0) {
+                            val currentEpoch = tracker.pauseEpoch(message.ideSessionId)
+                            if (currentEpoch != epoch) {
+                                sendError(bridge, message, "STALE_RUNTIME_HANDLE", "Paused state changed while variables were being read.", currentEpoch)
+                            } else {
+                                sendRefResult(bridge, message, ref, epoch ?: 0, items, truncated)
+                            }
+                        }
                     }
                 }
             })
             return
         }
         currentSnapshot(session, options) { snapshot ->
+            val currentEpoch = tracker.pauseEpoch(message.ideSessionId)
+            if (currentEpoch != epoch) {
+                sendError(bridge, message, "STALE_RUNTIME_HANDLE", "Paused state changed while variables were being read.", currentEpoch)
+                return@currentSnapshot
+            }
             bridge.send(
                 BridgeMessage(
                     type = MessageTypes.IdeVariablesSnapshot,
@@ -107,13 +154,16 @@ class VariableReader(
         val maxDepth = numberOption(options, "maxDepth", 1)
         val maxStringLength = numberOption(options, "maxStringLength", 2000)
         val levels = numberOption(options, "levels", 20)
+        val redactPatterns = stringListOption(options, "redactPatterns")
+        val sessionId = tracker.sessionId(session)
+        val snapshotEpoch = tracker.pauseEpoch(sessionId)
         readStackSnapshot(session, options, levels) { stack ->
             val frame = stack.selectedFrame
             if (frame == null) {
                 callback(baseSnapshot(session, stack.threads, emptyList(), emptyMap(), options, stack.threadId, true))
                 return@readStackSnapshot
             }
-            readFrameVariables(session, frame, maxItems, maxDepth, maxStringLength) { variables ->
+            readFrameVariables(session, frame, maxItems, maxDepth, maxStringLength, redactPatterns, snapshotEpoch) { variables, variablesTruncated ->
                 callback(
                     baseSnapshot(
                         session,
@@ -122,7 +172,7 @@ class VariableReader(
                         variables,
                         options,
                         stack.threadId,
-                        stack.partial
+                        stack.partial || variablesTruncated
                     )
                 )
             }
@@ -141,11 +191,12 @@ class VariableReader(
             callback(null, "The active IDEA debugger does not expose a generic evaluator.")
             return
         }
+        val evaluationEpoch = tracker.pauseEpoch(ideSessionId)
         evaluator.evaluate(
             XExpressionImpl.fromText(expression),
             object : XDebuggerEvaluator.XEvaluationCallback {
                 override fun evaluated(result: XValue) {
-                    readValue("result", result, 10, 1, 2000, 5000, ideSessionId, tracker.pauseEpoch(ideSessionId)) { variable ->
+                    readValue("result", result, 10, 1, 2000, 5000, ideSessionId, evaluationEpoch) { variable ->
                         callback(mapOf("value" to variable), null)
                     }
                 }
@@ -305,20 +356,31 @@ class VariableReader(
         maxItems: Int,
         maxDepth: Int,
         maxStringLength: Int,
-        callback: (Map<String, Any?>) -> Unit
+        redactPatterns: List<String>,
+        pauseEpoch: Long?,
+        callback: (Map<String, Any?>, Boolean) -> Unit
     ) {
-        val node = CollectingCompositeNode(maxItems) { children ->
+        val node = CollectingCompositeNode(maxItems) { children, truncated ->
             val output = linkedMapOf<String, Any?>()
             if (children.isEmpty()) {
-                callback(output)
+                callback(output, truncated)
                 return@CollectingCompositeNode
             }
             var remaining = children.size
             children.forEach { (name, value) ->
-                readValue(name, value, maxItems, maxDepth, maxStringLength, sessionId = tracker.sessionId(session), pauseEpoch = tracker.pauseEpoch(tracker.sessionId(session))) { variable ->
+                readValue(
+                    name,
+                    value,
+                    maxItems,
+                    maxDepth,
+                    maxStringLength,
+                    sessionId = tracker.sessionId(session),
+                    pauseEpoch = pauseEpoch,
+                    redactPatterns = redactPatterns
+                ) { variable ->
                     output[name] = variable
                     remaining -= 1
-                    if (remaining == 0) callback(output)
+                    if (remaining == 0) callback(output, truncated)
                 }
             }
         }
@@ -334,18 +396,27 @@ class VariableReader(
         presentationTimeoutMs: Long = 1000,
         sessionId: String? = null,
         pauseEpoch: Long? = null,
+        redactPatterns: List<String> = emptyList(),
         callback: (Map<String, Any?>) -> Unit
     ) {
         readPresentation(value, maxStringLength, presentationTimeoutMs) { presentation ->
-            val preview = presentation.valuePreview
+            val redacted = IdeaValueRedaction.shouldRedact(name, presentation.valuePreview, redactPatterns)
+            val preview = if (redacted) "[redacted]" else presentation.valuePreview
             val result = linkedMapOf<String, Any?>(
                 "name" to name,
                 "kind" to "object",
                 "valuePreview" to preview,
                 "variablesReference" to 0,
-                "truncated" to false
+                "truncated" to presentation.valueTruncated
             )
-            if (sessionId != null && pauseEpoch != null) {
+            if (redacted) {
+                result["kind"] = "primitive"
+                result["value"] = preview
+                result["redacted"] = true
+                callback(result)
+                return@readPresentation
+            }
+            if (sessionId != null && pauseEpoch != null && tracker.pauseEpoch(sessionId) == pauseEpoch) {
                 val ref = handles.register(
                     IdeaHandleEntry(
                         sessionId = sessionId,
@@ -382,7 +453,7 @@ class VariableReader(
             }
             try {
                 value.computeChildren(
-                    CollectingCompositeNode(maxItems) { children ->
+                    CollectingCompositeNode(maxItems) { children, childrenTruncated ->
                         if (children.isEmpty()) {
                             if (presentation.hasChildren == true) {
                                 result["value"] = linkedMapOf<String, Any?>()
@@ -394,9 +465,19 @@ class VariableReader(
                             return@CollectingCompositeNode
                         }
                         val nested = linkedMapOf<String, Any?>()
+                        if (childrenTruncated) result["truncated"] = true
                         var remaining = children.size
                         children.forEach { (childName, childValue) ->
-                            readValue(childName, childValue, maxItems, maxDepth - 1, maxStringLength, sessionId = sessionId, pauseEpoch = pauseEpoch) { child ->
+                            readValue(
+                                childName,
+                                childValue,
+                                maxItems,
+                                maxDepth - 1,
+                                maxStringLength,
+                                sessionId = sessionId,
+                                pauseEpoch = pauseEpoch,
+                                redactPatterns = redactPatterns
+                            ) { child ->
                                 nested[childName] = child
                                 remaining -= 1
                                 if (remaining == 0) {
@@ -469,7 +550,8 @@ class VariableReader(
                         "newValue" to outcome.newValue,
                         "applied" to outcome.applied,
                         "verified" to outcome.verified,
-                        "mutationMode" to "native"
+                        "mutationMode" to "native",
+                        "message" to outcome.message
                     ),
                     null
                 )
@@ -477,7 +559,13 @@ class VariableReader(
         }
     }
 
-    private fun sendError(bridge: BridgeClient, message: BridgeMessage, code: String, text: String) {
+    private fun sendError(
+        bridge: BridgeClient,
+        message: BridgeMessage,
+        code: String,
+        text: String,
+        pauseEpoch: Long? = message.expectedPauseEpoch
+    ) {
         bridge.send(
             BridgeMessage(
                 type = MessageTypes.IdeVariablesSnapshot,
@@ -485,13 +573,20 @@ class VariableReader(
                 sessionId = message.sessionId,
                 ideSessionId = message.ideSessionId,
                 originRequestId = message.originRequestId,
-                pauseEpoch = message.expectedPauseEpoch,
+                pauseEpoch = pauseEpoch,
                 error = mapOf("code" to code, "message" to text)
             )
         )
     }
 
-    private fun sendRefResult(bridge: BridgeClient, message: BridgeMessage, ref: String, epoch: Long, items: List<Map<String, Any?>>) {
+    private fun sendRefResult(
+        bridge: BridgeClient,
+        message: BridgeMessage,
+        ref: String,
+        epoch: Long,
+        items: List<Map<String, Any?>>,
+        truncated: Boolean
+    ) {
         bridge.send(
             BridgeMessage(
                 type = MessageTypes.IdeVariablesSnapshot,
@@ -500,7 +595,7 @@ class VariableReader(
                 ideSessionId = message.ideSessionId,
                 originRequestId = message.originRequestId,
                 pauseEpoch = epoch,
-                result = mapOf("ref" to ref, "pauseEpoch" to epoch, "items" to items)
+                result = mapOf("ref" to ref, "pauseEpoch" to epoch, "items" to items, "truncated" to truncated)
             )
         )
     }
@@ -537,6 +632,9 @@ class VariableReader(
         }
     }
 
+    private fun stringListOption(options: Map<String, Any?>, key: String): List<String> =
+        (options[key] as? List<*>)?.mapNotNull { it as? String }.orEmpty()
+
     private fun stackThreadId(stack: XExecutionStack): Int = System.identityHashCode(stack)
 }
 
@@ -560,7 +658,8 @@ private data class PresentationData(
     val valuePreview: String,
     val type: String?,
     val hasChildren: Boolean?,
-    val presentationError: String? = null
+    val presentationError: String? = null,
+    val valueTruncated: Boolean = false
 )
 
 private class CollectingValueNode(
@@ -575,7 +674,8 @@ private class CollectingValueNode(
             PresentationData(
                 valuePreview = truncateDisplay(value),
                 type = type?.takeIf { it.isNotBlank() }?.let { truncateDisplay(it) },
-                hasChildren = hasChildren
+                hasChildren = hasChildren,
+                valueTruncated = value.length > maxStringLength
             )
         )
     }
@@ -584,12 +684,14 @@ private class CollectingValueNode(
         val rendered = PresentationTextCollector()
         try {
             presentation.renderValue(rendered)
-            if (isPendingPresentation(rendered.text())) return
+            val text = rendered.text()
+            if (isPendingPresentation(text)) return
             finish(
                 PresentationData(
-                    valuePreview = truncateDisplay(rendered.text()),
+                    valuePreview = truncateDisplay(text),
                     type = presentation.type?.takeIf { it.isNotBlank() }?.let { truncateDisplay(it) },
-                    hasChildren = hasChildren
+                    hasChildren = hasChildren,
+                    valueTruncated = text.length > maxStringLength
                 )
             )
         } catch (error: Throwable) {
@@ -675,20 +777,24 @@ private class PresentationTextCollector : XValuePresentation.XValueTextRenderer 
 
 private class CollectingCompositeNode(
     private val maxItems: Int,
-    private val done: (List<Pair<String, XValue>>) -> Unit
+    private val done: (List<Pair<String, XValue>>, Boolean) -> Unit
 ) : XCompositeNode {
     private val children = mutableListOf<Pair<String, XValue>>()
     private var finished = false
+    private var truncated = false
 
     override fun addChildren(children: XValueChildrenList, last: Boolean) {
         val count = minOf(children.size(), maxItems - this.children.size)
+        if (count < children.size()) truncated = true
         for (index in 0 until count) {
             this.children += children.getName(index) to children.getValue(index)
         }
+        if (!last && this.children.size >= maxItems) truncated = true
         if (last || this.children.size >= maxItems) finish()
     }
 
     override fun tooManyChildren(remaining: Int) {
+        if (remaining > 0) truncated = true
         finish()
     }
 
@@ -712,7 +818,7 @@ private class CollectingCompositeNode(
         if (finished) return
         finished = true
         ApplicationManager.getApplication().invokeLater {
-            done(children)
+            done(children, truncated)
         }
     }
 }
