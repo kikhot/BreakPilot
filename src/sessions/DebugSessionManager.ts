@@ -108,6 +108,11 @@ type DebugToolArgs = AnyRecord & {
   redactPatterns?: string[];
 };
 
+type IdeStartWaiter = {
+  promise: Promise<IdeDebugSessionInfo>;
+  cancel: () => void;
+};
+
 interface CreateSessionInput {
   language: DebugLanguage;
   adapter: LanguageAdapter;
@@ -219,9 +224,25 @@ export class DebugSessionManager {
         clientId: args.clientId
       });
     }
-    const requestId = `start_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    if (
+      typeof client.debuggerProtocolVersion !== "number" ||
+      client.debuggerProtocolVersion < 2 ||
+      client.debuggerFeatures?.causalDebugStart !== true
+    ) {
+      throw new BreakPilotError(
+        ErrorCodes.UNSUPPORTED_CAPABILITY,
+        "IDE client does not support causally correlated remote debug start.",
+        {
+          clientId: client.clientId,
+          projectPath: workspaceRoot,
+          requiredFeature: "causalDebugStart",
+          debuggerProtocolVersion: client.debuggerProtocolVersion ?? 1
+        }
+      );
+    }
+    const requestId = makeId("ide_start");
     const timeoutMs = args.timeout ?? 30000;
-    const started = this.#waitForIdeDebugStart({
+    const waiter = this.#waitForIdeDebugStart({
       requestId,
       clientId: client.clientId,
       workspaceRoot,
@@ -230,6 +251,7 @@ export class DebugSessionManager {
     const sent = this.ideBridge.sendToClient(client.clientId, {
       type: IdeMessageTypes.AGENT_START_DEBUG,
       requestId,
+      originRequestId: requestId,
       workspaceRoot,
       runConfigName: args.runConfigName,
       filePath: args.filePath,
@@ -237,12 +259,13 @@ export class DebugSessionManager {
       sessionId: args.sessionId
     });
     if (!sent) {
+      waiter.cancel();
       throw new BreakPilotError(ErrorCodes.IDE_BRIDGE_DISCONNECTED, "IDE client disconnected before debug launch.", {
         clientId: client.clientId,
         projectPath: workspaceRoot
       });
     }
-    const ideSession = await started;
+    const ideSession = await waiter.promise;
     const adopted = await this.#adoptIdeSession({
       ...args,
       clientId: ideSession.clientId,
@@ -611,12 +634,36 @@ export class DebugSessionManager {
     this.#assertVariableReferences(session, "set-value path resolution");
     const auditId = this.audit.record("bp_debug_set_value_requested", { sessionId: session.sessionId, path: normalized.path, ref: normalized.ref });
     if (normalized.ref !== undefined) {
-      throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support ref-target variable mutation.", {
-        sessionId: session.sessionId,
-        providerKind: session.provider.kind,
-        capability: "refTargetMutation",
-        ref: normalized.ref
-      });
+      if (
+        session.provider.capabilities.variableReferences !== "native" ||
+        session.provider.capabilities.setValue !== "native" ||
+        !session.provider.setVariable
+      ) {
+        throw new BreakPilotError(ErrorCodes.UNSUPPORTED_CAPABILITY, "Runtime provider does not support ref-target variable mutation.", {
+          sessionId: session.sessionId,
+          providerKind: session.provider.kind,
+          capability: "refTargetMutation",
+          ref: normalized.ref
+        });
+      }
+      const result = await session.provider.setVariable({ ...normalized, ref: normalized.ref });
+      const {
+        applied: _applied,
+        verified: _verified,
+        mutationMode: _mutationMode,
+        oldValue,
+        newValue: providerNewValue,
+        ...providerDiagnostics
+      } = result;
+      return ok(session.sessionId, {
+        ref: normalized.ref,
+        oldValue: oldValue ?? null,
+        newValue: providerNewValue ?? normalized.newValue,
+        applied: result.applied === true,
+        verified: result.verified === true,
+        mutationMode: "native",
+        ...(Object.keys(providerDiagnostics).length > 0 ? { result: providerDiagnostics } : {})
+      }, auditId);
     }
     if (!normalized.path || normalized.path.length === 0) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value requires path or ref plus newValue.", {});
@@ -2975,23 +3022,32 @@ export class DebugSessionManager {
     clientId: string;
     workspaceRoot: string;
     timeoutMs: number;
-  }): Promise<IdeDebugSessionInfo> {
+  }): IdeStartWaiter {
     if (!this.ideBridge) {
-      return Promise.reject(new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available."));
+      return {
+        promise: Promise.reject(new BreakPilotError(ErrorCodes.IDE_NOT_CONNECTED, "IDE bridge is not available.")),
+        cancel: () => {}
+      };
     }
     const bridge = this.ideBridge;
-    return new Promise((resolve, reject) => {
-      const startedAt = Date.now();
-      const cleanup = (): void => {
-        clearTimeout(timer);
+    let cleanup = (): void => {};
+    const existingSessionIds = new Set(
+      bridge.registry.listSessions({ clientId }).map((session) => session.ideSessionId)
+    );
+    const promise = new Promise<IdeDebugSessionInfo>((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
+      cleanup = (): void => {
+        if (timer) clearTimeout(timer);
         bridge.off(IdeMessageTypes.IDE_COMMAND_RESULT, commandListener);
         bridge.off(IdeMessageTypes.IDE_SESSION_STARTED, sessionListener);
         bridge.off(IdeMessageTypes.IDE_SESSION_PAUSED, sessionListener);
       };
       const resolveSession = (eventClientId: string | undefined, message: AnyRecord): boolean => {
         if (eventClientId !== clientId) return false;
+        if (message.originRequestId !== requestId) return false;
         const ideSessionId = this.#decodedBridgeOpaqueId(message.ideSessionId);
         if (!ideSessionId) return false;
+        if (existingSessionIds.has(ideSessionId)) return false;
         const session = bridge.registry.findSession(ideSessionId, clientId);
         if (!session) return false;
         if (session.workspaceRoot && path.resolve(session.workspaceRoot) !== path.resolve(workspaceRoot)) return false;
@@ -3004,6 +3060,7 @@ export class DebugSessionManager {
         if (!decoded || decoded.clientId !== clientId) return;
         const { message } = decoded;
         if (message.requestId !== requestId) return;
+        if (message.originRequestId !== requestId) return;
         const bridgeError = this.#decodedBridgeError(
           message,
           ErrorCodes.TOOL_FAILED,
@@ -3018,23 +3075,16 @@ export class DebugSessionManager {
           ));
           return;
         }
-        if (message.ideSessionId && resolveSession(decoded.clientId, message)) return;
-        const existing = bridge.registry
-          .listSessions({ clientId, workspaceRoot })
-          .find((session) => Date.parse(session.startedAt) >= startedAt - 1000);
-        if (existing) {
-          cleanup();
-          resolve(existing);
-        }
+        resolveSession(decoded.clientId, message);
       };
       const sessionListener = (event: unknown): void => {
         const decoded = this.#decodeIdeBridgeEvent(event);
         if (!decoded || decoded.clientId !== clientId) return;
         const { message } = decoded;
-        if (message.requestId && message.requestId !== requestId) return;
+        if (message.originRequestId !== requestId) return;
         resolveSession(decoded.clientId, message);
       };
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         cleanup();
         reject(new BreakPilotError(ErrorCodes.BREAKPOINT_TIMEOUT, "Timed out waiting for IDE debug session to start.", {
           requestId,
@@ -3047,6 +3097,7 @@ export class DebugSessionManager {
       bridge.on(IdeMessageTypes.IDE_SESSION_STARTED, sessionListener);
       bridge.on(IdeMessageTypes.IDE_SESSION_PAUSED, sessionListener);
     });
+    return { promise, cancel: cleanup };
   }
 
   #broadcastToWorkspace(workspaceRoot: string, message: AnyRecord): void {

@@ -101,7 +101,9 @@ class StartIdeBridge extends EventEmitter {
       clientId: "idea_start",
       ide: "idea",
       workspaceRoot,
-      capabilities: { debugCommands: true, variableSnapshot: true }
+      capabilities: { debugCommands: true, variableSnapshot: true },
+      debuggerProtocolVersion: 2,
+      debuggerFeatures: { causalDebugStart: true }
     });
   }
 
@@ -115,6 +117,7 @@ class StartIdeBridge extends EventEmitter {
           type: IdeMessageTypes.IDE_SESSION_STARTED,
           clientId,
           requestId: message.requestId,
+          originRequestId: message.originRequestId,
           ideSessionId: "idea_started_session",
           workspaceRoot: this.workspaceRoot,
           state: "running",
@@ -207,6 +210,81 @@ test("omitted mode with only a source location routes through IDE launch", async
   );
 });
 
+test("remote IDE launch fails closed for a client without causal start support", async () => {
+  const policy = loadPolicy("breakpilot.yaml");
+  const bridge = new StartIdeBridge(policy.workspace.root);
+  bridge.registry.update("idea_start", {
+    debuggerFeatures: { causalDebugStart: false }
+  });
+  const manager = new DebugSessionManager({
+    policy,
+    ideBridge: bridge as unknown as ConstructorParameters<typeof DebugSessionManager>[0]["ideBridge"]
+  });
+
+  await assert.rejects(
+    manager.bpDebugStart({ filePath: "src/serve.ts", line: 1 }),
+    (error: unknown) => (error as { code?: string }).code === "UNSUPPORTED_CAPABILITY"
+  );
+  assert.equal(bridge.sent.length, 0);
+});
+
+test("remote IDE launch ignores anonymous and wrong-origin lifecycle events", async () => {
+  const policy = loadPolicy("breakpilot.yaml");
+  class WrongOriginBridge extends StartIdeBridge {
+    override sendToClient(clientId: string | undefined, message: Partial<BridgeMessage>): boolean {
+      if (clientId !== "idea_start") return false;
+      this.sent.push({ ...message, clientId } as BridgeMessage);
+      if (message.type === IdeMessageTypes.AGENT_START_DEBUG) {
+        queueMicrotask(() => {
+          for (const [ideSessionId, originRequestId] of [
+            ["anonymous-session", undefined],
+            ["wrong-origin-session", "foreign-request"],
+            ["trusted-session", message.originRequestId]
+          ] as const) {
+            const started: BridgeMessage = {
+              type: IdeMessageTypes.IDE_SESSION_STARTED,
+              ideSessionId,
+              originRequestId,
+              workspaceRoot: this.workspaceRoot,
+              state: "running",
+              active: true
+            };
+            this.registry.upsertSession(String(clientId), started, "running");
+            this.emit(IdeMessageTypes.IDE_SESSION_STARTED, { clientId, message: started });
+          }
+        });
+      }
+      return true;
+    }
+  }
+  const bridge = new WrongOriginBridge(policy.workspace.root);
+  const manager = new DebugSessionManager({ policy, ideBridge: bridge as any });
+
+  const response = await manager.bpDebugStart({ filePath: "src/serve.ts", line: 1, timeout: 100 });
+
+  assert.equal(response.ideSessionId, "trusted-session");
+});
+
+test("failed remote IDE launch dispatch removes every start waiter", async () => {
+  const policy = loadPolicy("breakpilot.yaml");
+  const bridge = new StartIdeBridge(policy.workspace.root);
+  bridge.sendToClient = () => false;
+  const manager = new DebugSessionManager({ policy, ideBridge: bridge as any });
+  const baseline = {
+    command: bridge.listenerCount(IdeMessageTypes.IDE_COMMAND_RESULT),
+    started: bridge.listenerCount(IdeMessageTypes.IDE_SESSION_STARTED),
+    paused: bridge.listenerCount(IdeMessageTypes.IDE_SESSION_PAUSED)
+  };
+
+  await assert.rejects(
+    manager.bpDebugStart({ filePath: "src/serve.ts", line: 1, timeout: 20 }),
+    (error: unknown) => (error as { code?: string }).code === "IDE_BRIDGE_DISCONNECTED"
+  );
+  assert.equal(bridge.listenerCount(IdeMessageTypes.IDE_COMMAND_RESULT), baseline.command);
+  assert.equal(bridge.listenerCount(IdeMessageTypes.IDE_SESSION_STARTED), baseline.started);
+  assert.equal(bridge.listenerCount(IdeMessageTypes.IDE_SESSION_PAUSED), baseline.paused);
+});
+
 test("explicit launch remains authoritative when ideSessionId is present", async () => {
   const { router, adapter } = dapRouter();
 
@@ -250,6 +328,7 @@ test("omitted mode with ideSessionId still adopts the matching IDE session", asy
     state: "paused",
     active: true,
     language: "java",
+    pauseEpoch: 1,
     threadId: 7,
     topFrame: { id: 11, name: "main", line: 1, source: { path: "src/serve.ts" } }
   }, "paused");

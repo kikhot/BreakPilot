@@ -50,7 +50,9 @@ class PendingResponseIdeBridge extends EventEmitter {
       clientId: "ide-client-pending",
       ide: "idea",
       workspaceRoot,
-      capabilities: { variableSnapshot: true, visualBreakpoints: true }
+      capabilities: { variableSnapshot: true, visualBreakpoints: true },
+      debuggerProtocolVersion: 2,
+      debuggerFeatures: { causalDebugStart: true }
     });
   }
 
@@ -1048,6 +1050,7 @@ test("a revoked nested IDE command error is ignored until an ordinary correlated
       message: {
         type: IdeMessageTypes.IDE_COMMAND_RESULT,
         requestId,
+        originRequestId: requestId,
         error: revocable.proxy
       }
     }));
@@ -1060,12 +1063,13 @@ test("a revoked nested IDE command error is ignored until an ordinary correlated
       ideSessionId: "deep-safe-start-session",
       workspaceRoot: policy.workspace.root,
       active: true
-    }, "paused");
+    }, "running");
     bridge.emit(IdeMessageTypes.IDE_COMMAND_RESULT, {
       clientId: outbound.clientId,
       message: {
         type: IdeMessageTypes.IDE_COMMAND_RESULT,
         requestId,
+        originRequestId: requestId,
         ideSessionId: "deep-safe-start-session"
       }
     });
@@ -1079,6 +1083,10 @@ test("a revoked nested IDE command error is ignored until an ordinary correlated
 test("a revoked scalar IDE session id is ignored before start-wait registry lookup", async () => {
   const { manager, provider, bridge } = realIdeAssociationFixture();
   const record = manager.sessions.get(provider.sessionId);
+  bridge.registry.update(provider.ideClientId, {
+    debuggerProtocolVersion: 2,
+    debuggerFeatures: { causalDebugStart: true }
+  });
   const sent: AnyRecord[] = [];
   (bridge as any).sendToClient = (_clientId: string, message: AnyRecord): boolean => {
     sent.push(message);
@@ -1100,6 +1108,7 @@ test("a revoked scalar IDE session id is ignored before start-wait registry look
       message: {
         type: IdeMessageTypes.IDE_COMMAND_RESULT,
         requestId,
+        originRequestId: requestId,
         ideSessionId: revocable.proxy
       }
     }));
@@ -1108,18 +1117,27 @@ test("a revoked scalar IDE session id is ignored before start-wait registry look
     assert.equal(manager.sessions.maybeGet(record.sessionId), record);
     assert.equal(record.state, "paused");
   } finally {
+    bridge.registry.upsertSession(provider.ideClientId, {
+      type: IdeMessageTypes.IDE_SESSION_STARTED,
+      ideSessionId: "scalar-recovery-session",
+      originRequestId: requestId,
+      workspaceRoot: provider.workspaceRoot,
+      active: true
+    }, "running");
     bridge.emit(IdeMessageTypes.IDE_COMMAND_RESULT, {
       clientId: provider.ideClientId,
       message: {
         type: IdeMessageTypes.IDE_COMMAND_RESULT,
         requestId,
-        ideSessionId: provider.ideSessionId
+        originRequestId: requestId,
+        ideSessionId: "scalar-recovery-session"
       }
     });
   }
 
   const started = await pending;
-  assert.equal(started.sessionId, record.sessionId);
+  assert.equal(started.ideSessionId, "scalar-recovery-session");
+  assert.notEqual(started.sessionId, record.sessionId);
   assert.equal(record.state, "paused");
 });
 
@@ -1285,6 +1303,7 @@ test("plain object and array IDE start IDs are ignored before registry lookup", 
         message: {
           type: IdeMessageTypes.IDE_COMMAND_RESULT,
           requestId,
+          originRequestId: requestId,
           ideSessionId
         }
       }));
@@ -1299,12 +1318,13 @@ test("plain object and array IDE start IDs are ignored before registry lookup", 
       ideSessionId: "scalar-safe-start-session",
       workspaceRoot: policy.workspace.root,
       active: true
-    }, "paused");
+    }, "running");
     bridge.emit(IdeMessageTypes.IDE_COMMAND_RESULT, {
       clientId: outbound.clientId,
       message: {
         type: IdeMessageTypes.IDE_COMMAND_RESULT,
         requestId,
+        originRequestId: requestId,
         ideSessionId: "scalar-safe-start-session"
       }
     });
@@ -1326,6 +1346,7 @@ test("IDE start errors safely fall back for nested scalars and preserve normal s
     message: {
       type: IdeMessageTypes.IDE_COMMAND_RESULT,
       requestId: malformedRequestId,
+      originRequestId: malformedRequestId,
       error: { code: {}, message: [] }
     }
   }));
@@ -1343,6 +1364,7 @@ test("IDE start errors safely fall back for nested scalars and preserve normal s
     message: {
       type: IdeMessageTypes.IDE_COMMAND_RESULT,
       requestId: normalRequestId,
+      originRequestId: normalRequestId,
       error: { code: "IDE_START_REJECTED", message: "IDE rejected the start request." }
     }
   }));
@@ -1835,7 +1857,9 @@ test("IDE debug start correlates session identity from the trusted bridge envelo
         clientId: "ide-client-live",
         ide: "idea",
         workspaceRoot: policy.workspace.root,
-        capabilities: { variableSnapshot: true }
+        capabilities: { variableSnapshot: true },
+        debuggerProtocolVersion: 2,
+        debuggerFeatures: { causalDebugStart: true }
       });
     }
 
@@ -1845,16 +1869,18 @@ test("IDE debug start correlates session identity from the trusted bridge envelo
         this.registry.upsertSession(clientId, {
           type: IdeMessageTypes.IDE_SESSION_STARTED,
           ideSessionId: "trusted-envelope-session",
+          originRequestId: message.originRequestId,
           workspaceRoot: policy.workspace.root,
           active: true
-        }, "paused");
+        }, "running");
         this.emit(IdeMessageTypes.IDE_SESSION_STARTED, {
           clientId,
           message: {
             type: IdeMessageTypes.IDE_SESSION_STARTED,
             clientId: "spoofed-inner-client",
             ideSessionId: "trusted-envelope-session",
-            requestId: message.requestId
+            requestId: message.requestId,
+            originRequestId: message.originRequestId
           }
         });
       });

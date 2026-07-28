@@ -1,10 +1,7 @@
-const counters = new Map<string, number>();
+import crypto from "node:crypto";
 
 export function makeId(prefix: string): string {
-  const next = (counters.get(prefix) ?? 0) + 1;
-  counters.set(prefix, next);
-  const stamp = Date.now().toString(36);
-  return `${prefix}_${stamp}_${String(next).padStart(4, "0")}`;
+  return `${prefix}_${crypto.randomUUID()}`;
 }
 
 export function makeAuditId(): string {

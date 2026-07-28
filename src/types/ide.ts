@@ -10,6 +10,7 @@ export interface DebuggerFeatureMap {
   stackPagination?: boolean;
   variableHandles?: boolean;
   nativeSetVariable?: boolean;
+  causalDebugStart?: boolean;
 }
 
 export interface DebuggerProtocolInfo {
@@ -31,6 +32,7 @@ export interface BridgeMessage extends DebuggerProtocolInfo {
   action?: string;
   command?: string;
   requestId?: string;
+  originRequestId?: string;
   pauseEpoch?: number;
   expectedPauseEpoch?: number;
   ref?: RuntimeReference;

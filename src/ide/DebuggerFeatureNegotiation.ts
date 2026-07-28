@@ -5,7 +5,8 @@ const featureNames = [
   "eventStream",
   "stackPagination",
   "variableHandles",
-  "nativeSetVariable"
+  "nativeSetVariable",
+  "causalDebugStart"
 ] as const;
 
 export function negotiateDebuggerFeatures(

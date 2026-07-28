@@ -74,16 +74,24 @@ export function dapProviderCapabilities(
 export function ideProviderCapabilities(raw: AnyRecord = {}): RuntimeProviderCapabilities {
   const setVariable = enabled(raw, "setVariable", "supportsSetVariable");
   const setVariableMode = raw.setVariableMode ?? raw.setValueMode;
+  const variableHandles = raw.variableHandles === true;
+  const nativeSetVariable = raw.nativeSetVariable === true;
   return {
     pause: enabled(raw, "debugCommands") ? "native" : "unsupported",
     stepping: enabled(raw, "debugCommands") ? "native" : "unsupported",
     runToLine: enabled(raw, "runToLine", "supportsRunToLine") ? "native" : "unsupported",
-    variableReferences: enabled(raw, "variableSnapshot") ? "snapshot" : "unsupported",
-    setValue: !setVariable
-      ? "unsupported"
-      : setVariableMode === "evaluateAssignment"
-        ? "evaluateAssignment"
-        : "native",
+    variableReferences: variableHandles
+      ? "native"
+      : enabled(raw, "variableSnapshot")
+        ? "snapshot"
+        : "unsupported",
+    setValue: nativeSetVariable
+      ? "native"
+      : !setVariable
+        ? "unsupported"
+        : setVariableMode === "evaluateAssignment"
+          ? "evaluateAssignment"
+          : "native",
     breakpointUpdate: "unsupported",
     conditionalBreakpoints: enabled(raw, "conditionalBreakpoints", "supportsConditionalBreakpoints")
       ? "native"

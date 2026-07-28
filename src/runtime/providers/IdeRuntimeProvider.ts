@@ -31,6 +31,7 @@ import {
   type SafeBridgeSnapshot
 } from "../../ide/BridgeEventDecoder.ts";
 import { IdeMessageTypes } from "../../ide/IdeProtocol.ts";
+import { isDebuggerProtocolV2 } from "../../ide/DebuggerFeatureNegotiation.ts";
 import { BreakPilotError, ErrorCodes } from "../../utils/errors.ts";
 import { makeId } from "../../utils/ids.ts";
 import { createDeferred, withTimeout } from "../../utils/timeout.ts";
@@ -40,6 +41,10 @@ import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../ProviderC
 type StopTransitionBoundary = {
   operation: string;
   revision: number;
+  originRequestId: string;
+  pauseEpoch?: number;
+  causal: boolean;
+  capturedEpoch?: number;
   capturedStop?: StoppedEvent;
   listener?: (event: unknown) => void;
 };
@@ -84,8 +89,14 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
 
   get capabilities(): RuntimeProviderCapabilities {
     const client = this.bridge.registry.get(this.ideClientId)?.capabilities ?? {};
-    const session = this.#sessionInfo()?.capabilities ?? {};
-    return ideProviderCapabilities(mergeIdeCapabilityRecords(client, session));
+    const sessionInfo = this.#sessionInfo();
+    const session = sessionInfo?.capabilities ?? {};
+    const features = sessionInfo?.negotiatedDebuggerFeatures;
+    return ideProviderCapabilities({
+      ...mergeIdeCapabilityRecords(client, session),
+      variableHandles: features?.variableHandles === true,
+      nativeSetVariable: features?.nativeSetVariable === true
+    });
   }
 
   get threadId(): number | null {
@@ -155,7 +166,9 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     if (
       transition?.capturedStop &&
       current?.state === "paused" &&
-      this.#sessionRevision() > transition.revision
+      (transition.causal
+        ? transition.capturedEpoch !== undefined && current.pauseEpoch === transition.capturedEpoch
+        : this.#sessionRevision() > transition.revision)
     ) {
       const captured = transition.capturedStop;
       this.#clearStopTransition(transition);
@@ -163,7 +176,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     }
     const currentStopped =
       current?.state === "paused" &&
-      (!transition || this.#sessionRevision() > transition.revision)
+      (!transition || (!transition.causal && this.#sessionRevision() > transition.revision))
         ? this.#stoppedFromSession(current)
         : null;
     if (currentStopped) {
@@ -187,7 +200,13 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       ) {
         return;
       }
-      if (transition && this.#sessionRevision() <= transition.revision) return;
+      if (transition) {
+        if (transition.causal) {
+          if (!this.#matchesStopOrigin(message, transition)) return;
+        } else if (this.#sessionRevision() <= transition.revision) {
+          return;
+        }
+      }
       const stopped = this.#stoppedFromMessage(message, requestId);
       if (!stopped) return;
       this.bridge.off("message", listener);
@@ -238,6 +257,47 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     threadId: ThreadId | null | undefined = this.threadId,
     request: RuntimeStackRequest = { offset: 0, limit: 20 }
   ): Promise<RuntimeStackResult> {
+    const session = this.#sessionInfo();
+    if (session?.negotiatedDebuggerFeatures?.stackPagination) {
+      if (request.pauseEpoch !== undefined && request.pauseEpoch !== session.pauseEpoch) {
+        throw this.#staleCorrelationError(session.pauseEpoch, request.pauseEpoch, "stack");
+      }
+      const response = await this.#request(
+        IdeMessageTypes.AGENT_REQUEST_STACK,
+        { threadId, offset: request.offset, limit: request.limit },
+        [IdeMessageTypes.IDE_STACK_SNAPSHOT],
+        5000
+      );
+      const raw = publicBridgeSnapshot((response.result ?? response) as SafeBridgeSnapshot) as AnyRecord;
+      const completeness = raw.completeness === "complete" || raw.completeness === "partial"
+        ? raw.completeness
+        : "unknown";
+      const stackFrames = Array.isArray(raw.stackFrames) ? raw.stackFrames : [];
+      const offset = typeof raw.offset === "number" && Number.isSafeInteger(raw.offset) && raw.offset >= 0
+        ? raw.offset
+        : request.offset;
+      const totalFrames = typeof raw.totalFrames === "number" && Number.isSafeInteger(raw.totalFrames) && raw.totalFrames >= 0
+        ? raw.totalFrames
+        : undefined;
+      const nextOffset = typeof raw.nextOffset === "number" && Number.isSafeInteger(raw.nextOffset) && raw.nextOffset > offset
+        ? raw.nextOffset
+        : undefined;
+      const truncationReason = raw.truncationReason === "limit" || raw.truncationReason === "provider" ||
+        raw.truncationReason === "timeout" || raw.truncationReason === "noSuspendContext"
+        ? raw.truncationReason
+        : undefined;
+      return {
+        threadId: raw.threadId ?? threadId ?? null,
+        stackFrames,
+        offset,
+        ...(totalFrames === undefined ? {} : { totalFrames }),
+        completeness,
+        partial: completeness !== "complete",
+        ...(nextOffset === undefined ? {} : { nextOffset }),
+        ...(truncationReason === undefined ? {} : { truncationReason }),
+        ...(typeof raw.pauseEpoch === "number" ? { pauseEpoch: raw.pauseEpoch } : {})
+      };
+    }
     const snapshot = await this.getRuntimeSnapshot({
       threadId,
       levels: request.offset + request.limit,
@@ -311,6 +371,31 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     args: AnyRecord,
     limits: Required<VariableLimits>
   ): Promise<InspectVariableResult | AnyRecord> {
+    const ref = args.ref ?? args.variablesReference;
+    const session = this.#sessionInfo();
+    if (typeof ref === "string" && session?.negotiatedDebuggerFeatures?.variableHandles) {
+      await this.#confirm(variableInspectionConfirmationRequest({
+        frameId: args.frameId,
+        threadId: args.threadId,
+        ref
+      }));
+      const response = await this.#request(
+        IdeMessageTypes.AGENT_REQUEST_VARIABLES,
+        {
+          ref,
+          options: {
+            ...args,
+            maxDepth: limits.maxDepth,
+            maxItems: limits.maxItems,
+            maxStringLength: limits.maxStringLength,
+            redactPatterns: limits.redactPatterns
+          }
+        },
+        [IdeMessageTypes.IDE_VARIABLES_SNAPSHOT],
+        args.timeoutMs ?? 5000
+      );
+      return publicBridgeSnapshot((response.result ?? response.snapshot ?? response) as SafeBridgeSnapshot) as AnyRecord;
+    }
     const snapshot = await this.getRuntimeSnapshot(
       {
         ...args,
@@ -326,19 +411,46 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async setVariable(args: AnyRecord): Promise<AnyRecord> {
+    if (args.ref !== undefined) {
+      if (typeof args.ref !== "string" || !this.#sessionInfo()?.negotiatedDebuggerFeatures?.nativeSetVariable) {
+        throw new BreakPilotError(
+          ErrorCodes.UNSUPPORTED_CAPABILITY,
+          "IDE provider does not support native mutation for this runtime reference.",
+          { providerKind: this.kind, ref: args.ref, capability: "nativeSetVariable" }
+        );
+      }
+      const result = await this.#command("set_variable", {
+        ref: args.ref,
+        newValue: args.newValue,
+        frameId: args.frameId,
+        threadId: args.threadId
+      }, IdeMessageTypes.AGENT_SET_VARIABLE);
+      return {
+        ...result,
+        applied: result.applied === true,
+        verified: result.verified === true,
+        mutationMode: "native"
+      };
+    }
     if (!Array.isArray(args.path) || args.path.length === 0) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "IDE variable mutation requires a non-empty path.", {
         providerKind: this.kind,
         path: args.path
       });
     }
-    return this.#command("set_variable", {
+    const result = await this.#command("set_variable", {
       path: args.path,
       newValue: args.newValue,
       frameId: args.frameId,
       frameIndex: args.frameIndex,
       threadId: args.threadId
     }, IdeMessageTypes.AGENT_SET_VARIABLE);
+    return {
+      ...result,
+      applied: result.applied !== false,
+      verified: false,
+      mutationMode: "evaluateAssignment"
+    };
   }
 
   async evaluate(expression: string, options: AnyRecord = {}): Promise<AnyRecord> {
@@ -379,9 +491,10 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
 
   async pause(threadId: number | null = this.threadId): Promise<AnyRecord> {
     await this.#confirm(debugControlConfirmationRequest("pause", { threadId }));
-    const transition = this.#armStopTransition("pause");
+    const originRequestId = makeId("ide_req");
+    const transition = this.#armStopTransition("pause", originRequestId);
     try {
-      return await this.#command("pause", { threadId }, IdeMessageTypes.AGENT_PAUSE);
+      return await this.#command("pause", { threadId }, IdeMessageTypes.AGENT_PAUSE, originRequestId);
     } catch (error) {
       this.#clearStopTransition(transition);
       throw error;
@@ -400,7 +513,8 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       line: args.line,
       ...(args.column === undefined ? {} : { column: args.column })
     }));
-    const transition = this.#armStopTransition("run_to_line");
+    const originRequestId = makeId("ide_req");
+    const transition = this.#armStopTransition("run_to_line", originRequestId);
     try {
       const result = await this.#command("run_to_line", {
         filePath: args.filePath,
@@ -408,7 +522,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         ...(args.column === undefined ? {} : { column: args.column }),
         threadId: args.threadId ?? this.threadId,
         timeoutMs: args.timeoutMs
-      }, IdeMessageTypes.AGENT_RUN_TO_LINE);
+      }, IdeMessageTypes.AGENT_RUN_TO_LINE, originRequestId);
       if (result.status === "stopped") {
         this.#clearStopTransition(transition);
         return {
@@ -461,9 +575,10 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
         : kind === "out"
           ? IdeMessageTypes.AGENT_STEP_OUT
           : IdeMessageTypes.AGENT_STEP_OVER;
-    const transition = this.#armStopTransition(`step_${kind}`);
+    const originRequestId = makeId("ide_req");
+    const transition = this.#armStopTransition(`step_${kind}`, originRequestId);
     try {
-      return await this.#command(`step_${kind}`, { threadId }, messageType);
+      return await this.#command(`step_${kind}`, { threadId }, messageType, originRequestId);
     } catch (error) {
       this.#clearStopTransition(transition);
       throw error;
@@ -478,13 +593,19 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     return this.#command("stop_debug", options, IdeMessageTypes.AGENT_STOP_DEBUG);
   }
 
-  async #command(command: string, payload: AnyRecord, type = "agent_evaluate"): Promise<AnyRecord> {
+  async #command(
+    command: string,
+    payload: AnyRecord,
+    type = "agent_evaluate",
+    requestId?: string
+  ): Promise<AnyRecord> {
     const response = await this.#request(
       type,
       { command, ...payload },
       [IdeMessageTypes.IDE_COMMAND_RESULT],
       payload.timeoutMs ?? 5000,
-      (message) => !message.command || message.command === command
+      (message) => message.command === command,
+      requestId
     );
     const bridgeError = bridgeErrorPayload(response.error);
     if (bridgeError) {
@@ -500,6 +621,8 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   async #confirm(request: IdeConfirmationRequest): Promise<void> {
     const confirmationId = makeId("confirm");
     const sessionInfo = this.#sessionInfo();
+    const causal = this.#usesV2Correlation(sessionInfo);
+    const expectedPauseEpoch = causal ? sessionInfo?.pauseEpoch : undefined;
     const topFrame = sessionInfo?.topFrame as AnyRecord | undefined;
     const source = topFrame?.source as AnyRecord | undefined;
     const deferred = createDeferred<void>();
@@ -508,6 +631,14 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       if (!decoded || decoded.clientId !== this.ideClientId) return;
       const message = decoded.message as BridgeMessage;
       if (message.confirmationId !== confirmationId) return;
+      if (causal) {
+        if (message.ideSessionId !== this.ideSessionId || message.sessionId !== this.sessionId) return;
+        if (message.pauseEpoch !== expectedPauseEpoch) {
+          this.bridge.off("message", listener);
+          deferred.reject(this.#staleCorrelationError(expectedPauseEpoch, message.pauseEpoch, "confirmation"));
+          return;
+        }
+      }
       if (message.type === IdeMessageTypes.USER_REJECT_CONTINUE) {
         this.bridge.off("message", listener);
         deferred.reject(
@@ -527,21 +658,27 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     this.bridge.on("message", listener);
     // Enrich the policy-level request with live IDE context here so every
     // caller gets consistent dialog text, audit metadata, and allowlist inputs.
-    this.#send({
-      type: "agent_request_confirmation",
-      confirmationId,
-      action: request.action,
-      actionKind: request.actionKind,
-      riskLevel: request.riskLevel,
-      title: request.title,
-      description: request.description,
-      expressionPreview: request.expressionPreview,
-      sessionName: request.sessionName ?? sessionInfo?.name,
-      file: request.file ?? source?.path,
-      line: request.line ?? topFrame?.line,
-      rememberScopes: request.rememberScopes,
-      payload: request.payload
-    });
+    try {
+      this.#send({
+        type: "agent_request_confirmation",
+        confirmationId,
+        ...(expectedPauseEpoch === undefined ? {} : { expectedPauseEpoch }),
+        action: request.action,
+        actionKind: request.actionKind,
+        riskLevel: request.riskLevel,
+        title: request.title,
+        description: request.description,
+        expressionPreview: request.expressionPreview,
+        sessionName: request.sessionName ?? sessionInfo?.name,
+        file: request.file ?? source?.path,
+        line: request.line ?? topFrame?.line,
+        rememberScopes: request.rememberScopes,
+        payload: request.payload
+      });
+    } catch (error) {
+      this.bridge.off("message", listener);
+      throw error;
+    }
     return withTimeout(deferred.promise, this.confirmationTimeoutMs, () => {
       this.bridge.off("message", listener);
       return new BreakPilotError(ErrorCodes.IDE_CONFIRMATION_TIMEOUT, "Timed out waiting for IDE confirmation.", {
@@ -558,9 +695,13 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     payload: Partial<BridgeMessage>,
     responseTypes: string[],
     timeoutMs: number,
-    predicate: (message: BridgeMessage) => boolean = () => true
+    predicate: (message: BridgeMessage) => boolean = () => true,
+    requestedId?: string
   ): Promise<BridgeMessage> {
-    const requestId = makeId("ide_req");
+    const requestId = requestedId ?? makeId("ide_req");
+    const sessionInfo = this.#sessionInfo();
+    const causal = this.#usesV2Correlation(sessionInfo);
+    const expectedPauseEpoch = causal ? sessionInfo?.pauseEpoch : undefined;
     const deferred = createDeferred<BridgeMessage>();
     const listener = (event: unknown) => {
       const decoded = decodeBridgeEvent(event);
@@ -568,6 +709,14 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       const message = decoded.message as BridgeMessage;
       if (message.requestId !== requestId) return;
       if (!responseTypes.includes(message.type)) return;
+      if (causal) {
+        if (message.ideSessionId !== this.ideSessionId || message.sessionId !== this.sessionId) return;
+        if (message.pauseEpoch !== expectedPauseEpoch) {
+          this.bridge.off("message", listener);
+          deferred.reject(this.#staleCorrelationError(expectedPauseEpoch, message.pauseEpoch, type));
+          return;
+        }
+      }
       if (!predicate(message)) return;
       this.bridge.off("message", listener);
       const bridgeError = bridgeErrorPayload(message.error);
@@ -584,7 +733,18 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       deferred.resolve(message);
     };
     this.bridge.on("message", listener);
-    this.#send({ ...payload, type, requestId });
+    try {
+      this.#send({
+        ...payload,
+        type,
+        requestId,
+        originRequestId: requestId,
+        ...(expectedPauseEpoch === undefined ? {} : { expectedPauseEpoch })
+      });
+    } catch (error) {
+      this.bridge.off("message", listener);
+      throw error;
+    }
     return withTimeout(deferred.promise, timeoutMs, () => {
       this.bridge.off("message", listener);
       return new BreakPilotError(ErrorCodes.IDE_BRIDGE_DISCONNECTED, "Timed out waiting for IDE bridge response.", {
@@ -620,7 +780,7 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     return this.bridge.registry.getSessionRevision(this.ideSessionId, this.ideClientId);
   }
 
-  #armStopTransition(operation: string): StopTransitionBoundary {
+  #armStopTransition(operation: string, originRequestId: string): StopTransitionBoundary {
     if (this.pendingStopTransition) {
       throw new BreakPilotError(
         ErrorCodes.TOOL_FAILED,
@@ -635,7 +795,10 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     }
     const transition: StopTransitionBoundary = {
       operation,
-      revision: this.#sessionRevision()
+      revision: this.#sessionRevision(),
+      originRequestId,
+      pauseEpoch: this.#sessionInfo()?.pauseEpoch,
+      causal: this.#usesV2Correlation()
     };
     transition.listener = (event: unknown) => {
       const decoded = decodeBridgeEvent(event);
@@ -651,9 +814,16 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       ) {
         return;
       }
-      if (this.#sessionRevision() <= transition.revision) return;
+      if (transition.causal) {
+        if (!this.#matchesStopOrigin(message, transition)) return;
+      } else if (this.#sessionRevision() <= transition.revision) {
+        return;
+      }
       const stopped = this.#stoppedFromMessage(message);
-      if (stopped && !transition.capturedStop) transition.capturedStop = stopped;
+      if (stopped && !transition.capturedStop) {
+        transition.capturedStop = stopped;
+        transition.capturedEpoch = message.pauseEpoch;
+      }
     };
     this.pendingStopTransition = transition;
     this.bridge.on("message", transition.listener);
@@ -665,6 +835,36 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       if (transition.listener) this.bridge.off("message", transition.listener);
       this.pendingStopTransition = null;
     }
+  }
+
+  #usesV2Correlation(session = this.#sessionInfo()): boolean {
+    const client = this.bridge.registry.get(this.ideClientId);
+    return Boolean(client && session && isDebuggerProtocolV2(client, session));
+  }
+
+  #matchesStopOrigin(message: BridgeMessage, transition: StopTransitionBoundary): boolean {
+    return message.originRequestId === transition.originRequestId &&
+      typeof message.pauseEpoch === "number" &&
+      Number.isSafeInteger(message.pauseEpoch) &&
+      typeof transition.pauseEpoch === "number" &&
+      message.pauseEpoch > transition.pauseEpoch;
+  }
+
+  #staleCorrelationError(expected: number | undefined, received: unknown, operation: string): BreakPilotError {
+    return new BreakPilotError(
+      ErrorCodes.STALE_RUNTIME_HANDLE,
+      "IDE bridge response belongs to a different paused state.",
+      {
+        sessionId: this.sessionId,
+        ideSessionId: this.ideSessionId,
+        operation,
+        expectedPauseEpoch: expected,
+        receivedPauseEpoch: received,
+        currentPauseEpoch: this.#sessionInfo()?.pauseEpoch,
+        retrySafe: true,
+        recommendedAction: "Request fresh context and retry with references from the current pause."
+      }
+    );
   }
 
   #isPendingPresentation(result: AnyRecord): boolean {

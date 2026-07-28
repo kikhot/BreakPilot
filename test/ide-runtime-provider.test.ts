@@ -250,7 +250,9 @@ assert.deepEqual(setValue, {
   path: ["name"],
   oldValue: "\"Alan Turing\"",
   newValue: "\"Katherine Johnson\"",
-  applied: true
+  applied: true,
+  verified: false,
+  mutationMode: "evaluateAssignment"
 });
 
 const runToLine = await provider.runToLine?.({

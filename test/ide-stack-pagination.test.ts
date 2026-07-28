@@ -195,8 +195,9 @@ test("legacy IDE snapshot fallback never fabricates stack completeness or a tota
         breakpointUpdate: false,
         eventStream: false,
         stackPagination: false,
-        variableHandles: false,
-        nativeSetVariable: false
+      variableHandles: false,
+      nativeSetVariable: false,
+      causalDebugStart: false
       },
       startedAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString()
