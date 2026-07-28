@@ -1,0 +1,1 @@
+{"schemaVersion":1,"sequence":1,"timestamp":"<timestamp-1>","provider":"breakpilot","direction":"response","stepId":"context","attempt":1,"payload":{"position":{"line":24},"values":{"normalizedName":"Ada Lovelace","analysis.score":28}}}

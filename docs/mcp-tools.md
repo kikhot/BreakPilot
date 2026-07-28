@@ -119,11 +119,12 @@ adapter advertises `gotoTargets` and BreakPilot has the causal DAP primitives
 needed to prove a fresh stop. If native goto is unavailable, it is `fallback`
 only for a manager-wired DAP session with the shared temporary-breakpoint
 transaction; an unwired/direct provider remains `unsupported`. DAP breakpoint
-updates use complete-source reconciliation as a fallback; event drain remains
-capability-gated. IDE capabilities are derived from the live bridge. The
-current IDEA and VS Code bridges advertise native run-to-line and
-`evaluateAssignment` set-value; other IDE features are enabled only when the
-bridge advertises them.
+updates use complete-source reconciliation as a fallback. IDE capabilities are
+derived from the negotiated live bridge v2 session: IDEA and VS Code advertise
+native run-to-line, pause-scoped variable handles, native set-value with
+read-back evidence, breakpoint reconciliation fallback, paged stacks, and an
+event stream only when those sources are actually wired. Legacy bridge clients
+retain truthful snapshot and `evaluateAssignment` fallback modes.
 
 The manager enforces this matrix before dispatch. `unsupported` pause,
 stepping, run-to-line, variable-reference inspection, set-value, breakpoint
@@ -347,9 +348,11 @@ Update mode accepts `breakpointId` plus update fields, but cannot also contain
 {"breakpointId":"bp_123","enabled":false}
 ```
 
-The update branch is registered so clients can validate a stable contract, but
-all current providers report `breakpointUpdate: "unsupported"`; the call
-therefore returns `UNSUPPORTED_CAPABILITY` rather than claiming an update.
+The update branch uses complete-source reconciliation for DAP and negotiated
+IDE v2 providers. It preserves owner protection, commits only complete provider
+evidence, and attempts an atomic rollback on failure. An IDE source replacement
+removes only stale agent-owned breakpoints; user breakpoints are never deleted.
+Legacy providers still return `UNSUPPORTED_CAPABILITY`.
 
 Set results include `breakpointId`, `filePath`, `line`, `verified`, and
 `lineText` when the source file is readable.
@@ -377,3 +380,25 @@ or:
 BreakPilot still enforces workspace boundaries, attach host/port policy,
 production-environment blocking, variable limits, redaction rules, and evaluate
 mode restrictions. Use `bp_debug_eval` with `mode: "readonly"` by default.
+
+## Differential evidence
+
+The repository fixture is a verified `synthetic-replay`, not live capture
+proof. Verify its hashes, sanitizer idempotence, lineage, and semantics with:
+
+```bash
+npm run evidence:differential:verify -- \
+  --evidence-dir "$PWD/test/fixtures/evidence/differential-v1"
+```
+
+Live IDEA/BreakPilot evidence requires an absolute ignored configuration and
+explicit provider-local MCP commands:
+
+```bash
+npm run test:e2e:idea-differential -- \
+  --config /absolute/ignored/differential-config.json
+```
+
+Raw transcripts are retained only below `.breakpilot/evidence/differential/`.
+Missing IDEA MCP, bridge, or paused-session infrastructure is a non-zero
+`EVIDENCE_INFRASTRUCTURE_UNAVAILABLE`, never a skipped or synthetic success.

@@ -111,9 +111,11 @@ live session，或者唯一 paused session。多个候选时返回 `SESSION_AMBI
 adapter 声明 `gotoTargets`，且 BreakPilot 具备证明 fresh stop 的因果 DAP primitive
 时才是 `native`。没有 native goto 时，只有 manager 已接线、可使用共享临时断点事务的
 DAP session 才会声明 `fallback`；未接线/direct provider 仍为 `unsupported`。DAP 的
-breakpoint update 使用完整 source reconciliation fallback，event drain 仍受能力 gate
-控制。IDE 能力来自 live bridge；当前 IDEA 与 VS Code bridge 声明 native
-run-to-line，以及 `evaluateAssignment` 形式的 set-value，其他能力必须由 bridge 明确声明。
+breakpoint update 使用完整 source reconciliation fallback。IDE 能力来自协商后的 live
+bridge v2 session；当前 IDEA 与 VS Code 可声明 native run-to-line、pause-scoped variable
+handle、带写后回读证据的 native set-value、breakpoint reconciliation fallback、分页栈和
+真实接线的 event stream。旧 bridge 客户端继续诚实声明 snapshot 与
+`evaluateAssignment` 降级。
 
 manager 会在 dispatch 前强制执行该矩阵。pause、stepping、run-to-line、
 variable-reference inspection、set-value、breakpoint update 和 event drain 为
@@ -315,9 +317,10 @@ typed contract 中，但请求非默认行为时当前会返回 `UNSUPPORTED_CAP
 {"breakpointId":"bp_123","enabled":false}
 ```
 
-该分支已经注册，以保证客户端可针对稳定契约做校验；但当前所有 provider 都声明
-`breakpointUpdate: "unsupported"`，因此调用会返回 `UNSUPPORTED_CAPABILITY`，
-不会假装更新成功。
+该分支对 DAP 和协商成功的 IDE v2 provider 使用完整 source reconciliation。只有所有
+provider evidence 完整时才提交，失败时尝试原子恢复，并保留 owner 保护。IDE 对账只删除
+陈旧的 agent-owned breakpoint，不删除用户断点；旧 provider 仍返回
+`UNSUPPORTED_CAPABILITY`。
 
 返回中包含 `breakpointId`、`filePath`、`line`、`verified`；源文件可读时包含 `lineText`。
 
@@ -342,3 +345,24 @@ BreakPilot local project store；已经选中的 native query 若执行失败则
 
 BreakPilot 仍执行 workspace 边界、attach host/port、生产环境阻断、变量读取限制、
 脱敏规则和 evaluate mode 限制。默认使用 `bp_debug_eval` 的 `mode: "readonly"`。
+
+## 差分证据
+
+仓库 fixture 是经过哈希、脱敏幂等性、lineage 和语义校验的 `synthetic-replay`，不是现场
+采集证明：
+
+```bash
+npm run evidence:differential:verify -- \
+  --evidence-dir "$PWD/test/fixtures/evidence/differential-v1"
+```
+
+真实 IDEA/BreakPilot 证据需要绝对路径的 ignored 配置和两套 provider-local MCP 命令：
+
+```bash
+npm run test:e2e:idea-differential -- \
+  --config /absolute/ignored/differential-config.json
+```
+
+raw transcript 只保留在 `.breakpilot/evidence/differential/`。IDEA MCP、bridge 或 paused
+session 不可用时命令以 `EVIDENCE_INFRASTRUCTURE_UNAVAILABLE` 非零退出，不能把跳过或
+synthetic replay 记为现场成功。
