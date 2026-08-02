@@ -81,9 +81,12 @@ class StackReader {
     ): Map<String, Any?> {
         val mapped = frames.map { frame ->
             val position = frame.sourcePosition
+            val displayName = StackFramePresentationReader.semanticName(frame)
             mapOf(
                 "id" to System.identityHashCode(frame),
-                "name" to frame.javaClass.simpleName,
+                "name" to displayName,
+                "displayName" to displayName,
+                "function" to displayName,
                 "line" to ((position?.line ?: -1) + 1),
                 "column" to 1,
                 "source" to mapOf("name" to position?.file?.name, "path" to position?.file?.path)

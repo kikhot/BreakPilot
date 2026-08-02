@@ -172,9 +172,12 @@ class IdeSessionTracker(
     private fun frameMap(session: XDebugSession): Map<String, Any?> {
         val frame = session.currentStackFrame ?: return emptyMap()
         val position = frame.sourcePosition
+        val displayName = StackFramePresentationReader.semanticName(frame)
         return mapOf(
             "id" to System.identityHashCode(frame),
-            "name" to frame.javaClass.simpleName,
+            "name" to displayName,
+            "displayName" to displayName,
+            "function" to displayName,
             "line" to ((position?.line ?: -1) + 1),
             "column" to 1,
             "source" to mapOf(
