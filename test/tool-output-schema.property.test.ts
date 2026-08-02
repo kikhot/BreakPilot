@@ -11,7 +11,7 @@ const expectedSuccessFields: Record<string, string[]> = {
   bp_debug_start: ["sessionId", "language", "mode", "state", "ideSessionId", "startMode", "providerKind", "capabilities", "warnings"],
   bp_debug_run_configurations: ["filePath", "configurations", "runPoints", "warnings"],
   bp_debug_status: ["activeSessionId", "sessions", "ideConnected", "ideSessions", "warnings"],
-  bp_debug_control: ["status", "reason", "position", "frame", "variables", "events", "alreadyStopped", "warnings"],
+  bp_debug_control: ["status", "reason", "position", "frame", "variables", "evidence", "events", "alreadyStopped", "warnings"],
   bp_debug_run_to_line: [
     "status",
     "targetReached",
@@ -40,7 +40,7 @@ const expectedSuccessFields: Record<string, string[]> = {
     "path", "ref", "oldValue", "newValue", "applied", "verified", "mutationMode", "result", "warnings"
   ],
   bp_debug_eval: ["expression", "value", "type", "result", "warnings"],
-  bp_debug_context: ["status", "position", "frames", "variables", "warnings"],
+  bp_debug_context: ["status", "position", "frames", "variables", "evidence", "warnings"],
   bp_debug_list_breakpoints: ["breakpoints", "totalCount", "enabledCount", "source", "warnings"],
   bp_debug_remove_breakpoint: ["breakpointId", "removed", "protected", "message", "warnings"]
 };

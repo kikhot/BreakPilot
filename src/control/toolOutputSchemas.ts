@@ -124,6 +124,29 @@ export const statusSuccessSchema: JsonSchema = {
   required: ["activeSessionId", "sessions", "ideConnected", "ideSessions"]
 };
 
+const evidenceFailureSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    scope: { type: "string", enum: ["stop", "stack", "frame"] },
+    code: { type: "string" },
+    message: { type: "string" }
+  },
+  required: ["scope", "code", "message"]
+};
+
+const evidenceSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    stop: { type: "string", enum: ["complete", "missing"] },
+    stack: { type: "string", enum: ["complete", "missing"] },
+    frame: { type: "string", enum: ["complete", "missing"] },
+    failures: { type: "array", items: evidenceFailureSchema }
+  },
+  required: ["frame", "failures"]
+};
+
 export const controlSuccessSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -133,6 +156,7 @@ export const controlSuccessSchema: JsonSchema = {
     position: nullablePositionSchema,
     frame: frameSchema,
     variables: { type: "array", items: scopeSchema },
+    evidence: evidenceSchema,
     events: eventsSchema,
     alreadyStopped: { type: "boolean" },
     warnings: warningsSchema
@@ -278,6 +302,7 @@ export const contextSuccessSchema: JsonSchema = {
     position: nullablePositionSchema,
     frames: { type: "array", items: frameSchema },
     variables: { type: "array", items: scopeSchema },
+    evidence: evidenceSchema,
     warnings: warningsSchema
   },
   required: ["status", "position", "frames", "variables"]

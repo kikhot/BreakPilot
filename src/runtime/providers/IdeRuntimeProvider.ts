@@ -28,6 +28,7 @@ import {
 import { IdeBridgeServer } from "../../ide/IdeBridgeServer.ts";
 import {
   decodeBridgeEvent,
+  decodeBridgeEventDetailed,
   publicBridgeSnapshot,
   safeBridgeDataRecord,
   type SafeBridgeSnapshot
@@ -124,28 +125,6 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
   }
 
   async setBreakpoints(filePath: string, breakpoints: BreakpointRecord[]): Promise<DapBreakpoint[]> {
-    if (this.capabilities.breakpointUpdate !== "unsupported") {
-      const desiredIds = new Set(breakpoints.map((breakpoint) => breakpoint.id));
-      const current = await this.listBreakpoints({ filePath, owner: "agent", includeDisabled: true });
-      const normalizedSource = path.resolve(filePath);
-      for (const breakpoint of current) {
-        if (
-          breakpoint.owner !== "agent" ||
-          path.resolve(breakpoint.file) !== normalizedSource ||
-          desiredIds.has(breakpoint.id)
-        ) {
-          continue;
-        }
-        const removal = await this.removeBreakpoint(breakpoint);
-        if (removal.removed !== true) {
-          throw new BreakPilotError(
-            ErrorCodes.BREAKPOINT_UPDATE_FAILED,
-            "IDE did not acknowledge removal of a stale BreakPilot breakpoint.",
-            { sessionId: this.sessionId, breakpointId: breakpoint.id, filePath }
-          );
-        }
-      }
-    }
     const results: DapBreakpoint[] = [];
     for (const breakpoint of breakpoints) {
       const response = await this.#request(
@@ -762,8 +741,32 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     const expectedPauseEpoch = causal ? sessionInfo?.pauseEpoch : undefined;
     const deferred = createDeferred<BridgeMessage>();
     const listener = (event: unknown) => {
-      const decoded = decodeBridgeEvent(event);
-      if (!decoded || decoded.clientId !== this.ideClientId) return;
+      const decoded = decodeBridgeEventDetailed(event);
+      if (decoded.kind === "malformed" || decoded.clientId !== this.ideClientId) return;
+      if (decoded.kind === "rejected") {
+        const correlation = decoded.correlation;
+        if (correlation.requestId !== requestId) return;
+        if (correlation.type && !responseTypes.includes(correlation.type)) return;
+        if (causal && (
+          correlation.ideSessionId !== this.ideSessionId ||
+          correlation.sessionId !== this.sessionId ||
+          correlation.originRequestId !== requestId ||
+          correlation.pauseEpoch !== expectedPauseEpoch
+        )) return;
+        this.bridge.off("message", listener);
+        deferred.reject(new BreakPilotError(
+          ErrorCodes.BRIDGE_PAYLOAD_LIMIT,
+          "IDE bridge response exceeded the configured payload budget.",
+          {
+            sessionId: this.sessionId,
+            ideSessionId: this.ideSessionId,
+            requestId,
+            type,
+            responseTypes
+          }
+        ));
+        return;
+      }
       const message = decoded.message as BridgeMessage;
       if (message.requestId !== requestId) return;
       if (!responseTypes.includes(message.type)) return;
@@ -814,12 +817,21 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     }
     return withTimeout(deferred.promise, timeoutMs, () => {
       this.bridge.off("message", listener);
-      return new BreakPilotError(ErrorCodes.IDE_BRIDGE_DISCONNECTED, "Timed out waiting for IDE bridge response.", {
+      const stillConnected = Boolean(
+        this.bridge.registry.get(this.ideClientId) &&
+        this.bridge.registry.findSessionForClient(this.ideClientId, this.ideSessionId)
+      );
+      const code = stillConnected ? ErrorCodes.IDE_RESPONSE_TIMEOUT : ErrorCodes.IDE_DISCONNECTED;
+      const message = stillConnected
+        ? "Timed out waiting for a response from the connected IDE."
+        : "IDE disconnected while BreakPilot was waiting for a response.";
+      return new BreakPilotError(code, message, {
         sessionId: this.sessionId,
         ideSessionId: this.ideSessionId,
         requestId,
         type,
-        responseTypes
+        responseTypes,
+        timeoutMs
       });
     });
   }

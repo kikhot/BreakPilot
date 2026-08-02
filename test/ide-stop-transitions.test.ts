@@ -337,7 +337,7 @@ test("command timeout clears the transition boundary for a later standalone wait
       threadId: 7,
       timeoutMs: 25
     }),
-    (error: unknown) => (error as { code?: string }).code === ErrorCodes.IDE_BRIDGE_DISCONNECTED
+    (error: unknown) => (error as { code?: string }).code === ErrorCodes.IDE_RESPONSE_TIMEOUT
   );
   const stopped = await provider.waitForBreakpoint(25);
 

@@ -332,6 +332,57 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
 {
   const bridge = new FakeIdeBridge();
   bridge.addClient("idea_one", "idea", workspaceRoot);
+  bridge.listedBreakpoints = [
+    { id: "idea-native-user-63", file: filePath, line: 63, owner: "user", enabled: true, verified: true }
+  ];
+  const manager = managerWithBridge(bridge);
+
+  const protectedResult = await manager.bpDebugRemoveBreakpoint({
+    ide: "idea",
+    filePath,
+    line: 63
+  });
+  assert.equal(protectedResult.removed, false);
+  assert.equal(protectedResult.protected, true);
+  assert.equal(
+    bridge.sent.filter((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT).length,
+    0,
+    "default owner must protect a live user breakpoint"
+  );
+
+  const removed = await manager.bpDebugRemoveBreakpoint({
+    ide: "idea",
+    filePath,
+    line: 63,
+    owner: "all"
+  });
+  assert.equal(removed.removed, true);
+  assert.equal(removed.breakpointId, "idea-native-user-63");
+  assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_REMOVE_BREAKPOINT);
+  assert.equal(bridge.sent.at(-1)?.breakpointId, "idea-native-user-63");
+}
+
+{
+  const bridge = new FakeIdeBridge();
+  bridge.addClient("idea_one", "idea", workspaceRoot);
+  bridge.listedBreakpoints = [
+    { id: "another-native-breakpoint", file: filePath, line: 64, owner: "user", enabled: true, verified: true }
+  ];
+  const manager = managerWithBridge(bridge);
+
+  const missing = await manager.bpDebugRemoveBreakpoint({
+    ide: "idea",
+    filePath,
+    line: 65,
+    owner: "all"
+  });
+  assert.equal(missing.removed, false);
+  assert.equal(Object.hasOwn(missing, "breakpointId"), false);
+}
+
+{
+  const bridge = new FakeIdeBridge();
+  bridge.addClient("idea_one", "idea", workspaceRoot);
   const manager = managerWithBridge(bridge);
 
   const configurations = await manager.bpDebugRunConfigurations({ ide: "idea" });
@@ -344,6 +395,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
       supportsDynamicLaunchOverrides: true
     }
   ]);
+  assert.equal(Object.hasOwn(configurations, "runPoints"), false);
 
   const runPoints = await manager.bpDebugRunConfigurations({
     ide: "idea",
@@ -356,6 +408,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
       elementText: "com.example.demo.DemoApplication"
     }
   ]);
+  assert.equal(Object.hasOwn(runPoints, "configurations"), false);
   assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_LIST_RUN_CONFIGURATIONS);
 }
 

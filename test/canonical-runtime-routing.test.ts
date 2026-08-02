@@ -225,7 +225,7 @@ function createLiveIdeWithStaleDap(): IdeRoutingFixture {
     sessionId,
     source: "ide",
     language: "python",
-    threadId: "ide-thread",
+    threadId: 7,
     frameId: "ide-frame",
     stackFrames: [{ id: "ide-frame", name: "live", line: 12, source: { path: "live.py" } }],
     variables: {
@@ -245,7 +245,7 @@ function createLiveIdeWithStaleDap(): IdeRoutingFixture {
             name: "parent",
             kind: "object",
             valuePreview: "Parent@1",
-            variablesReference: 7,
+            variablesReference: "bpref_parent",
             truncated: false
           }
         }
@@ -270,7 +270,7 @@ function createLiveIdeWithStaleDap(): IdeRoutingFixture {
       tracepoints: "unsupported",
       eventDrain: "unsupported"
     },
-    threadId: "ide-thread",
+    threadId: 7,
     async setBreakpoints() { return []; },
     async waitForBreakpoint() { calls.waits += 1; return { reason: "breakpoint" }; },
     async getCallStack(_threadId: unknown, request: AnyRecord) {
@@ -290,6 +290,21 @@ function createLiveIdeWithStaleDap(): IdeRoutingFixture {
     },
     async inspectVariable(args: AnyRecord) {
       calls.inspections.push(args);
+      if (args.variablesReference === "bpref_parent") {
+        return {
+          ref: "bpref_parent",
+          pauseEpoch: 1,
+          items: [{
+            name: "child",
+            kind: "primitive",
+            valuePreview: "ready",
+            value: "ready",
+            variablesReference: 0,
+            truncated: false
+          }],
+          truncated: false
+        };
+      }
       return { source: "ide", variablesReference: args.variablesReference };
     },
     async setVariable(args: AnyRecord) {
@@ -377,6 +392,25 @@ const liveIdeRoutingCases: Array<{
       );
       assert.equal(calls.snapshots.length, 1);
     }
+  },
+  {
+    name: "lazy opaque path traversal",
+    run: async ({ manager, sessionId, calls }) => {
+      const result = await manager.bpDebugValue({
+        sessionId,
+        path: ["parent", "child"],
+        limit: 4,
+        maxDepth: 4
+      });
+      assert.equal(result.value, "ready");
+      assert.equal(calls.snapshots.length, 1);
+      assert.equal(calls.snapshots[0]?.objectFields, "shallow");
+      assert.equal(calls.snapshots[0]?.maxDepth, 0);
+      assert.deepEqual(
+        calls.inspections.map((call) => call.variablesReference),
+        ["bpref_parent"]
+      );
+    }
   }
 ];
 
@@ -387,6 +421,59 @@ for (const testCase of liveIdeRoutingCases) {
     assert.equal(fixture.dapTraffic(), 0);
   });
 }
+
+test("control preserves an applied stop and reports missing frame evidence", async () => {
+  const { manager, sessionId } = createLiveIdeWithStaleDap();
+  const provider = manager.sessions.get(sessionId).provider;
+  provider.waitForBreakpoint = async () => ({
+    reason: "step",
+    threadId: 7,
+    topFrame: { id: "ide-frame", line: 44, source: { path: "/workspace/Live.java" } }
+  });
+  provider.getRuntimeSnapshot = async () => {
+    throw new BreakPilotError(ErrorCodes.IDE_RESPONSE_TIMEOUT, "frame response timed out");
+  };
+
+  const result = await manager.bpDebugControl({
+    sessionId,
+    action: "wait",
+    includeFrame: true
+  });
+
+  assert.equal(result.status, "paused");
+  assert.deepEqual(result.position, { filePath: "/workspace/Live.java", line: 44 });
+  assert.deepEqual(result.evidence, {
+    frame: "missing",
+    failures: [{ scope: "frame", code: ErrorCodes.IDE_RESPONSE_TIMEOUT, message: "frame response timed out" }]
+  });
+  assert.deepEqual(result.warnings, ["Frame evidence is missing: frame response timed out"]);
+});
+
+test("context distinguishes missing frame evidence from completed empty variables", async () => {
+  const { manager, sessionId } = createLiveIdeWithStaleDap();
+  const provider = manager.sessions.get(sessionId).provider;
+  provider.waitForBreakpoint = async () => ({
+    reason: "breakpoint",
+    threadId: 7,
+    topFrame: { id: "ide-frame", line: 45, source: { path: "/workspace/Live.java" } }
+  });
+  provider.getRuntimeSnapshot = async () => {
+    throw new BreakPilotError(ErrorCodes.IDE_RESPONSE_TIMEOUT, "context frame timed out");
+  };
+
+  const result = await manager.bpDebugContext({ sessionId });
+
+  assert.deepEqual(result.position, { filePath: "/workspace/Live.java", line: 45 });
+  assert.equal((result.frames as AnyRecord[]).length, 1);
+  assert.deepEqual(result.variables, []);
+  assert.deepEqual(result.evidence, {
+    stop: "complete",
+    stack: "complete",
+    frame: "missing",
+    failures: [{ scope: "frame", code: ErrorCodes.IDE_RESPONSE_TIMEOUT, message: "context frame timed out" }]
+  });
+  assert.deepEqual(result.warnings, ["Frame evidence is missing: context frame timed out"]);
+});
 
 test("a DapRuntimeProvider supplies its live DAP session without a record mirror", async () => {
   const policy = loadPolicy("breakpilot.yaml");

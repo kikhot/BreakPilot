@@ -654,7 +654,7 @@ private data class StackSnapshotData(
     val partial: Boolean
 )
 
-private data class PresentationData(
+internal data class PresentationData(
     val valuePreview: String,
     val type: String?,
     val hasChildren: Boolean?,
@@ -662,15 +662,20 @@ private data class PresentationData(
     val valueTruncated: Boolean = false
 )
 
-private class CollectingValueNode(
+internal class CollectingValueNode(
     private val maxStringLength: Int,
-    private val done: (PresentationData) -> Unit
+    private val done: (PresentationData) -> Unit,
+    private val dispatch: ((() -> Unit) -> Unit) = { action ->
+        ApplicationManager.getApplication().invokeLater { action() }
+    }
 ) : XValueNode {
+    private val stateLock = Any()
     private var finished = false
+    private var provisional: PresentationData? = null
 
     override fun setPresentation(icon: Icon?, type: String?, value: String, hasChildren: Boolean) {
         if (isPendingPresentation(value)) return
-        finish(
+        submit(
             PresentationData(
                 valuePreview = truncateDisplay(value),
                 type = type?.takeIf { it.isNotBlank() }?.let { truncateDisplay(it) },
@@ -686,7 +691,7 @@ private class CollectingValueNode(
             presentation.renderValue(rendered)
             val text = rendered.text()
             if (isPendingPresentation(text)) return
-            finish(
+            submit(
                 PresentationData(
                     valuePreview = truncateDisplay(text),
                     type = presentation.type?.takeIf { it.isNotBlank() }?.let { truncateDisplay(it) },
@@ -701,25 +706,49 @@ private class CollectingValueNode(
 
     override fun setFullValueEvaluator(fullValueEvaluator: XFullValueEvaluator) {}
 
-    override fun isObsolete(): Boolean = finished
+    override fun isObsolete(): Boolean = synchronized(stateLock) { finished }
 
     fun finishUnavailable(error: String, hasChildren: Boolean? = null) {
-        finish(
-            PresentationData(
-                valuePreview = "<unavailable>",
-                type = null,
-                hasChildren = hasChildren,
-                presentationError = error
-            )
-        )
+        val data = synchronized(stateLock) {
+            if (finished) {
+                null
+            } else {
+                finished = true
+                val candidate = provisional
+                provisional = null
+                candidate?.copy(presentationError = error) ?: PresentationData(
+                    valuePreview = "<unavailable>",
+                    type = null,
+                    hasChildren = hasChildren,
+                    presentationError = error
+                )
+            }
+        } ?: return
+        dispatch { done(data) }
+    }
+
+    private fun submit(data: PresentationData) {
+        if (data.valuePreview.isEmpty() && data.hasChildren == true) {
+            synchronized(stateLock) {
+                if (!finished) provisional = data
+            }
+            return
+        }
+        finish(data)
     }
 
     private fun finish(data: PresentationData) {
-        if (finished) return
-        finished = true
-        ApplicationManager.getApplication().invokeLater {
-            done(data)
+        val accepted = synchronized(stateLock) {
+            if (finished) {
+                false
+            } else {
+                finished = true
+                provisional = null
+                true
+            }
         }
+        if (!accepted) return
+        dispatch { done(data) }
     }
 
     private fun truncateDisplay(value: String): String {

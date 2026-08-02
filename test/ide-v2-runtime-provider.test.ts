@@ -9,6 +9,7 @@ import { IdeRuntimeProvider } from "../src/runtime/providers/IdeRuntimeProvider.
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import type { BridgeMessage, IdeDebugSessionInfo } from "../src/types/ide.ts";
+import { ErrorCodes } from "../src/utils/errors.ts";
 
 const features = {
   breakpointUpdate: true,
@@ -152,6 +153,79 @@ test("negotiated opaque refs are expanded without numeric coercion", async () =>
   });
 });
 
+test("negotiated opaque refs accept a bounded page beyond the strict decoder key budget", async () => {
+  const { bridge, provider } = fixture();
+  const pending = provider.inspectVariable({ ref: "bpref_page", count: 12, timeoutMs: 250 }, {
+    maxDepth: 0,
+    maxItems: 12,
+    maxStringLength: 200,
+    redactPatterns: []
+  });
+  await nextTurn();
+  const request = bridge.last(IdeMessageTypes.AGENT_REQUEST_VARIABLES);
+  const items = Array.from({ length: 12 }, (_, index) => ({
+    name: `field${index}`,
+    kind: "primitive",
+    valuePreview: String(index),
+    variablesReference: `bpref_${index}`,
+    truncated: false,
+    ref: `bpref_${index}`,
+    pauseEpoch: 8,
+    modifiable: false,
+    mutationMode: null,
+    type: "int",
+    value: String(index)
+  }));
+  bridge.reply(request, {
+    type: IdeMessageTypes.IDE_VARIABLES_SNAPSHOT,
+    result: {
+      ref: "bpref_page",
+      pauseEpoch: 8,
+      items,
+      truncated: false
+    }
+  });
+
+  const result = await pending as { items: Array<{ name: string }> };
+  assert.equal(result.items.length, 12);
+  assert.equal(result.items[11]?.name, "field11");
+});
+
+test("an over-budget correlated response rejects immediately instead of timing out", async () => {
+  const { bridge, provider } = fixture();
+  const pending = provider.inspectVariable({ ref: "bpref_oversized", count: 20 }, {
+    maxDepth: 1,
+    maxItems: 20,
+    maxStringLength: 200,
+    redactPatterns: []
+  });
+  const outcome = pending.then(
+    () => ({ kind: "resolved" as const }),
+    (error: Error & { code?: string }) => ({ kind: "rejected" as const, error })
+  );
+  await nextTurn();
+  const request = bridge.last(IdeMessageTypes.AGENT_REQUEST_VARIABLES);
+  bridge.reply(request, {
+    type: IdeMessageTypes.IDE_VARIABLES_SNAPSHOT,
+    result: Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`field${index}`, index]))
+  });
+
+  const early = await Promise.race([
+    outcome,
+    new Promise<{ kind: "pending" }>((resolve) => setTimeout(() => resolve({ kind: "pending" }), 30))
+  ]);
+  if (early.kind === "pending") {
+    bridge.reply(request, {
+      type: IdeMessageTypes.IDE_VARIABLES_SNAPSHOT,
+      result: { ref: "bpref_oversized", pauseEpoch: 8, items: [], truncated: false }
+    });
+    await outcome;
+  }
+
+  assert.equal(early.kind, "rejected");
+  if (early.kind === "rejected") assert.equal(early.error.code, ErrorCodes.BRIDGE_PAYLOAD_LIMIT);
+});
+
 test("negotiated ref mutation preserves native read-back evidence through the manager", async () => {
   const { bridge, provider } = fixture();
   const policy = loadPolicy("breakpilot.yaml");
@@ -208,7 +282,7 @@ test("negotiated features upgrade only the proven provider capabilities", () => 
   assert.equal(provider.capabilities.breakpointUpdate, "fallback");
 });
 
-test("IDE source replacement removes only stale agent breakpoints before applying desired state", async () => {
+test("IDE breakpoint updates are exact upserts and never infer removal from an incomplete source catalog", async () => {
   const { bridge, provider } = fixture();
   const replacement = provider.setBreakpoints("/workspace/App.java", [{
     id: "bp-new",
@@ -223,21 +297,28 @@ test("IDE source replacement removes only stale agent breakpoints before applyin
   }]);
 
   await nextTurn();
-  const list = bridge.last(IdeMessageTypes.AGENT_LIST_BREAKPOINTS);
-  bridge.reply(list, {
-    type: IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT,
-    result: { breakpoints: [
-      { id: "bp-stale", file: "/workspace/App.java", line: 10, owner: "agent", enabled: true, verified: true },
-      { id: "user-bp", file: "/workspace/App.java", line: 11, owner: "user", enabled: true, verified: true }
-    ] }
-  });
+  const list = bridge.sent.find((message) => message.type === IdeMessageTypes.AGENT_LIST_BREAKPOINTS);
+  if (list) {
+    bridge.reply(list, {
+      type: IdeMessageTypes.IDE_BREAKPOINTS_SNAPSHOT,
+      result: { breakpoints: [
+        { id: "bp-stale", file: "/workspace/App.java", line: 10, owner: "agent", enabled: true, verified: true },
+        { id: "user-bp", file: "/workspace/App.java", line: 11, owner: "user", enabled: true, verified: true }
+      ] }
+    });
+    await nextTurn();
+  }
 
-  await nextTurn();
-  const remove = bridge.last(IdeMessageTypes.AGENT_REMOVE_BREAKPOINT);
-  assert.equal(remove.breakpointId, "bp-stale");
-  bridge.reply(remove, { type: IdeMessageTypes.IDE_BREAKPOINT_REMOVED, breakpointId: "bp-stale", removed: true });
+  const remove = bridge.sent.find((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT);
+  if (remove) {
+    bridge.reply(remove, {
+      type: IdeMessageTypes.IDE_BREAKPOINT_REMOVED,
+      breakpointId: remove.breakpointId,
+      removed: true
+    });
+    await nextTurn();
+  }
 
-  await nextTurn();
   const add = bridge.last(IdeMessageTypes.AGENT_SET_BREAKPOINT);
   assert.equal(add.breakpoint?.id, "bp-new");
   bridge.reply(add, {
@@ -250,5 +331,68 @@ test("IDE source replacement removes only stale agent breakpoints before applyin
   assert.equal(evidence.length, 1);
   assert.equal(evidence[0]?.verified, true);
   assert.equal(evidence[0]?.line, 20);
-  assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT && message.breakpointId === "user-bp"), false);
+  assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_LIST_BREAKPOINTS), false);
+  assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT), false);
+});
+
+test("IDE session cleanup removes only its exact breakpoint and never broadcasts a destructive clear", async () => {
+  const { bridge, provider } = fixture();
+  const policy = loadPolicy("breakpilot.yaml");
+  provider.workspaceRoot = policy.workspace.root;
+  bridge.registry.update(provider.ideClientId, { workspaceRoot: provider.workspaceRoot });
+  const manager = new DebugSessionManager({ policy, ideBridge: bridge as any });
+  manager.sessions.add({
+    sessionId: provider.sessionId,
+    language: provider.language,
+    workspaceRoot: provider.workspaceRoot,
+    mode: "ide",
+    owner: "mcp",
+    state: "paused",
+    createdAt: new Date(0).toISOString(),
+    providerKind: "ide",
+    provider,
+    ideClientId: provider.ideClientId,
+    ideSessionId: provider.ideSessionId
+  });
+
+  const createdPending = manager.bpDebugSetBreakpoint({
+    sessionId: provider.sessionId,
+    filePath: `${provider.workspaceRoot}/src/serve.ts`,
+    line: 1
+  });
+  await nextTurn();
+  const add = bridge.last(IdeMessageTypes.AGENT_SET_BREAKPOINT);
+  const createdId = String(add.breakpoint?.id);
+  bridge.reply(add, {
+    type: IdeMessageTypes.IDE_BREAKPOINT_ADDED,
+    breakpointId: createdId,
+    breakpoint: { ...add.breakpoint, verified: true, ideBreakpointId: "native-current-lifecycle" }
+  });
+  await createdPending;
+
+  const disconnectPending = manager.bpDebugControl({
+    sessionId: provider.sessionId,
+    action: "disconnect"
+  });
+  await nextTurn();
+  const remove = bridge.sent.find((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT);
+  if (remove) {
+    bridge.reply(remove, {
+      type: IdeMessageTypes.IDE_BREAKPOINT_REMOVED,
+      breakpointId: createdId,
+      removed: true
+    });
+  }
+  await disconnectPending;
+
+  assert.deepEqual(
+    bridge.sent
+      .filter((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT)
+      .map((message) => message.breakpointId),
+    [createdId]
+  );
+  assert.equal(
+    bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_CLEAR_BREAKPOINTS),
+    false
+  );
 });
