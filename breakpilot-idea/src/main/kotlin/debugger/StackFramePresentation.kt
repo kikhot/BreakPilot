@@ -19,6 +19,7 @@ object StackFramePresentationModel {
         if (value.isBlank() || fileName.isNullOrBlank() || line <= 0) return value
         val escapedFile = Regex.escape(fileName)
         return value
+            .replace(Regex(":$line,.*$"), "")
             .replace(Regex(":$line,\\s*$escapedFile$"), "")
             .replace(Regex("\\s+\\($escapedFile:$line\\)$"), "")
             .trim()

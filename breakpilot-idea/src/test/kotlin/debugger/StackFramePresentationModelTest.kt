@@ -22,6 +22,14 @@ class StackFramePresentationModelTest {
                 21
             )
         )
+        assertEquals(
+            "hello",
+            StackFramePresentationModel.semanticName(
+                "hello:21, HelloController (com.example.demo.controller)",
+                "HelloController.java",
+                21
+            )
+        )
     }
 
     @Test
