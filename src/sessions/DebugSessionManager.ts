@@ -768,7 +768,7 @@ export class DebugSessionManager {
     if (normalized.handle) {
       const target = this.#agentHandles.resolve(session.sessionId, pauseId, normalized.handle);
       normalized.path = target.path;
-      if ((!target.path || target.path.length === 0) && this.#isExpandableProviderRef(target.providerRef)) {
+      if (target.mutationMode === "native" && this.#isExpandableProviderRef(target.providerRef)) {
         normalized.ref = target.providerRef;
         normalized.variablesReference = target.providerRef;
       } else {

@@ -5,13 +5,23 @@ import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import { SessionOwner, SessionState } from "../src/sessions/SessionOwner.ts";
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import { ideProviderCapabilities } from "../src/runtime/ProviderCapabilities.ts";
+import type { RuntimeMutationMode } from "../src/types/inspection.ts";
 import type { RuntimeDebugProvider, DebugSessionRecord } from "../src/types/sessions.ts";
 import { ErrorCodes } from "../src/utils/errors.ts";
 
-function fixture(): { manager: DebugSessionManager; record: DebugSessionRecord } {
+function fixture(options: {
+  mutationMode?: RuntimeMutationMode;
+  nativeSetVariable?: boolean;
+} = {}): {
+  manager: DebugSessionManager;
+  record: DebugSessionRecord;
+  setVariableArgs: () => Record<string, unknown> | undefined;
+} {
   const policy = loadPolicy();
   const manager = new DebugSessionManager({ policy });
   let pauseEpoch = 1;
+  let observedSetVariableArgs: Record<string, unknown> | undefined;
+  const mutationMode = options.mutationMode ?? "native";
   const sourcePath = `${policy.workspace.root}/src/Hello.java`;
   const snapshot = () => ({
     sessionId: "actions",
@@ -36,7 +46,7 @@ function fixture(): { manager: DebugSessionManager; record: DebugSessionRecord }
             variablesReference: "idea-count-uuid",
             pauseEpoch,
             modifiable: true,
-            mutationMode: "native",
+            mutationMode,
             truncated: false
           }
         }
@@ -55,7 +65,9 @@ function fixture(): { manager: DebugSessionManager; record: DebugSessionRecord }
       debugCommands: true,
       variableSnapshot: true,
       variableHandles: true,
-      nativeSetVariable: true,
+      nativeSetVariable: options.nativeSetVariable ?? true,
+      setVariable: true,
+      setVariableMode: mutationMode,
       runToLine: true,
       eventStream: true,
       breakpointUpdate: true
@@ -97,7 +109,8 @@ function fixture(): { manager: DebugSessionManager; record: DebugSessionRecord }
       return { items: [] };
     },
     async setVariable(args) {
-      return { oldValue: "1", newValue: args.newValue, applied: true, verified: true, mutationMode: "native" };
+      observedSetVariableArgs = structuredClone(args);
+      return { oldValue: "1", newValue: args.newValue, applied: true, verified: true, mutationMode };
     },
     async evaluate() {
       return {
@@ -168,8 +181,22 @@ function fixture(): { manager: DebugSessionManager; record: DebugSessionRecord }
     provider
   };
   manager.sessions.add(record);
-  return { manager, record };
+  return { manager, record, setVariableArgs: () => observedSetVariableArgs };
 }
+
+test("evaluate-assignment handles use their semantic path instead of an object reference", async () => {
+  const { manager, setVariableArgs } = fixture({
+    mutationMode: "evaluateAssignment",
+    nativeSetVariable: false
+  });
+  const frame = await manager.bpDebugFrame({ sessionId: "actions" });
+  const handle = ((frame.locals as Array<{ handle: string }>)[0]?.handle);
+
+  await manager.bpDebugSetValue({ sessionId: "actions", handle, newValue: "2" });
+
+  assert.deepEqual(setVariableArgs()?.path, ["count"]);
+  assert.equal(setVariableArgs()?.ref, undefined);
+});
 
 test("mutation, evaluation, stepping, run-to-line, events, and breakpoints use compact semantics", async () => {
   const { manager, record } = fixture();

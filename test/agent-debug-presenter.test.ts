@@ -151,8 +151,9 @@ test("diagnostic projection omits undefined values and applies fixed bounds", ()
     }
   });
 
+  const diagnostics = (projected as typeof projected & { diagnostics: any }).diagnostics;
   assert.equal(JSON.stringify(projected).includes("undefined"), false);
-  assert.equal(((projected.diagnostics as any).provider.text as string).length, 200);
-  assert.equal(((projected.diagnostics as any).provider.items as unknown[]).length, 20);
-  assert.equal("absent" in (projected.diagnostics as any).provider, false);
+  assert.equal((diagnostics.provider.text as string).length, 200);
+  assert.equal((diagnostics.provider.items as unknown[]).length, 20);
+  assert.equal("absent" in diagnostics.provider, false);
 });
