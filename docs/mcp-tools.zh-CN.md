@@ -2,371 +2,126 @@
 
 语言：[English](mcp-tools.md) | 中文
 
-BreakPilot 通过 `breakpilot-debugger` MCP server 暴露 Agent Runtime Debugger。
-公开 agent-facing 工具统一使用 `bp_debug_` 前缀。旧的 DAP 风格工具名已从
-MCP 路由中删除。
+用 `breakpilot mcp serve` 启动 Agent-facing stdio server。MCP、HTTP 与 CLI
+共用控制层中的 15 个 `bp_debug_*` 工具和同一份语义结果。
 
-启动 MCP：
+## 返回契约
 
-```bash
-breakpilot mcp serve
-```
+MCP 把语义对象放在 `structuredContent`。`content.text` 只是最长 160 字符的
+单行摘要，不复制 JSON。成功结果直接返回业务字段；健康路径省略空集合、默认布尔值、
+provider ID、provider 实现类名和完整证据元数据。
 
-HTTP 客户端可以先启动 hub：`breakpilot serve`，然后连接
-`http://127.0.0.1:57987/stream`（Streamable HTTP）或
-`http://127.0.0.1:57987/sse`（legacy SSE）。
-
-## 协议入口
-
-stdio adapter 接收按行分隔的 JSON-RPC：
-
-| 方法 | 用途 |
-|---|---|
-| `initialize` | 返回 MCP 元数据和工具能力。 |
-| `tools/list` | 返回公开的 `bp_debug_*` 工具。 |
-| `tools/call` | 通过 `{ "name": "...", "arguments": {} }` 调用工具。 |
-| `ping` | 健康检查。 |
-
-工具结果的结构化数据只通过 `structuredContent` 暴露。`content` 文本只是简短
-人类可读状态，不作为数据通道。成功响应直接返回工具的业务字段，不再包
-`ok`、`data`、`auditId` 或空 `warnings`。失败响应返回
-`{ "error": { "code": "...", "message": "...", "details": {} } }`。
-`warnings` 仅在存在非致命告警时出现。
-
-每个公开 output schema 都是具体的 success/error union。成功时直接返回当前工具
-定义的顶层业务字段，例如：
+错误固定为：
 
 ```json
-{"activeSessionId":"bp_...","sessions":[],"ideConnected":true,"ideSessions":[]}
+{"error":{"code":"INVALID_ARGUMENT","message":"Invalid arguments.","retrySafe":true,"actionMayHaveApplied":false}}
 ```
 
-失败时返回：
+`hint` 可选。`detail="diagnostic"` 可以增加有界 `diagnostics`；compact 错误不公开
+provider details。diagnostic 不增加变量深度，也不绕过脱敏、预算、policy 或能力门禁。
 
-```json
-{"error":{"code":"INVALID_ARGUMENT","message":"Invalid arguments for bp_debug_...","details":{"issues":[]}}}
-```
+## 规范输入名
 
-`error.code` 和 `error.message` 必定存在；有机器可读上下文时放入
-`error.details`。
+MCP 只公开 `projectPath`、`filePath`、`timeout`、`depth`、`limit`、
+`maxString`、`offset`、`handle`、`path`、`pauseId`、`detail`，以及
+`sessionId/action/threadId/frameIndex/expression` 和断点选项等操作专属字段。
 
-## 校验、默认值与 detail
+已删除的 MCP 别名：`workspace`、`file`、`timeoutMs`、`maxDepth`、`maxItems`、
+`maxStringLength`、`objectFields`、`variablesReference`、`lang`、`start`、
+`count`、`ref`。CLI 的 `--workspace/--file/--ref` 仍可用，但会在进入控制层前转换。
 
-BreakPilot validates tool arguments before dispatch. Unknown fields, invalid
-ranges, and ambiguous target modes return INVALID_ARGUMENT with issue details.
-Successful payloads remain compact top-level objects. Each debug session reports
-a provider capability matrix; callers must treat unsupported as authoritative.
+默认预算：
 
-公开输入对象采用封闭 schema。BreakPilot 在 session manager 和 provider 调用之前
-完成校验，不修改调用方传入的对象；校验问题统一放在
-`error.details.issues`，单项结构为 `{ "path", "keyword", "message" }`。
-带 `oneOf` 的目标必须且只能命中一个分支。
-
-默认值只在字段缺失时应用。重要默认值包括：`detail: "compact"`、
-`frameIndex: 0`、线程/调用栈 `offset: 0`、断点 `enabled: true`、
-`temporary: false`、`owner: "agent"`。start 路由会保留字段“未传入”的语义：
-源码位置选择 IDE launch，host/port 选择 attach，其他情况选择 headless launch。
-attach 内部仍会在 host 缺失时使用 `127.0.0.1`。显式 `mode` 具有最高优先级，
-显式传入的值不会被 schema 默认值覆盖。
-
-`detail: "compact"` 是默认的 agent 视图。对 `bp_debug_status` 传入
-`detail: "diagnostic"`，会在 BreakPilot session 和 IDE session 摘要中增加
-`providerKind` 与 `capabilities`。`bp_debug_start` 总是返回这两个字段，便于 agent
-安全选择下一步操作。其他工具即使公开了 `detail`，也不会因此绕过参数校验、
-安全策略或 capability gate。
-
-## 通用参数
-
-所有 session 级工具的 `sessionId` 都可以省略。省略时，BreakPilot 会自动选择唯一
-live session，或者唯一 paused session。多个候选时返回 `SESSION_AMBIGUOUS`，并附带
-候选 session 列表。
-
-新 API 使用简化参数名：
-
-| 参数 | 含义 |
+| 工具 | 有界默认值 |
 |---|---|
-| `projectPath` | 可选 workspace/project selector，用于 hub 的多项目路由。 |
-| `filePath` | 源文件路径。 |
-| `timeout` | 超时时间，单位毫秒。 |
-| `ref` | frame/value 工具返回的不透明变量引用。 |
-| `depth` | 对象递归展开深度。 |
-| `limit` | 最大变量、栈帧或线程数量。 |
-| `maxString` | 字符串预览最大长度。 |
-| `expand` | `none`、`preview`、`shallow` 或 `deep`。 |
+| `context` | 5 个栈帧、10 个顶层值、`depth=0`、`maxString=200` |
+| pause/wait/step/run-to-line | 10 个顶层值、`depth=0`、`maxString=200` |
+| `frame` | 20 个顶层值、`depth=0`、`maxString=200` |
+| `value(handle)` | `depth=1`、`limit=20`、`maxString=200` |
 
-## Provider 能力矩阵
+## Agent 语义类型
 
-能力矩阵描述的是当前选中 live provider 的真实能力，而不是“公开工具是否存在”：
+workspace 内源码使用项目相对路径；外部、archive 和 JRT 源码保留可复用的绝对路径或 URI。
 
-| 字段 | 取值 | 含义 |
-|---|---|---|
-| `pause`、`stepping`、`runToLine` | `native`、`fallback`、`unsupported` | 执行控制能力。 |
-| `variableReferences` | `native`、`snapshot`、`unsupported` | 可使用 live reference 展开，或只能读取 IDE snapshot。 |
-| `setValue` | `native`、`evaluateAssignment`、`unsupported` | 原生 mutation、赋值表达式模拟或不支持修改。 |
-| `breakpointUpdate` | `native`、`fallback`、`unsupported` | 按已有 breakpoint id 更新/迁移。 |
-| `conditionalBreakpoints`、`hitConditionalBreakpoints`、`tracepoints` | `native`、`fallback`、`unsupported` | 高级断点保真度。 |
-| `eventDrain` | `native`、`fallback`、`unsupported` | 读取缓存的 debugger/tracepoint 事件。 |
+```ts
+interface AgentLocation {
+  filePath: string;
+  line: number;
+  column?: number;
+  function?: string;
+}
 
-当前 DAP session 的 pause、stepping 和 variable reference 固定为 native；变量修改
-及高级断点只有在 adapter 明确声明时才是 native。DAP 的 run-to-line 只有在 live
-adapter 声明 `gotoTargets`，且 BreakPilot 具备证明 fresh stop 的因果 DAP primitive
-时才是 `native`。没有 native goto 时，只有 manager 已接线、可使用共享临时断点事务的
-DAP session 才会声明 `fallback`；未接线/direct provider 仍为 `unsupported`。DAP 的
-breakpoint update 使用完整 source reconciliation fallback。IDE 能力来自协商后的 live
-bridge v2 session；当前 IDEA 与 VS Code 可声明 native run-to-line、pause-scoped variable
-handle、带写后回读证据的 native set-value、breakpoint reconciliation fallback、分页栈和
-真实接线的 event stream。旧 bridge 客户端继续诚实声明 snapshot 与
-`evaluateAssignment` 降级。
+interface AgentValue {
+  name: string;
+  value: string | number | boolean | null;
+  type?: string;
+  handle?: string;
+  mutable?: true;
+  redacted?: true;
+  children?: AgentValue[];
+  nextOffset?: number;
+}
+```
 
-manager 会在 dispatch 前强制执行该矩阵。pause、stepping、run-to-line、
-variable-reference inspection、set-value、breakpoint update 和 event drain 为
-`unsupported` 时，会在调用 provider 前返回 `UNSUPPORTED_CAPABILITY`，不会伪造成功。
-创建断点时，`condition`、`hitCondition`、`logMessage` 也分别受
-`conditionalBreakpoints`、`hitConditionalBreakpoints`、`tracepoints` gate。
-尚无对应实现能力的高级语义（`enabled:false`、temporary、suspend policy、
-log-message mode、log-stack mode）会在 mutation 前明确拒绝，不会静默忽略。
-当 DAP fallback 被声明时，BreakPilot 会使用可见、事务性恢复的 temporary breakpoint，
-而不会静默伪造“已到达目标行”。
+只有 provider 明确报告 primitive kind 且文本是规范字面量时，才转换为原生 JSON 标量；
+不会仅凭字符串外观猜测。
+
+`handle` 是 Core 生成的暂停期短 token，例如 `v1`，不会泄露 IDEA UUID 或 DAP numeric
+reference。把它传给 `value` 或 `set_value`；resume、step、run-to-line、stop 或新暂停后，
+旧 handle 稳定返回 `STALE_RUNTIME_HANDLE`。
+
+## 15 个工具的 compact 结果
+
+| 工具 | 默认语义结果 |
+|---|---|
+| `bp_debug_start` | `sessionId/state/startMode/target` |
+| `bp_debug_run_configurations` | 规范化 `configurations` 和可运行 `runPoints` |
+| `bp_debug_status` | 去重 `sessions`、可选 active session、`ideConnected` |
+| `bp_debug_control` | resume/stop：`state`；pause/wait/step：`state/reason/at/locals/pauseId`；drain：`events` |
+| `bp_debug_run_to_line` | `state/reached/target/at/pauseId/locals` |
+| `bp_debug_threads` | `threads[{id,name,current?}]`，有下一页才返回 `nextOffset` |
+| `bp_debug_call_stack` | `threadId/frames/pauseId`，有下一页才返回 `nextOffset` |
+| `bp_debug_frame` | `frame/arguments/locals/fields/scopes/pauseId` |
+| `bp_debug_value` | `value` 下的单个 `AgentValue` |
+| `bp_debug_set_value` | `target/oldValue/newValue/applied/verified` |
+| `bp_debug_eval` | `expression/value/type?/handle?` |
+| `bp_debug_context` | `state/reason/at/stack/arguments/locals/fields/pauseId` |
+| `bp_debug_set_breakpoint` | `id/at/verified/owner` 和实际启用的非默认选项 |
+| `bp_debug_list_breakpoints` | `breakpoints` |
+| `bp_debug_remove_breakpoint` | `id?/removed`，受保护时增加说明 |
+
+只有部分结果才出现 `incomplete`、`warnings`、`nextOffset`、`nextCursor`。
+`pauseId` 只在响应根节点出现一次，不在每个变量节点重复。
 
 ## 推荐流程
 
 ```json
-{"tool":"bp_debug_start","arguments":{"mode":"attach","language":"python","host":"127.0.0.1","port":5678}}
-{"tool":"bp_debug_set_breakpoint","arguments":{"filePath":"examples/python/app.py","line":12}}
+{"tool":"bp_debug_status","arguments":{"projectPath":"/path/to/project"}}
+{"tool":"bp_debug_start","arguments":{"mode":"ide","projectPath":"/path/to/project"}}
+{"tool":"bp_debug_set_breakpoint","arguments":{"filePath":"src/App.java","line":42}}
 {"tool":"bp_debug_control","arguments":{"action":"wait","timeout":30000}}
-{"tool":"bp_debug_threads","arguments":{}}
-{"tool":"bp_debug_call_stack","arguments":{"limit":20}}
-{"tool":"bp_debug_frame","arguments":{"frameIndex":0,"expand":"preview","limit":20}}
-{"tool":"bp_debug_value","arguments":{"path":["order","total"],"depth":1}}
+{"tool":"bp_debug_context","arguments":{}}
+{"tool":"bp_debug_value","arguments":{"handle":"v1","depth":1,"limit":20}}
 {"tool":"bp_debug_eval","arguments":{"expression":"order.total","mode":"readonly"}}
-{"tool":"bp_debug_control","arguments":{"action":"resume"}}
+{"tool":"bp_debug_control","arguments":{"action":"stepOver"}}
+{"tool":"bp_debug_control","arguments":{"action":"disconnect"}}
 ```
 
-IDE 已暂停会话：
+wait、pause、step、run-to-line 默认已经带有界位置和 locals；除非需要别的 frame 或更大预算，
+不必再重复抓 frame。第一次全面观察使用 `context`，分页和深挖使用定向读取工具。
 
-```json
-{"tool":"bp_debug_start","arguments":{"mode":"ide","ideSessionId":"<ideSessionId>"}}
-{"tool":"bp_debug_context","arguments":{"expand":"preview","limit":20}}
-```
+## 断点、事件与安全
 
-IDE run configuration 启动由 `bp_debug_start` 表达，但要求 IDE bridge 支持：
+创建断点使用 `filePath + line`；更新使用返回的 `breakpointId`。list 保留
+`owner=agent|user`，便于 Agent 保护用户断点。remove 接受 `breakpointId` 或
+`filePath + line`，受保护的用户断点返回真实保护结果。
 
-```json
-{"tool":"bp_debug_start","arguments":{"projectPath":"/path/to/project","runConfigName":"DemoApplication"}}
-```
+`bp_debug_control(action="drainEvents")` 返回有序语义事件与 `nextCursor`，compact 页面
+不重复 raw timestamp、session 和 provider envelope。
 
-当前 bridge 未实现该能力时，BreakPilot 返回明确 capability error，不静默 fallback。
+默认使用 `bp_debug_eval(mode="readonly")`。BreakPilot 强制执行项目边界、attach endpoint、
+production policy、脱敏、输出预算、capability、断点 ownership 与 mutation verification。
+部分观察只会返回 `incomplete/warnings`，不会伪装成完整暂停或修改成功。
 
-## 工具列表
-
-| 工具 | 用途 |
-|---|---|
-| `bp_debug_start` | 启动、附加或采纳调试会话。 |
-| `bp_debug_run_configurations` | 列出 IDE run configuration 或可运行源码位置。 |
-| `bp_debug_status` | 查看 active session、live sessions 和简短 IDE 状态。 |
-| `bp_debug_control` | pause、resume、wait、step、disconnect、stop、drainEvents。 |
-| `bp_debug_run_to_line` | 运行到指定源码行。 |
-| `bp_debug_threads` | 查看线程列表。 |
-| `bp_debug_call_stack` | 查看指定线程调用链。 |
-| `bp_debug_frame` | 查看指定栈帧变量。 |
-| `bp_debug_value` | 按路径读取变量或展开 `ref`。 |
-| `bp_debug_set_value` | provider 支持时修改变量值。 |
-| `bp_debug_eval` | 表达式求值。 |
-| `bp_debug_context` | 获取当前位置、调用栈和栈顶变量。 |
-| `bp_debug_set_breakpoint` | 设置断点。 |
-| `bp_debug_list_breakpoints` | 列出断点。 |
-| `bp_debug_remove_breakpoint` | 按 id 或 file/line 删除断点。 |
-
-## 关键工具
-
-### `bp_debug_start`
-
-支持 headless DAP launch/attach，以及 IDE session adopt。
-
-常用参数：
-
-| 参数 | 类型 | 说明 |
-|---|---:|---|
-| `mode` | string | `launch`、`attach` 或 `ide`。 |
-| `language` | string | adapter id，例如 `python`、`node`、`typescript`、`java`。 |
-| `program` / `filePath` | string | launch 目标；headless 下 `filePath` 可作为 `program`。 |
-| `host`, `port` | string/number | attach endpoint。 |
-| `runConfigName` | string | IDE run configuration 名称；需要 IDE bridge 支持。 |
-| `ideSessionId`, `clientId` | string | IDE adopt mode 的会话选择参数。 |
-
-### `bp_debug_control`
-
-```json
-{
-  "sessionId": "optional",
-  "action": "pause | resume | wait | stepOver | stepInto | stepOut | stop | disconnect | drainEvents",
-  "threadId": 1,
-  "timeout": 30000,
-  "includeFrame": false
-}
-```
-
-`wait` 和 step 类动作默认只返回 `status`、`reason` 和 `position`。需要变量时传
-`includeFrame: true`，变量体积由 `expand`、`depth`、`limit` 和 `maxString` 控制。
-
-### `bp_debug_run_to_line`
-
-将当前调试会话运行到指定源码行。
-
-```json
-{
-  "filePath": "src/App.java",
-  "line": 42,
-  "column": 1,
-  "timeout": 30000,
-  "includeFrame": true
-}
-```
-
-只有 session 的 `runToLine` capability 不是 `unsupported` 时才应调用。返回值始终包含
-`status`、`targetReached`、`requestedPosition` 与 `cleanedUp`。Agent 应以
-`targetReached`，而不是仅以 `status:"paused"`，作为“确实到达请求位置”的依据。若 adapter
-选择相邻可执行位置，会在 `resolvedPosition` 中明确返回；另一个 fresh stop 会返回
-`paused + targetReached:false`，绝不会自动继续。终止事件返回
-`stopped + targetReached:false`；fresh wait 超时返回 `timeout + targetReached:false`。
-
-DAP 只有在 live adapter 可提供因果 target proof 时才使用原生 `gotoTargets`/`goto`。
-否则，已由 manager 接线的 DAP session 可以使用 `fallback` 临时断点事务；它返回
-`temporaryBreakpointId`，且仅在完整原始 source list 被 adapter 确认恢复后才返回
-`cleanedUp:true`。若无法证明恢复，调用会返回 `RUN_TO_LINE_CLEANUP_FAILED` 与
-`cleanupRequired:true`；Agent 应先检查/协调断点状态后再重试。
-
-run-to-line 持有执行租约期间，断点 mutation 以及会改变执行状态的
-`bp_debug_control` 动作（`pause`、`resume`、step、`stop`、`disconnect`）都会以
-`SESSION_OWNER_CONFLICT` 拒绝。Agent 应等待本次 run-to-line 返回后再发起下一条控制命令。
-对于 DAP，即使先收到 stopped，或 adapter 在请求等待期间退出，terminal 状态也始终优先：
-结果是 `stopped + targetReached:false`，不会保留过期的 paused 成功表述。
-
-### `bp_debug_status`
-
-默认 status 是紧凑 agent 视图：当前项目 live sessions 和简短 IDE bridge 状态。
-它不返回 hub 诊断、语言能力明细、已结束 sessions、capabilities 或完整 IDE client
-记录。传入 `detail: "diagnostic"` 后，每个 live BreakPilot/IDE session 摘要会增加
-`providerKind` 与 capability matrix。
-
-### `bp_debug_threads` / `bp_debug_call_stack`
-
-`bp_debug_threads` 与 `bp_debug_call_stack` 都支持 `offset` 和 `limit`。
-`threadId` 可以是 number，也可以是 opaque string。调用栈返回 frame 的
-`index`、`id`、`filePath`、`line` 和 `function`；IDE provider 只能提供栈顶快照时，
-结果可能标记为 `partial`。
-
-### `bp_debug_frame`
-
-返回 frame 元数据和分组变量。
-
-```json
-{
-  "frameIndex": 0,
-  "expand": "preview",
-  "depth": 1,
-  "limit": 20,
-  "maxString": 2000
-}
-```
-
-变量节点是有序数组，不是 map，因此重复变量名不会互相覆盖：
-
-```json
-{
-  "name": "analysis",
-  "value": "NameAnalysis(...)",
-  "type": "HelloController$NameAnalysis",
-  "path": ["analysis"],
-  "ref": 7072
-}
-```
-
-### `bp_debug_value`
-
-支持两种读取方式：
-
-```json
-{"path":["analysis","score"]}
-```
-
-```json
-{"ref":7072,"depth":1,"limit":20}
-```
-
-数组和 List 下标使用字符串路径，例如 `"0"`。`ref` 是不透明 token，不能解析，
-只能原样传回。
-
-### 断点设置、列表与删除
-
-`bp_debug_set_breakpoint` 有且只有两个互斥 target mode。位置模式用于创建断点，
-必须传 `filePath`（或兼容别名 `file`）与 `line`：
-
-```json
-{"filePath":"src/App.java","line":42,"condition":"count > 3","enabled":true,"owner":"agent"}
-```
-
-位置模式还接受 `hitCondition`、`logMessage`、`temporary`、`suspendPolicy`、
-`isLogMessage`、`isLogStack` 和 `requireVerified`。只有 provider 声明相应 capability
-时才会 dispatch `condition`、`hitCondition` 与 `logMessage`。其余高级语义虽然保留在
-typed contract 中，但请求非默认行为时当前会返回 `UNSUPPORTED_CAPABILITY`，不会被
-静默忽略；返回的 verification 仍描述 provider 实际确认的断点。
-
-更新模式传 `breakpointId` 和待更新字段，但不能同时带 `filePath` 或 `line`：
-
-```json
-{"breakpointId":"bp_123","enabled":false}
-```
-
-该分支对 DAP 和协商成功的 IDE v2 provider 使用完整 source reconciliation。只有所有
-provider evidence 完整时才提交，失败时尝试原子恢复，并保留 owner 保护。IDE 对账只删除
-陈旧的 agent-owned breakpoint，不删除用户断点；旧 provider 仍返回
-`UNSUPPORTED_CAPABILITY`。
-
-返回中包含 `breakpointId`、`filePath`、`line`、`verified`；源文件可读时包含 `lineText`。
-
-`bp_debug_list_breakpoints` 可以通过已连接 IDE 查询原生 breakpoint snapshot，并支持
-`filePath`、`owner`、`includeDisabled` filter。没有可用 IDE bridge target 时可能返回
-BreakPilot local project store；已经选中的 native query 若执行失败则仍返回明确错误。
-所有 provider-specific 字段都不保证具有 IDEA 原生对象的完整保真度。
-
-删除断点可以按 id：
-
-```json
-{"breakpointId":"bp_123"}
-```
-
-也可以按位置：
-
-```json
-{"filePath":"src/App.java","line":42}
-```
-
-## 安全
-
-BreakPilot 仍执行 workspace 边界、attach host/port、生产环境阻断、变量读取限制、
-脱敏规则和 evaluate mode 限制。默认使用 `bp_debug_eval` 的 `mode: "readonly"`。
-
-## 差分证据
-
-仓库 fixture 是经过哈希、脱敏幂等性、lineage 和语义校验的 `synthetic-replay`，不是现场
-采集证明：
-
-```bash
-npm run evidence:differential:verify -- \
-  --evidence-dir "$PWD/test/fixtures/evidence/differential-v1"
-```
-
-真实 IDEA/BreakPilot 证据需要绝对路径的 ignored 配置和两套 provider-local MCP 命令：
-
-```bash
-npm run test:e2e:idea-differential -- \
-  --config /absolute/ignored/differential-config.json
-```
-
-raw transcript 只保留在 `.breakpilot/evidence/differential/`。IDEA MCP、bridge 或 paused
-session 不可用时命令以 `EVIDENCE_INFRASTRUCTURE_UNAVAILABLE` 非零退出，不能把跳过或
-synthetic replay 记为现场成功。
-
-采集器从已哈希的 raw 文件字节生成脱敏 transcript；脱敏字段采用 fail-closed allowlist。
-回放会拒绝绝对路径、目录穿越和越界符号链接。MCP 初始化失败为
-`infrastructure_unavailable`，初始化后的场景或验证失败为 `failed`。
+真实 IDEA 项目下的全工具对比、token 指标和后续优化优先级见
+[IDEA MCP 与 BreakPilot Agent 可读契约实测报告](idea-mcp-vs-breakpilot-agent-readable-report-2026-08-02.zh-CN.md)。

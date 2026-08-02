@@ -1,55 +1,45 @@
 # BreakPilot Debugger Agent Prompt
 
-## Embeddable System Prompt
+## Embeddable Prompt
 
 ```text
-When a coding task needs runtime facts, prefer BreakPilot (`breakpilot-debugger`) before guessing. Use MCP tools first; use CLI only if MCP is unavailable. Use the public `bp_debug_*` tools: start or adopt a session with `bp_debug_start`, set minimal breakpoints with `bp_debug_set_breakpoint`, wait with `bp_debug_control(action="wait")`, inspect threads with `bp_debug_threads`, inspect call stacks with `bp_debug_call_stack`, inspect variables with `bp_debug_frame` and `bp_debug_value`, and evaluate only when needed with `bp_debug_eval(mode="readonly")`. `sessionId` may be omitted when BreakPilot can select one unambiguously. Record observed file, line, frame, variables, and eval results before `bp_debug_control(action="resume"|"disconnect")`. Never default to unsafe eval, unknown remote attach, production debugging, infinite waits, or broad deep variable expansion.
+When runtime facts are required, use BreakPilot MCP before guessing. Reuse an unambiguous live session, preserve user breakpoints, and set only the breakpoint needed for the question. A pause/wait/step response already supplies compact location and locals; use bp_debug_context for the bounded task-complete view, then expand only a returned short handle with bp_debug_value. Treat pauseId and handles as pause-scoped and refresh them after every execution transition. Use readonly evaluation by default. Record concrete location, call path, and values before resume, restore breakpoints, and stop or disconnect. Never default to unsafe eval, production/unknown remote attach, unbounded waits, or broad deep expansion.
 ```
 
-## MCP Example
+## Canonical MCP Example
 
 ```json
+{"tool":"bp_debug_status","arguments":{}}
 {"tool":"bp_debug_start","arguments":{"mode":"attach","language":"python","host":"127.0.0.1","port":5678}}
 {"tool":"bp_debug_set_breakpoint","arguments":{"filePath":"examples/python/app.py","line":12}}
 {"tool":"bp_debug_control","arguments":{"action":"wait","timeout":30000}}
-{"tool":"bp_debug_threads","arguments":{}}
+{"tool":"bp_debug_context","arguments":{}}
+{"tool":"bp_debug_threads","arguments":{"limit":20}}
 {"tool":"bp_debug_call_stack","arguments":{"limit":20}}
-{"tool":"bp_debug_frame","arguments":{"frameIndex":0,"expand":"preview","depth":1,"limit":20}}
-{"tool":"bp_debug_value","arguments":{"path":["order","discount"],"depth":1}}
+{"tool":"bp_debug_frame","arguments":{"frameIndex":0}}
+{"tool":"bp_debug_value","arguments":{"handle":"v1","depth":1,"limit":20}}
 {"tool":"bp_debug_eval","arguments":{"expression":"order.discount","mode":"readonly","timeout":1000}}
+{"tool":"bp_debug_control","arguments":{"action":"stepOver"}}
 {"tool":"bp_debug_control","arguments":{"action":"resume"}}
 {"tool":"bp_debug_control","arguments":{"action":"disconnect"}}
 ```
 
-## IDE Session Example
+## CLI Fallback
 
-```json
-{"tool":"bp_debug_status","arguments":{}}
-{"tool":"bp_debug_start","arguments":{"mode":"ide","ideSessionId":"idea_ab12","projectPath":"/absolute/workspace/path"}}
-{"tool":"bp_debug_context","arguments":{"expand":"preview","depth":1,"limit":20,"timeout":1000}}
-```
-
-## CLI Fallback Example
+CLI aliases remain user-facing and are translated before the control layer:
 
 ```bash
 breakpilot serve
-breakpilot tools --pretty
 breakpilot attach --lang python --host 127.0.0.1 --port 5678 --pretty
 breakpilot bp set --file examples/python/app.py --line 12 --pretty
 breakpilot wait --timeout 30000 --pretty
-breakpilot snapshot --depth 1 --max-items 20 --pretty
-breakpilot inspect-variable --ref <ref> --depth 1 --max-items 20 --pretty
+breakpilot snapshot --depth 0 --max-items 20 --pretty
+breakpilot inspect-variable --ref v1 --depth 1 --max-items 20 --pretty
 breakpilot eval --mode readonly 'order.discount' --pretty
-breakpilot continue --pretty
 breakpilot disconnect --pretty
 ```
 
-## Acceptance Criteria
-
-- Skill uses `bp_debug_*` public tool names.
-- Skill says MCP is preferred and CLI is fallback.
-- Skill covers start, attach, adopt, breakpoint, wait, threads, call stack, frame, value, readonly eval, step, resume, and disconnect.
-- Skill says `sessionId` can be omitted when unambiguous.
-- Skill says `bp_debug_frame` and `bp_debug_value` return agent-friendly JSON variable nodes.
-- Skill says `bp_debug_eval` defaults to `readonly` and forbids default unsafe eval.
-- Safety guidance covers workspace boundaries, production/remote attach, timeouts, side effects, evidence reporting, and adapter failure fallback.
+The MCP contract uses only `projectPath`, `filePath`, `timeout`, `depth`,
+`limit`, `maxString`, `offset`, `handle`, `path`, `pauseId`, and `detail` for
+the corresponding concepts. Healthy compact responses omit empty/default
+metadata; `diagnostic` only adds bounded `diagnostics`.

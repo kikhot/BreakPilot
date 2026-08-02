@@ -1,4 +1,9 @@
-# IDEA Debugger 与 BreakPilot MCP 工具参数和返回结构
+# IDEA Debugger 与 BreakPilot MCP 工具参数和返回结构（历史基线）
+
+> 本文记录旧 provider-shaped 契约的实测历史，不再是公共 API 参考。
+> 当前 compact/diagnostic 契约以 [mcp-tools.zh-CN.md](mcp-tools.zh-CN.md) 和
+> `src/control/toolDefinitions.ts` 为准；旧 `ref/includeFrame/maxItems/details`
+> 等字段不得用于新 MCP 调用。
 
 本文记录 2026-06-19 在
 `/Users/Quixote/workSpace/Java/spring-boot-demo/simple-springboot-demo`
