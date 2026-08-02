@@ -243,30 +243,34 @@ bridge.registry.upsertSession("idea_caps", {
 const manager = new DebugSessionManager({ policy, ideBridge: bridge });
 
 const compactBeforeAdopt = await manager.bpDebugStatus({}) as AnyRecord;
-assert.equal(compactBeforeAdopt.ideSessions.length, 1);
-assert.equal("providerKind" in compactBeforeAdopt.ideSessions[0], false);
-assert.equal("capabilities" in compactBeforeAdopt.ideSessions[0], false);
+assert.equal(compactBeforeAdopt.sessions.length, 1);
+assert.equal("providerKind" in compactBeforeAdopt.sessions[0], false);
+assert.equal("capabilities" in compactBeforeAdopt.sessions[0], false);
 
 const diagnosticBeforeAdopt = await manager.bpDebugStatus({ detail: "diagnostic" }) as AnyRecord;
-assert.equal(diagnosticBeforeAdopt.ideSessions[0].providerKind, "ide");
-assert.equal(diagnosticBeforeAdopt.ideSessions[0].capabilities.setValue, "evaluateAssignment");
-assert.equal(diagnosticBeforeAdopt.ideSessions[0].capabilities.runToLine, "native");
+assert.equal(diagnosticBeforeAdopt.diagnostics.ide.sessions[0].providerKind, "ide");
+assert.equal(diagnosticBeforeAdopt.diagnostics.ide.sessions[0].capabilities.setValue, "evaluateAssignment");
+assert.equal(diagnosticBeforeAdopt.diagnostics.ide.sessions[0].capabilities.runToLine, "native");
 
 const started = await manager.bpDebugStart({
   mode: "ide",
   clientId: "idea_caps",
-  ideSessionId: "idea_caps_session"
+  ideSessionId: "idea_caps_session",
+  detail: "diagnostic"
 }) as AnyRecord;
-assert.equal(started.providerKind, "ide");
-assert.equal(started.capabilities.runToLine, "native");
-assert.equal(started.capabilities.setValue, "evaluateAssignment");
+assert.equal(started.diagnostics.session.providerKind, "ide");
+assert.equal(started.diagnostics.session.capabilities.runToLine, "native");
+assert.equal(started.diagnostics.session.capabilities.setValue, "evaluateAssignment");
 
 const compactAfterAdopt = await manager.bpDebugStatus({}) as AnyRecord;
 assert.equal("providerKind" in compactAfterAdopt.sessions[0], false);
 assert.equal("capabilities" in compactAfterAdopt.sessions[0], false);
 const diagnosticAfterAdopt = await manager.bpDebugStatus({ detail: "diagnostic" }) as AnyRecord;
-assert.equal(diagnosticAfterAdopt.sessions[0].providerKind, "ide");
-assert.deepEqual(diagnosticAfterAdopt.sessions[0].capabilities, started.capabilities);
+assert.equal(diagnosticAfterAdopt.diagnostics.providerSessions[0].providerKind, "ide");
+assert.deepEqual(
+  diagnosticAfterAdopt.diagnostics.providerSessions[0].capabilities,
+  started.diagnostics.session.capabilities
+);
 
 let drainCalls = 0;
 let runToLineCalls = 0;

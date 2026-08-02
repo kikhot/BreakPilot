@@ -220,7 +220,7 @@ test("managed terminated history remains drainable by explicit id after automati
 
   assert.equal(manager.sessions.maybeGet(sessionId), undefined);
   const drained = await manager.bpDebugControl({ sessionId, action: "drainEvents" }) as AnyRecord;
-  assert.equal(drained.status, "terminated");
+  assert.equal(drained.state, "terminated");
   assert.deepEqual(drained.events.items.map((event: AnyRecord) => event.kind), ["terminated"]);
   assert.deepEqual(drained.events.items[0].data, { exitCode: 0, restart: false });
   assert.doesNotMatch(JSON.stringify(drained), /"raw"|"drop"/);
@@ -346,7 +346,7 @@ test("explicit terminal session ids reject resume during exited grace without st
   assert.equal(manager.sessions.maybeGet(sessionId)?.state, "terminated");
   assert.deepEqual(transport.commands, commandsBefore);
   const stopped = await manager.bpDebugControl({ sessionId, action: "stop" }) as AnyRecord;
-  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.state, "stopped");
   assert.equal(stopped.alreadyStopped, true);
 });
 

@@ -877,8 +877,8 @@ test("manager validates the strengthened shared result and updates state from ac
     line: 20
   });
   assert.equal(paused.error, undefined);
-  assert.equal(paused.status, "paused");
-  assert.equal(paused.targetReached, false);
+  assert.equal(paused.state, "paused");
+  assert.equal(paused.reached, false);
   assert.equal(manager.sessions.get(provider.sessionId).state, "paused");
 
   outcome = {
@@ -893,7 +893,7 @@ test("manager validates the strengthened shared result and updates state from ac
     line: 20
   });
   assert.equal(timedOut.error, undefined);
-  assert.equal(timedOut.status, "timeout");
+  assert.equal(timedOut.state, "timeout");
   assert.equal(manager.sessions.get(provider.sessionId).state, "running");
   assert.equal(calls, 2);
 });
@@ -1156,9 +1156,9 @@ test("manager defers terminal cleanup until fallback restoration has completed",
     timeoutMs: 100
   });
   assert.equal(result.error, undefined);
-  assert.equal(result.status, "stopped");
-  assert.equal(result.targetReached, false);
-  assert.equal(result.cleanedUp, true);
+  assert.equal(result.state, "stopped");
+  assert.equal(result.reached, false);
+  assert.equal("cleanedUp" in result, false);
   assert.deepEqual(
     transport.setBreakpointLists.map((list) => list.length),
     [1, 0],

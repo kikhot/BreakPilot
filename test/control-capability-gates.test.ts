@@ -196,7 +196,7 @@ test("pause and step report paused only after a stop result", async () => {
     }) as AnyRecord;
 
     assert.equal(response.error, undefined);
-    assert.equal(response.status, "paused");
+    assert.equal(response.state, "paused");
     assert.equal(manager.sessions.get("control_caps").state, "paused");
     assert.equal(counters.wait, 1);
   }

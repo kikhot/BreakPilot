@@ -60,7 +60,9 @@ export class DaemonControlGateway implements ControlGateway {
         error: {
           code: "DAEMON_PARSE_FAILED",
           message: text || `Daemon returned HTTP ${response.status}`,
-          details: { status: response.status }
+          retrySafe: false,
+          actionMayHaveApplied: false,
+          diagnostics: { status: response.status }
         }
       };
     }

@@ -206,7 +206,7 @@ test("frame, value, context, and set-value path resolution require variable refe
   const operations = [
     { tool: "bp_debug_frame", args: {} },
     { tool: "bp_debug_value", args: { path: ["answer"] } },
-    { tool: "bp_debug_value", args: { ref: 9 } },
+    { tool: "bp_debug_value", args: { handle: "v1" } },
     { tool: "bp_debug_set_value", args: { path: ["answer"], newValue: "43" } },
     { tool: "bp_debug_context", args: {} }
   ];
@@ -332,8 +332,9 @@ test("public event drain forwards replay arguments and rebuilds legacy projectio
   });
 
   assert.deepEqual(received, { cursor: 3, limit: 2 });
-  assert.deepEqual((response.events as AnyRecord).breakpointErrors.map((event: AnyRecord) => event.sequence), [4]);
-  assert.deepEqual((response.events as AnyRecord).tracepoints.map((event: AnyRecord) => event.sequence), [5]);
+  const items = (response.events as AnyRecord).items as AnyRecord[];
+  assert.deepEqual(items.filter((event) => event.kind === "breakpointError").map((event) => event.sequence), [4]);
+  assert.deepEqual(items.filter((event) => event.kind === "tracepoint").map((event) => event.sequence), [5]);
 });
 
 test("public event drain normalizes legacy positions before output validation", async () => {
@@ -361,9 +362,9 @@ test("public event drain normalizes legacy positions before output validation", 
 
   assert.equal(response.error, undefined);
   const items = (response.events as AnyRecord).items as AnyRecord[];
-  assert.deepEqual(items[0]?.position, { filePath: "Foo.java", line: 20 });
-  assert.equal("column" in (items[0]?.position ?? {}), false);
-  assert.equal("position" in (items[1] ?? {}), false);
+  assert.deepEqual(items[0]?.at, { filePath: "Foo.java", line: 20 });
+  assert.equal("column" in (items[0]?.at ?? {}), false);
+  assert.equal("at" in (items[1] ?? {}), false);
   const outputSchema = toolOutputSchemas.bp_debug_control;
   assert.ok(outputSchema);
   assert.deepEqual(validateToolOutput(outputSchema, response).errors, []);
@@ -389,7 +390,7 @@ test("public event drain falls back to a valid legacy file when filePath is malf
   });
 
   assert.equal(response.error, undefined);
-  assert.deepEqual((response.events as AnyRecord).items[0]?.position, {
+  assert.deepEqual((response.events as AnyRecord).items[0]?.at, {
     filePath: "Foo.java",
     line: 20
   });

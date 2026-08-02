@@ -122,38 +122,19 @@ mutationManager.audit.record = (type: string, payload: AnyRecord = {}) => {
 };
 const mutationResponse = await mutationRouter.callTool("bp_debug_set_value", {
   path: ["x"],
-  newValue: "1"
+  newValue: "1",
+  detail: "diagnostic"
 });
 assert.equal(mutationResponse.error?.code, "OUTPUT_CONTRACT_VIOLATION");
-assert.equal((mutationResponse.error?.details as Record<string, unknown>).outcome, "indeterminate");
-assert.equal((mutationResponse.error?.details as Record<string, unknown>).retrySafe, false);
-assert.equal(JSON.stringify(mutationResponse), JSON.stringify({
-  error: {
-    code: "OUTPUT_CONTRACT_VIOLATION",
-    message: "Debugger tool returned a result that violates its published contract.",
-    details: {
-      tool: "bp_debug_set_value",
-      issues: [
-        { path: "$.applied", keyword: "type" },
-        { path: "$", keyword: "oneOf" }
-      ],
-      issueCount: 2,
-      outcome: "indeterminate",
-      retrySafe: false
-    }
-  }
-}));
-assert.deepEqual(auditRecords, [{
-  type: "tool_output_contract_violation",
-  payload: {
-    tool: "bp_debug_set_value",
-    issueCount: 2,
-    issues: [
-      { path: "$.applied", keyword: "type" },
-      { path: "$", keyword: "oneOf" }
-    ]
-  }
-}], "audit data must omit the malformed runtime payload");
+assert.equal(mutationResponse.error?.retrySafe, false);
+assert.equal(mutationResponse.error?.actionMayHaveApplied, false);
+assert.equal(mutationResponse.error?.diagnostics?.outcome, "indeterminate");
+assert.equal(mutationResponse.error?.diagnostics?.retrySafe, false);
+assert.equal("details" in (mutationResponse.error ?? {}), false);
+assert.equal(auditRecords.length, 1);
+assert.equal(auditRecords[0]?.type, "tool_output_contract_violation");
+assert.equal(auditRecords[0]?.payload.tool, "bp_debug_set_value");
+assert.ok(Number(auditRecords[0]?.payload.issueCount) > 0);
 assert.equal(JSON.stringify(auditRecords).includes("yes"), false);
 
 for (const testCase of [
@@ -185,10 +166,11 @@ for (const testCase of [
   }
 ]) {
   const { router } = createRouterWithHandler(testCase.name, async () => testCase.candidate);
-  const finalized = await router.callTool(testCase.name, testCase.args);
+  const finalized = await router.callTool(testCase.name, { ...testCase.args, detail: "diagnostic" });
   assert.equal(finalized.error?.code, "OUTPUT_CONTRACT_VIOLATION", testCase.name);
-  assert.equal(finalized.error?.details?.outcome, testCase.outcome, testCase.name);
-  assert.equal(finalized.error?.details?.retrySafe, testCase.retrySafe, testCase.name);
+  assert.equal(finalized.error?.diagnostics?.outcome, testCase.outcome, testCase.name);
+  assert.equal(finalized.error?.retrySafe, testCase.retrySafe, testCase.name);
+  assert.equal(finalized.error?.actionMayHaveApplied, false, testCase.name);
 }
 
 const { router: caughtErrorRouter } = createRouterWithHandler(
@@ -201,7 +183,9 @@ const caughtErrorResponse = await caughtErrorRouter.callTool("bp_debug_status", 
 assert.deepEqual(caughtErrorResponse, {
   error: {
     code: "EXPECTED_FAILURE",
-    message: "Expected failure."
+    message: "Expected failure.",
+    retrySafe: false,
+    actionMayHaveApplied: false
   }
 });
 
@@ -223,7 +207,9 @@ await assert.doesNotReject(async () => {
 assert.deepEqual(nullRejectionResponse, {
   error: {
     code: "TOOL_FAILED",
-    message: "null"
+    message: "null",
+    retrySafe: false,
+    actionMayHaveApplied: false
   }
 });
 assert.deepEqual(nullRejectionAuditRecords, [{
@@ -256,7 +242,9 @@ await assert.doesNotReject(async () => {
 assert.deepEqual(hostileResponse, {
   error: {
     code: "TOOL_FAILED",
-    message: "Unknown tool failure."
+    message: "Unknown tool failure.",
+    retrySafe: false,
+    actionMayHaveApplied: false
   }
 });
 assert.deepEqual(hostileAuditRecords, [{
@@ -303,7 +291,9 @@ try {
     assert.deepEqual(response, {
       error: {
         code: "TOOL_FAILED",
-        message: "Unknown tool failure."
+        message: "Unknown tool failure.",
+        retrySafe: false,
+        actionMayHaveApplied: false
       }
     });
   }

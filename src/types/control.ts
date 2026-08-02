@@ -1,6 +1,9 @@
 import type { AnyRecord } from "./json.ts";
 
 export interface JsonSchema {
+  $schema?: string;
+  $ref?: string;
+  $defs?: Record<string, JsonSchema>;
   type?: "object" | "array" | "string" | "number" | "integer" | "boolean" | "null";
   properties?: Record<string, JsonSchema>;
   required?: string[];
@@ -9,6 +12,7 @@ export interface JsonSchema {
   items?: JsonSchema;
   minimum?: number;
   maximum?: number;
+  minLength?: number;
   minItems?: number;
   additionalProperties?: boolean | JsonSchema;
   default?: unknown;
@@ -39,7 +43,10 @@ export interface ToolResponse<TData = unknown> {
   error?: {
     code: string;
     message: string;
-    details?: AnyRecord;
+    retrySafe: boolean;
+    actionMayHaveApplied: boolean;
+    hint?: string;
+    diagnostics?: AnyRecord;
   };
 }
 

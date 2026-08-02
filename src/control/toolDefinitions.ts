@@ -1,773 +1,260 @@
 import type { JsonSchema, ToolDefinition } from "../types/control.ts";
 import { toolOutputSchemas } from "./toolOutputSchemas.ts";
 
-const MAX_OFFSET = 1_000_000;
 const MAX_LIMIT = 1_000;
-const MAX_FRAME_INDEX = 100_000;
-const MAX_STRING_LENGTH = 1_000_000;
-const MAX_SOURCE_POSITION = 2_147_483_647;
-const MAX_TIMEOUT_MS = 600_000;
-
-const sessionId: JsonSchema = {
-  type: "string",
-  description: "Optional debug session id. If omitted, BreakPilot selects the active or paused session when unambiguous."
-};
-
-const projectPath: JsonSchema = {
-  type: "string",
-  description: "Optional project/workspace path used to route the call in a multi-project hub."
-};
-
-const workspace: JsonSchema = {
-  type: "string",
-  description: "CLI-compatible alias for projectPath."
-};
-
-const clientId: JsonSchema = {
-  type: "string",
-  description: "Optional IDE client id."
-};
-
-const ide: JsonSchema = {
-  type: "string",
-  enum: ["vscode", "idea"],
-  description: "Optional IDE type used to route project-level IDE breakpoint calls."
-};
-
-const timeout: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_TIMEOUT_MS,
-  description: "Timeout in milliseconds."
-};
-
-const timeoutMs: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_TIMEOUT_MS,
-  description: "Compatibility alias for timeout."
-};
-
-const threadId: JsonSchema = {
-  oneOf: [
-    { type: "integer", minimum: 0, maximum: MAX_SOURCE_POSITION },
-    { type: "string" }
-  ],
-  description: "Optional runtime thread id. IDE providers may expose opaque string ids."
-};
+const MAX_OFFSET = 1_000_000;
+const MAX_ID = 2_147_483_647;
+const MAX_TIMEOUT = 600_000;
+const MAX_STRING = 1_000_000;
 
 const detail: JsonSchema = {
   type: "string",
   enum: ["compact", "diagnostic"],
-  default: "compact",
-  description: "Response detail level. Default compact returns only agent-relevant fields."
+  default: "compact"
 };
+const projectPath: JsonSchema = { type: "string" };
+const sessionId: JsonSchema = { type: "string" };
+const clientId: JsonSchema = { type: "string" };
+const ide: JsonSchema = { type: "string", enum: ["vscode", "idea"] };
+const timeout: JsonSchema = { type: "integer", minimum: 1, maximum: MAX_TIMEOUT };
+const threadId: JsonSchema = { oneOf: [{ type: "integer", minimum: 0, maximum: MAX_ID }, { type: "string" }] };
+const frameIndex: JsonSchema = { type: "integer", minimum: 0, maximum: 100_000, default: 0 };
+const pauseId: JsonSchema = { type: "integer", minimum: 0 };
+const offset: JsonSchema = { type: "integer", minimum: 0, maximum: MAX_OFFSET, default: 0 };
+const limit: JsonSchema = { type: "integer", minimum: 1, maximum: MAX_LIMIT };
+const depth: JsonSchema = { type: "integer", minimum: 0, maximum: 8 };
+const maxString: JsonSchema = { type: "integer", minimum: 1, maximum: MAX_STRING };
+const handle: JsonSchema = { type: "string", minLength: 1 };
+const filePath: JsonSchema = { type: "string" };
+const line: JsonSchema = { type: "integer", minimum: 1, maximum: MAX_ID };
+const column: JsonSchema = { type: "integer", minimum: 1, maximum: MAX_ID };
+const redactPatterns: JsonSchema = { type: "array", items: { type: "string" } };
 
-const owner: JsonSchema = {
-  type: "string",
-  enum: ["agent", "user", "all"],
-  description: "Breakpoint owner filter. Defaults are tool-specific."
-};
+function object(properties: Record<string, JsonSchema>, required: string[] = [], oneOf?: JsonSchema[]): JsonSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties,
+    ...(required.length ? { required } : {}),
+    ...(oneOf ? { oneOf } : {})
+  };
+}
 
-const suspendPolicy: JsonSchema = {
-  type: "string",
-  enum: ["ALL", "THREAD", "NONE"],
-  description: "Debugger suspend policy for breakpoint hits."
-};
-
-const expand: JsonSchema = {
-  type: "string",
-  enum: ["none", "preview", "shallow", "deep"],
-  default: "preview"
-};
-
-const file: JsonSchema = {
-  type: "string",
-  description: "Compatibility alias for filePath."
-};
-
-const objectFields: JsonSchema = {
-  type: "string",
-  description: "Compatibility alias for expand."
-};
-
-const maxDepth: JsonSchema = {
-  type: "integer",
-  minimum: 0,
-  maximum: 8,
-  description: "Compatibility alias for depth."
-};
-
-const expansionDepth: JsonSchema = {
-  type: "integer",
-  minimum: 0,
-  maximum: 8,
-  default: 1
-};
-
-const maxItems: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_LIMIT,
-  description: "Compatibility alias for limit."
-};
-
-const maxStringLength: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_STRING_LENGTH,
-  description: "Compatibility alias for maxString."
-};
-
-const pageOffset: JsonSchema = {
-  type: "integer",
-  minimum: 0,
-  maximum: MAX_OFFSET
-};
-
-const pageLimit: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_LIMIT
-};
-
-const frameIndex: JsonSchema = {
-  type: "integer",
-  minimum: 0,
-  maximum: MAX_FRAME_INDEX,
-  default: 0
-};
-
-const frameId: JsonSchema = {
-  oneOf: [
-    { type: "integer", minimum: 0, maximum: MAX_SOURCE_POSITION },
-    { type: "string" }
-  ]
-};
-
-const maxString: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_STRING_LENGTH,
-  default: 2000
-};
-
-const sourceLine: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_SOURCE_POSITION
-};
-
-const sourceColumn: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: MAX_SOURCE_POSITION
-};
-
-const runtimeReference: JsonSchema = {
-  oneOf: [
-    { type: "integer", minimum: 1, maximum: MAX_SOURCE_POSITION },
-    { type: "string" }
-  ]
-};
-
-const networkPort: JsonSchema = {
-  type: "integer",
-  minimum: 1,
-  maximum: 65_535
-};
-
-const redactPatterns: JsonSchema = {
-  type: "array",
-  items: { type: "string" },
-  description: "Additional variable-name patterns to redact from runtime inspection."
-};
-
-const breakpointCommonProperties: Record<string, JsonSchema> = {
-  projectPath,
-  workspace,
-  sessionId,
-  clientId,
-  ide,
-  condition: { oneOf: [{ type: "string" }, { type: "null" }] },
-  hitCondition: { oneOf: [{ type: "string" }, { type: "null" }] },
-  logMessage: { oneOf: [{ type: "string" }, { type: "null" }] },
-  enabled: { type: "boolean", default: true },
-  temporary: { type: "boolean", default: false },
-  suspendPolicy,
-  isLogMessage: { type: "boolean", default: false },
-  isLogStack: { type: "boolean", default: false },
-  owner: { type: "string", enum: ["agent", "user"], default: "agent" },
-  requireVerified: { type: "boolean", default: false },
-  detail
-};
-
-const breakpointLocationInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...breakpointCommonProperties,
-    filePath: { type: "string" },
-    file,
-    line: sourceLine,
-    column: sourceColumn
-  },
-  required: ["line"],
-  oneOf: [
-    { required: ["filePath"] },
-    { required: ["file"] }
-  ]
-};
-
-const breakpointPatchProperties: Record<string, JsonSchema> = {
-  projectPath,
-  workspace,
-  sessionId,
-  clientId,
-  ide,
-  breakpointId: { type: "string" },
-  condition: { oneOf: [{ type: "string" }, { type: "null" }] },
-  hitCondition: { oneOf: [{ type: "string" }, { type: "null" }] },
-  logMessage: { oneOf: [{ type: "string" }, { type: "null" }] },
-  column: { oneOf: [sourceColumn, { type: "null" }] },
-  enabled: { type: "boolean" },
-  owner: { type: "string", enum: ["agent", "user", "all"] },
-  requireVerified: { type: "boolean" }
-};
-
-const breakpointPatchByIdInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: breakpointPatchProperties,
-  required: ["breakpointId"]
-};
-
-const breakpointPatchWithinSourceInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...breakpointPatchProperties,
-    line: sourceLine
-  },
-  required: ["breakpointId", "line"]
-};
-
-const breakpointPatchAcrossSourceInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...breakpointPatchProperties,
-    filePath: { type: "string" },
-    line: sourceLine
-  },
-  required: ["breakpointId", "filePath", "line"]
-};
-
-const breakpointPatchAcrossSourceAliasInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...breakpointPatchProperties,
-    file,
-    line: sourceLine
-  },
-  required: ["breakpointId", "file", "line"]
-};
-
-const valueCommonProperties: Record<string, JsonSchema> = {
-  projectPath,
-  workspace,
-  sessionId,
-  threadId,
-  frameId,
-  frameIndex,
-  start: { ...pageOffset, default: 0 },
-  count: pageLimit,
-  timeout,
-  timeoutMs,
-  expand: { ...expand, default: "deep" },
-  objectFields,
-  depth: expansionDepth,
-  maxDepth,
-  limit: { ...pageLimit, default: 20 },
-  maxItems,
-  detail,
-  maxString,
-  maxStringLength,
+const routed = { projectPath, sessionId, detail };
+const selectedFrame = { ...routed, threadId, frameIndex, pauseId };
+const variableRead = {
+  ...selectedFrame,
+  depth: { ...depth, default: 0 },
+  limit: { ...limit, default: 20 },
+  maxString: { ...maxString, default: 200 },
   redactPatterns
 };
 
-const valuePathInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...valueCommonProperties,
-    path: { type: "array", minItems: 1, items: { type: "string" } }
-  },
-  required: ["path"]
-};
-
-const valueRefInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...valueCommonProperties,
-    ref: {
-      ...runtimeReference,
-      description: "Opaque variable reference returned by frame/value tools."
-    }
-  },
-  required: ["ref"]
-};
-
-const valueVariablesReferenceInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...valueCommonProperties,
-    variablesReference: {
-      ...runtimeReference,
-      description: "Compatibility alias for ref."
-    }
-  },
-  required: ["variablesReference"]
-};
-
-const setValueCommonProperties: Record<string, JsonSchema> = {
+const breakpointFields = {
   projectPath,
-  workspace,
-  sessionId,
-  threadId,
-  frameId,
-  frameIndex,
-  newValue: { type: "string" },
-  timeout,
-  timeoutMs,
-  expand,
-  objectFields,
-  depth: expansionDepth,
-  maxDepth,
-  limit: { ...pageLimit, default: 20 },
-  maxItems,
-  maxString,
-  maxStringLength,
-  redactPatterns,
-  detail
-};
-
-const setValuePathInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...setValueCommonProperties,
-    path: { type: "array", minItems: 1, items: { type: "string" } }
-  },
-  required: ["path", "newValue"]
-};
-
-const setValueRefInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...setValueCommonProperties,
-    ref: runtimeReference
-  },
-  required: ["ref", "newValue"]
-};
-
-const breakpointRemoveCommonProperties: Record<string, JsonSchema> = {
-  projectPath,
-  workspace,
   sessionId,
   clientId,
   ide,
-  owner
-};
-
-const breakpointRemoveIdInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...breakpointRemoveCommonProperties,
-    breakpointId: { type: "string" }
-  },
-  required: ["breakpointId"]
-};
-
-const breakpointRemoveLocationInput: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    ...breakpointRemoveCommonProperties,
-    filePath: { type: "string" },
-    file,
-    line: sourceLine
-  },
-  required: ["line"],
-  oneOf: [
-    { required: ["filePath"] },
-    { required: ["file"] }
-  ]
+  breakpointId: { type: "string" } as JsonSchema,
+  filePath,
+  line,
+  column: { oneOf: [column, { type: "null" }] } as JsonSchema,
+  condition: { oneOf: [{ type: "string" }, { type: "null" }] } as JsonSchema,
+  hitCondition: { oneOf: [{ type: "string" }, { type: "null" }] } as JsonSchema,
+  logMessage: { oneOf: [{ type: "string" }, { type: "null" }] } as JsonSchema,
+  enabled: { type: "boolean" } as JsonSchema,
+  temporary: { type: "boolean" } as JsonSchema,
+  suspendPolicy: { type: "string", enum: ["ALL", "THREAD", "NONE"] } as JsonSchema,
+  isLogMessage: { type: "boolean" } as JsonSchema,
+  isLogStack: { type: "boolean" } as JsonSchema,
+  owner: { type: "string", enum: ["agent", "user", "all"] } as JsonSchema,
+  requireVerified: { type: "boolean" } as JsonSchema,
+  detail
 };
 
 export const toolDefinitions: ToolDefinition[] = [
   {
     name: "bp_debug_start",
-    description: "Start, attach to, or adopt a BreakPilot debug session.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        mode: { type: "string", enum: ["launch", "attach", "ide"] },
-        language: { type: "string", description: "Registered debug language identifier." },
-        lang: { type: "string", description: "CLI-compatible alias for language." },
-        runConfigName: { type: "string", description: "IDE run configuration name to debug when IDE support is available." },
-        filePath: { type: "string", description: "Runnable source file path or launch program path." },
-        file,
-        line: { ...sourceLine, description: "Runnable line for IDE debug launch." },
-        program: { type: "string", description: "Headless launch program path. Defaults to filePath when provided." },
-        module: { type: "string" },
-        args: { type: "array", items: { type: "string" } },
-        cwd: { type: "string" },
-        env: {
-          type: "object",
-          additionalProperties: { oneOf: [{ type: "string" }, { type: "null" }] }
-        },
-        host: { type: "string" },
-        port: networkPort,
-        owner: { type: "string" },
-        clientId,
-        ideSessionId: { type: "string" },
-        adapterCommand: { type: "string" },
-        adapterArgs: { type: "array", items: { type: "string" } },
-        adapterPort: networkPort,
-        dapHost: { type: "string" },
-        dapPort: networkPort,
-        dap: { type: "object", additionalProperties: true },
-        timeout,
-        timeoutMs
-      }
-    },
+    description: "Start, attach to, or adopt a debug session.",
+    inputSchema: object({
+      projectPath,
+      mode: { type: "string", enum: ["launch", "attach", "ide"] },
+      language: { type: "string" },
+      runConfigName: { type: "string" },
+      filePath,
+      line,
+      program: { type: "string" },
+      module: { type: "string" },
+      args: { type: "array", items: { type: "string" } },
+      cwd: { type: "string" },
+      env: { type: "object", additionalProperties: { oneOf: [{ type: "string" }, { type: "null" }] } },
+      host: { type: "string" },
+      port: { type: "integer", minimum: 1, maximum: 65_535 },
+      owner: { type: "string" },
+      clientId,
+      ideSessionId: { type: "string" },
+      adapterCommand: { type: "string" },
+      adapterArgs: { type: "array", items: { type: "string" } },
+      adapterPort: { type: "integer", minimum: 1, maximum: 65_535 },
+      dapHost: { type: "string" },
+      dapPort: { type: "integer", minimum: 1, maximum: 65_535 },
+      dap: { type: "object", additionalProperties: true },
+      timeout,
+      detail
+    }),
     outputSchema: toolOutputSchemas.bp_debug_start
   },
   {
     name: "bp_debug_run_configurations",
-    description: "List IDE run configurations or runnable source locations for a project/file.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        clientId,
-        ide,
-        filePath: { type: "string", description: "Optional source file path. When provided, returns runnable locations in that file." },
-        file,
-        detail
-      }
-    },
+    description: "List IDE run configurations or runnable source locations.",
+    inputSchema: object({ projectPath, clientId, ide, filePath, detail }),
     outputSchema: toolOutputSchemas.bp_debug_run_configurations
   },
   {
     name: "bp_debug_status",
-    description: "Return compact debugger status, live sessions, and IDE bridge summary.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: { projectPath, workspace, clientId, detail }
-    },
+    description: "Return de-duplicated debugger and IDE session status.",
+    inputSchema: object({ projectPath, clientId, detail }),
     outputSchema: toolOutputSchemas.bp_debug_status
   },
   {
     name: "bp_debug_control",
-    description: "Control a debug session: pause, resume, wait, step, disconnect, stop, or drain events.",
-    inputSchema: {
-      type: "object",
-      oneOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            projectPath,
-            workspace,
-            sessionId,
-            action: { type: "string", enum: ["drainEvents"] },
-            cursor: { type: "integer", minimum: 0 },
-            limit: { type: "integer", minimum: 1, maximum: 256 }
-          },
-          required: ["action"]
-        },
-        {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            projectPath,
-            workspace,
-            sessionId,
-            action: {
-              type: "string",
-              enum: ["pause", "resume", "wait", "stepOver", "stepInto", "stepOut", "stop", "disconnect"]
-            },
-            threadId,
-            timeout,
-            timeoutMs,
-            terminateDebuggee: { type: "boolean", default: false },
-            includeFrame: { type: "boolean", default: false },
-            detail,
-            expand,
-            objectFields,
-            depth: expansionDepth,
-            maxDepth,
-            limit: { ...pageLimit, default: 10 },
-            maxItems,
-            maxString,
-            maxStringLength,
-            redactPatterns
-          },
-          required: ["action"]
-        }
-      ]
-    },
+    description: "Pause, resume, wait, step, stop, disconnect, or drain events.",
+    inputSchema: object({
+      ...routed,
+      action: { type: "string", enum: ["pause", "resume", "wait", "stepOver", "stepInto", "stepOut", "stop", "disconnect", "drainEvents"] },
+      threadId,
+      timeout,
+      pauseId,
+      terminateDebuggee: { type: "boolean", default: false },
+      offset,
+      cursor: { type: "integer", minimum: 0 },
+      limit: { ...limit, default: 10 },
+      depth: { ...depth, default: 0 },
+      maxString: { ...maxString, default: 200 },
+      redactPatterns
+    }, ["action"]),
     outputSchema: toolOutputSchemas.bp_debug_control
   },
   {
     name: "bp_debug_run_to_line",
-    description: "Run the selected debug session to a source line.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        filePath: { type: "string" },
-        file,
-        line: sourceLine,
-        column: sourceColumn,
-        threadId,
-        timeout,
-        timeoutMs,
-        includeFrame: { type: "boolean", default: false },
-        detail
-      },
-      required: ["line"],
-      oneOf: [
-        { required: ["filePath"] },
-        { required: ["file"] }
-      ]
-    },
+    description: "Run a paused session to a source line and return target proof.",
+    inputSchema: object({
+      ...routed, filePath, line, column, threadId, timeout, pauseId,
+      depth: { ...depth, default: 0 },
+      limit: { ...limit, default: 10 },
+      maxString: { ...maxString, default: 200 },
+      redactPatterns
+    }, ["filePath", "line"]),
     outputSchema: toolOutputSchemas.bp_debug_run_to_line
   },
   {
     name: "bp_debug_threads",
-    description: "List runtime threads for a debug session.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        offset: { ...pageOffset, default: 0 },
-        limit: { ...pageLimit, default: 50 },
-        detail
-      }
-    },
+    description: "List runtime threads.",
+    inputSchema: object({ ...routed, offset, limit: { ...limit, default: 50 } }),
     outputSchema: toolOutputSchemas.bp_debug_threads
   },
   {
     name: "bp_debug_call_stack",
-    description: "Return the call stack for the active or selected thread.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        threadId,
-        offset: { ...pageOffset, default: 0 },
-        limit: { ...pageLimit, default: 20 },
-        detail
-      }
-    },
+    description: "Return the semantic call stack for a thread.",
+    inputSchema: object({ ...routed, threadId, pauseId, offset, limit: { ...limit, default: 20 } }),
     outputSchema: toolOutputSchemas.bp_debug_call_stack
   },
   {
     name: "bp_debug_frame",
-    description: "Return structured variables for a stack frame.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        threadId,
-        frameId,
-        frameIndex,
-        timeout,
-        timeoutMs,
-        detail,
-        expand,
-        objectFields,
-        depth: expansionDepth,
-        maxDepth,
-        limit: { ...pageLimit, default: 20 },
-        maxItems,
-        maxString,
-        maxStringLength,
-        redactPatterns
-      }
-    },
+    description: "Return semantic variables for a stack frame.",
+    inputSchema: object(variableRead),
     outputSchema: toolOutputSchemas.bp_debug_frame
   },
   {
     name: "bp_debug_value",
-    description: "Read a value by path from the current frame or expand a variable ref.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        ...valueCommonProperties,
-        path: { type: "array", minItems: 1, items: { type: "string" } },
-        ref: {
-          ...runtimeReference,
-          description: "Opaque variable reference returned by frame/value tools."
-        },
-        variablesReference: {
-          ...runtimeReference,
-          description: "Compatibility alias for ref."
-        }
-      },
-      oneOf: [valuePathInput, valueRefInput, valueVariablesReferenceInput]
-    },
+    description: "Read a value by frame path or expand a pause-scoped handle.",
+    inputSchema: object({
+      ...selectedFrame,
+      path: { type: "array", minItems: 1, items: { type: "string" } },
+      handle,
+      offset,
+      depth: { ...depth, default: 1 },
+      limit: { ...limit, default: 20 },
+      maxString: { ...maxString, default: 200 },
+      redactPatterns
+    }, [], [{ type: "object", required: ["path"] }, { type: "object", required: ["handle"] }]),
     outputSchema: toolOutputSchemas.bp_debug_value
   },
   {
     name: "bp_debug_set_value",
-    description: "Set a variable value when the runtime provider supports mutation.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        ...setValueCommonProperties,
-        path: { type: "array", minItems: 1, items: { type: "string" } },
-        ref: runtimeReference
-      },
-      oneOf: [setValuePathInput, setValueRefInput]
-    },
+    description: "Set a variable by frame path or pause-scoped handle.",
+    inputSchema: object({
+      ...selectedFrame,
+      path: { type: "array", minItems: 1, items: { type: "string" } },
+      handle,
+      newValue: { type: "string" },
+      timeout,
+      detail
+    }, ["newValue"], [{ type: "object", required: ["path"] }, { type: "object", required: ["handle"] }]),
     outputSchema: toolOutputSchemas.bp_debug_set_value
   },
   {
     name: "bp_debug_eval",
-    description: "Evaluate an expression in the current debug frame.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        expression: { type: "string" },
-        mode: { type: "string", enum: ["readonly", "guarded", "unsafe"], default: "readonly" },
-        threadId,
-        frameId,
-        frameIndex,
-        context: { type: "string" },
-        timeout,
-        timeoutMs,
-        detail
-      },
-      required: ["expression"]
-    },
+    description: "Evaluate an expression in a paused frame.",
+    inputSchema: object({
+      ...selectedFrame,
+      expression: { type: "string" },
+      mode: { type: "string", enum: ["readonly", "guarded", "unsafe"], default: "readonly" },
+      context: { type: "string" },
+      timeout,
+      detail
+    }, ["expression"]),
     outputSchema: toolOutputSchemas.bp_debug_eval
   },
   {
     name: "bp_debug_context",
-    description: "Return the current paused position, call stack, and top-frame variables.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        threadId,
-        frameId,
-        clientId,
-        ideSessionId: { type: "string" },
-        timeout,
-        timeoutMs,
-        frameIndex,
-        profile: { type: "string" },
-        objectFields,
-        maxDepth,
-        maxItems,
-        maxStringLength,
-        expand,
-        depth: expansionDepth,
-        limit: { ...pageLimit, default: 20 },
-        maxString,
-        redactPatterns,
-        detail
-      }
-    },
+    description: "Return one task-complete snapshot of the current pause.",
+    inputSchema: object({
+      ...selectedFrame,
+      clientId,
+      ideSessionId: { type: "string" },
+      timeout,
+      stackLimit: { ...limit, default: 5 },
+      variableLimit: { ...limit, default: 10 },
+      depth: { ...depth, default: 0 },
+      maxString: { ...maxString, default: 200 },
+      redactPatterns,
+      detail
+    }),
     outputSchema: toolOutputSchemas.bp_debug_context
   },
   {
     name: "bp_debug_set_breakpoint",
-    description: "Set an agent-owned source breakpoint. Without sessionId, BreakPilot can route to a project-level IDE client.",
-    inputSchema: {
-      type: "object",
-      oneOf: [
-        breakpointLocationInput,
-        breakpointPatchByIdInput,
-        breakpointPatchWithinSourceInput,
-        breakpointPatchAcrossSourceInput,
-        breakpointPatchAcrossSourceAliasInput
-      ]
-    },
+    description: "Create or update an agent-visible source breakpoint.",
+    inputSchema: object(breakpointFields, [], [
+      { type: "object", properties: { breakpointId: { type: "null" } }, required: ["filePath", "line"] },
+      { type: "object", required: ["breakpointId"] }
+    ]),
     outputSchema: toolOutputSchemas.bp_debug_set_breakpoint
   },
   {
     name: "bp_debug_list_breakpoints",
-    description: "List breakpoints for a debug session or project-level IDE client.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        projectPath,
-        workspace,
-        sessionId,
-        clientId,
-        ide,
-        filePath: { type: "string" },
-        file,
-        owner,
-        includeDisabled: { type: "boolean", default: true },
-        detail
-      }
-    },
+    description: "List normalized source breakpoints.",
+    inputSchema: object({
+      projectPath, sessionId, clientId, ide, filePath,
+      owner: { type: "string", enum: ["agent", "user", "all"] },
+      includeDisabled: { type: "boolean", default: true },
+      detail
+    }),
     outputSchema: toolOutputSchemas.bp_debug_list_breakpoints
   },
   {
     name: "bp_debug_remove_breakpoint",
-    description: "Remove a breakpoint by breakpointId or filePath + line from a debug session or project-level IDE client.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        ...breakpointRemoveCommonProperties,
-        breakpointId: { type: "string" },
-        filePath: { type: "string" },
-        file,
-        line: sourceLine
-      },
-      oneOf: [breakpointRemoveIdInput, breakpointRemoveLocationInput]
-    },
+    description: "Remove a breakpoint by id or source location.",
+    inputSchema: object({
+      projectPath, sessionId, clientId, ide,
+      breakpointId: { type: "string" }, filePath, line,
+      owner: { type: "string", enum: ["agent", "user", "all"] },
+      detail
+    }, [], [
+      { type: "object", required: ["breakpointId"] },
+      { type: "object", properties: { breakpointId: { type: "null" } }, required: ["filePath", "line"] }
+    ]),
     outputSchema: toolOutputSchemas.bp_debug_remove_breakpoint
   }
 ];

@@ -81,7 +81,7 @@ const fullCapabilities: RuntimeProviderCapabilities = {
   eventDrain: "native"
 };
 
-test("live language enums apply equally to language and lang without mutating static schemas", async () => {
+test("live language enums apply to the canonical language field without mutating static schemas", async () => {
   const manager = new DebugSessionManager({ policy: loadPolicy("breakpilot.yaml") });
   const dynamicLanguage = "contract-boundary-language";
   manager.adapters.register(new LanguageAdapter({
@@ -94,30 +94,27 @@ test("live language enums apply equally to language and lang without mutating st
     dispatches += 1;
     return {
       sessionId: "dynamic",
-      language: dynamicLanguage,
-      mode: "headless",
       state: "running",
       startMode: "launch",
-      providerKind: "dap",
-      capabilities: fullCapabilities
+      target: { language: dynamicLanguage }
     };
   };
   const router = new ToolRouter(manager);
   const advertisedStart = router.listTools().find((tool) => tool.name === "bp_debug_start");
   assert.ok(advertisedStart);
   const properties = advertisedStart.inputSchema.properties as Record<string, JsonSchema>;
-  assert.deepEqual(properties.lang?.enum, properties.language?.enum);
-  assert.ok(properties.lang?.enum?.includes(dynamicLanguage));
+  assert.ok(properties.language?.enum?.includes(dynamicLanguage));
+  assert.equal(properties.lang, undefined);
 
-  const accepted = await router.callTool("bp_debug_start", { lang: dynamicLanguage });
-  const rejected = await router.callTool("bp_debug_start", { lang: "not-registered" });
+  const accepted = await router.callTool("bp_debug_start", { language: dynamicLanguage });
+  const rejected = await router.callTool("bp_debug_start", { language: "not-registered" });
   assert.equal(accepted.error, undefined);
   assert.equal(rejected.error?.code, ErrorCodes.INVALID_ARGUMENT);
   assert.equal(dispatches, 1);
 
   const staticProperties = definition("bp_debug_start").inputSchema.properties as Record<string, JsonSchema>;
   assert.equal(staticProperties.language?.enum, undefined);
-  assert.equal(staticProperties.lang?.enum, undefined);
+  assert.equal(staticProperties.lang, undefined);
 });
 
 test("value, set-value, and remove selectors reject missing, empty, and mixed targets before dispatch", async () => {
@@ -125,17 +122,16 @@ test("value, set-value, and remove selectors reject missing, empty, and mixed ta
   const calls = { value: 0, setValue: 0, remove: 0 };
   manager.bpDebugValue = async () => {
     calls.value += 1;
-    return { value: "ok" };
+    return { value: { name: "answer", value: "ok" } };
   };
   manager.bpDebugSetValue = async () => {
     calls.setValue += 1;
     return {
-      path: ["answer"],
+      target: { path: ["answer"] },
       oldValue: "42",
       newValue: "43",
       applied: true,
-      verified: false,
-      mutationMode: "native"
+      verified: false
     };
   };
   manager.bpDebugRemoveBreakpoint = async () => {
@@ -146,28 +142,26 @@ test("value, set-value, and remove selectors reject missing, empty, and mixed ta
 
   for (const args of [
     { path: ["answer"] },
-    { ref: 9 },
-    { variablesReference: 9 }
+    { handle: "v1" }
   ]) {
     const response = await router.callTool("bp_debug_value", args);
     assert.equal(response.error, undefined, JSON.stringify(args));
   }
-  assert.equal(calls.value, 3);
+  assert.equal(calls.value, 2);
 
   const invalidValueTargets = [
     {},
     { path: [] },
-    { ref: 0 },
-    { variablesReference: 0 },
-    { path: ["answer"], ref: 9 },
-    { path: ["answer"], variablesReference: 9 },
-    { ref: 9, variablesReference: 9 }
+    { handle: "" },
+    { ref: 9 },
+    { variablesReference: 9 },
+    { path: ["answer"], handle: "v1" }
   ];
   const invalidValueResults = await Promise.all(
     invalidValueTargets.map((args) => router.callTool("bp_debug_value", args))
   );
   assert.ok(invalidValueResults.every((response) => response.error?.code === ErrorCodes.INVALID_ARGUMENT));
-  assert.equal(calls.value, 3, "invalid value selectors must not dispatch");
+  assert.equal(calls.value, 2, "invalid value selectors must not dispatch");
 
   const emptySetPath = await router.callTool("bp_debug_set_value", { path: [], newValue: "43" });
   assert.equal(emptySetPath.error?.code, ErrorCodes.INVALID_ARGUMENT);
@@ -179,15 +173,15 @@ test("value, set-value, and remove selectors reject missing, empty, and mixed ta
   assert.equal(validSetPath.error, undefined);
   assert.equal(calls.setValue, 1);
   const validSetRef = await router.callTool("bp_debug_set_value", {
-    ref: "bpref_opaque",
+    handle: "v1",
     newValue: "43"
   });
   assert.equal(validSetRef.error, undefined);
   assert.equal(calls.setValue, 2);
   for (const args of [
     { newValue: "43" },
-    { path: ["answer"], ref: "bpref_opaque", newValue: "43" },
-    { ref: "bpref_opaque", newValue: "43", unknown: true }
+    { path: ["answer"], handle: "v1", newValue: "43" },
+    { handle: "v1", newValue: "43", unknown: true }
   ]) {
     const response = await router.callTool("bp_debug_set_value", args);
     assert.equal(response.error?.code, ErrorCodes.INVALID_ARGUMENT, JSON.stringify(args));
@@ -200,23 +194,22 @@ test("value, set-value, and remove selectors reject missing, empty, and mixed ta
     { file: "src/serve.ts", line: 1 }
   ]) {
     const response = await router.callTool("bp_debug_remove_breakpoint", args);
-    assert.equal(response.error, undefined, JSON.stringify(args));
+    if ("file" in args) assert.equal(response.error?.code, ErrorCodes.INVALID_ARGUMENT, JSON.stringify(args));
+    else assert.equal(response.error, undefined, JSON.stringify(args));
   }
-  assert.equal(calls.remove, 3);
+  assert.equal(calls.remove, 2);
 
   const invalidRemoveTargets = [
     {},
     { filePath: "src/serve.ts" },
     { line: 1 },
-    { breakpointId: "bp_1", filePath: "src/serve.ts" },
-    { breakpointId: "bp_1", filePath: "src/serve.ts", line: 1 },
     { filePath: "src/a.ts", file: "src/b.ts", line: 1 }
   ];
   const invalidRemoveResults = await Promise.all(
     invalidRemoveTargets.map((args) => router.callTool("bp_debug_remove_breakpoint", args))
   );
   assert.ok(invalidRemoveResults.every((response) => response.error?.code === ErrorCodes.INVALID_ARGUMENT));
-  assert.equal(calls.remove, 3, "invalid remove selectors must not dispatch");
+  assert.equal(calls.remove, 2, "invalid remove selectors must not dispatch");
 });
 
 test("breakpoint patch branches preserve explicit clears and never inherit create defaults", async () => {
@@ -225,13 +218,10 @@ test("breakpoint patch branches preserve explicit clears and never inherit creat
   manager.bpDebugSetBreakpoint = async (args) => {
     capturedArgs.push(structuredClone(args ?? {}));
     return {
-      breakpointId: "bp_1",
-      filePath: "src/serve.ts",
-      line: 17,
+      id: "bp_1",
+      at: { filePath: "src/serve.ts", line: 17 },
       verified: true,
-      owner: "agent",
-      enabled: true,
-      temporary: false
+      owner: "agent"
     };
   };
   const router = new ToolRouter(manager);
@@ -262,19 +252,18 @@ test("breakpoint patch branches preserve explicit clears and never inherit creat
   });
   assert.equal(sameSourceMove.error, undefined);
   assert.equal(filePathRelocation.error, undefined);
-  assert.equal(aliasRelocation.error, undefined);
+  assert.equal(aliasRelocation.error?.code, ErrorCodes.INVALID_ARGUMENT);
   assert.equal(capturedArgs[1]?.line, 17);
-  assert.deepEqual(capturedArgs[2], { breakpointId: "bp_1", filePath: "src/relocated.ts", line: 18 });
-  assert.deepEqual(capturedArgs[3], { breakpointId: "bp_1", file: "src/legacy.ts", line: 19 });
+  assert.deepEqual(capturedArgs[2], { breakpointId: "bp_1", filePath: "src/relocated.ts", line: 18, detail: "compact" });
 
   const created = await router.callTool("bp_debug_set_breakpoint", {
     filePath: "src/create.ts",
     line: 20
   });
   assert.equal(created.error, undefined);
-  assert.equal(capturedArgs[4]?.enabled, true);
-  assert.equal(capturedArgs[4]?.owner, "agent");
-  assert.equal(capturedArgs[4]?.temporary, false);
+  assert.equal(capturedArgs[3]?.enabled, undefined);
+  assert.equal(capturedArgs[3]?.owner, undefined);
+  assert.equal(capturedArgs[3]?.temporary, undefined);
 });
 
 test("public quantity schemas are bounded integers and invalid values never dispatch", async () => {
@@ -284,26 +273,20 @@ test("public quantity schemas are bounded integers and invalid values never disp
   }
   for (const tool of [
     "bp_debug_frame",
-    "bp_debug_value",
-    "bp_debug_set_value",
-    "bp_debug_context"
+    "bp_debug_value"
   ]) {
     assertIntegerBoundary(tool, "limit", 1, MAX_LIMIT);
-    assertIntegerBoundary(tool, "maxItems", 1, MAX_LIMIT);
     assertIntegerBoundary(tool, "maxString", 1, MAX_STRING_LENGTH);
-    assertIntegerBoundary(tool, "maxStringLength", 1, MAX_STRING_LENGTH);
   }
+  assertIntegerBoundary("bp_debug_context", "stackLimit", 1, MAX_LIMIT);
+  assertIntegerBoundary("bp_debug_context", "variableLimit", 1, MAX_LIMIT);
+  assertIntegerBoundary("bp_debug_context", "maxString", 1, MAX_STRING_LENGTH);
   const controlLimitSchemas = propertySchemas(definition("bp_debug_control").inputSchema, "limit");
-  assert.deepEqual(
-    controlLimitSchemas.map((schema) => schema.maximum).sort((left, right) => Number(left) - Number(right)),
-    [256, MAX_LIMIT],
-    "bp_debug_control should bound drain pages to 256 while retaining ordinary action compatibility"
-  );
+  assert.deepEqual(controlLimitSchemas.map((schema) => schema.maximum), [MAX_LIMIT]);
   for (const tool of ["bp_debug_frame", "bp_debug_value", "bp_debug_set_value", "bp_debug_eval", "bp_debug_context"]) {
     assertIntegerBoundary(tool, "frameIndex", 0, MAX_FRAME_INDEX);
   }
-  assertIntegerBoundary("bp_debug_value", "start", 0, MAX_OFFSET);
-  assertIntegerBoundary("bp_debug_value", "count", 1, MAX_LIMIT);
+  assertIntegerBoundary("bp_debug_value", "offset", 0, MAX_OFFSET);
   assertIntegerBoundary("bp_debug_set_breakpoint", "line", 1, MAX_SOURCE_POSITION);
   assertNullableIntegerBoundary("bp_debug_set_breakpoint", "column", 1, MAX_SOURCE_POSITION);
   assertIntegerBoundary("bp_debug_remove_breakpoint", "line", 1, MAX_SOURCE_POSITION);
@@ -336,18 +319,16 @@ test("public quantity schemas are bounded integers and invalid values never disp
     { tool: "bp_debug_call_stack", args: { limit: 0 } },
     { tool: "bp_debug_frame", args: { frameIndex: -1 } },
     { tool: "bp_debug_frame", args: { limit: 2.5 } },
-    { tool: "bp_debug_frame", args: { maxItems: MAX_LIMIT + 1 } },
-    { tool: "bp_debug_frame", args: { maxStringLength: MAX_STRING_LENGTH + 1 } },
-    { tool: "bp_debug_value", args: { ref: 1, start: -1 } },
-    { tool: "bp_debug_value", args: { ref: 1, count: 1.5 } },
-    { tool: "bp_debug_value", args: { ref: 1, count: MAX_LIMIT + 1 } },
-    { tool: "bp_debug_value", args: { ref: 1, frameIndex: MAX_FRAME_INDEX + 1 } },
-    { tool: "bp_debug_value", args: { ref: 1, maxString: 0 } },
+    { tool: "bp_debug_frame", args: { maxString: MAX_STRING_LENGTH + 1 } },
+    { tool: "bp_debug_value", args: { handle: "v1", offset: -1 } },
+    { tool: "bp_debug_value", args: { handle: "v1", limit: 1.5 } },
+    { tool: "bp_debug_value", args: { handle: "v1", limit: MAX_LIMIT + 1 } },
+    { tool: "bp_debug_value", args: { handle: "v1", frameIndex: MAX_FRAME_INDEX + 1 } },
+    { tool: "bp_debug_value", args: { handle: "v1", maxString: 0 } },
     { tool: "bp_debug_set_value", args: { path: ["x"], newValue: "1", limit: 0 } },
-    { tool: "bp_debug_set_value", args: { path: ["x"], newValue: "1", maxString: 1.5 } },
     { tool: "bp_debug_eval", args: { expression: "x", frameIndex: -1 } },
     { tool: "bp_debug_context", args: { limit: MAX_LIMIT + 1 } },
-    { tool: "bp_debug_control", args: { action: "wait", maxItems: -1 } },
+    { tool: "bp_debug_control", args: { action: "wait", limit: -1 } },
     { tool: "bp_debug_start", args: { filePath: "src/serve.ts", line: 1.5 } },
     { tool: "bp_debug_run_to_line", args: { filePath: "src/serve.ts", line: MAX_SOURCE_POSITION + 1 } },
     { tool: "bp_debug_set_breakpoint", args: { filePath: "src/serve.ts", line: 1.5 } },
@@ -425,7 +406,7 @@ test("a concrete DAP thread response satisfies its advertised output schema", as
     sessionId: provider.sessionId
   });
 
-  assert.equal((response.threads as AnyRecord[])[0]?.state, "paused");
+  assert.equal((response.threads as AnyRecord[])[0]?.current, true);
   assert.deepEqual(validateToolInput(definition("bp_debug_threads").outputSchema!, response).errors, []);
 });
 
@@ -454,9 +435,25 @@ test("direct manager variable inspection clamps limits and count to policy maxim
         source: "ide",
         language: "java",
         threadId: 1,
-        frameId: null,
-        stackFrames: [],
-        variables: {},
+        frameId: 10,
+        stackFrames: [{ id: 10, name: "limitFixture", line: 7, source: { path: "src/Limit.java" } }],
+        variables: {
+          locals: {
+            name: "Locals",
+            category: "locals",
+            expensive: false,
+            variables: {
+              items: {
+                name: "items",
+                kind: "object",
+                valuePreview: "List(1000)",
+                value: "List(1000)",
+                variablesReference: "provider-items",
+                truncated: false
+              }
+            }
+          }
+        },
         limits
       };
     },
@@ -496,17 +493,24 @@ test("direct manager variable inspection clamps limits and count to policy maxim
     provider
   });
 
-  await manager.bpDebugFrame({
+  const frameResult = await manager.bpDebugFrame({
     sessionId: provider.sessionId,
-    maxDepth: 99,
-    maxItems: 99_999,
-    maxStringLength: 99_999_999
+    depth: 99,
+    limit: 99_999,
+    maxString: 99_999_999
   });
+  assert.deepEqual(snapshotLimits, {
+    maxDepth: manager.policy.variables.maxDepth,
+    maxItems: manager.policy.variables.maxItems,
+    maxStringLength: manager.policy.variables.maxStringLength,
+    redactPatterns: manager.policy.variables.redactPatterns
+  });
+  const handle = ((frameResult.locals as AnyRecord[] | undefined)?.[0]?.handle);
+  assert.equal(typeof handle, "string");
   await manager.bpDebugValue({
     sessionId: provider.sessionId,
-    ref: 9,
-    count: 99_999,
-    maxItems: 99_999
+    handle,
+    limit: 99_999
   });
 
   assert.deepEqual(snapshotLimits, {

@@ -80,11 +80,12 @@ test("manager preserves a trusted partial provider page without slicing it again
   const page = await manager.bpDebugCallStack({ sessionId: "stack-contract", offset: 2, limit: 2 });
 
   assert.deepEqual(received, { offset: 2, limit: 2 });
-  assert.deepEqual((page.frames as AnyRecord[]).map((frame) => frame.id), ["frame-2", "frame-3"]);
-  assert.equal(page.completeness, "partial");
+  assert.deepEqual(
+    (page.frames as AnyRecord[]).map((frame) => ((frame.at as AnyRecord).function)),
+    ["two", "three"]
+  );
   assert.equal(page.nextOffset, 4);
-  assert.equal(page.partial, true);
-  assert.equal(page.totalFrames, 10);
+  assert.equal("completeness" in page, false);
 });
 
 test("manager preserves complete and unknown provider pagination facts", async () => {
@@ -97,8 +98,7 @@ test("manager preserves complete and unknown provider pagination facts", async (
     partial: false
   }));
   const complete = await completeManager.bpDebugCallStack({ sessionId: "stack-contract", offset: 2, limit: 2 });
-  assert.equal(complete.completeness, "complete");
-  assert.equal(complete.partial, false);
+  assert.equal("incomplete" in complete, false);
   assert.equal(complete.nextOffset, undefined);
 
   const unknownManager = managerWithStack(async (threadId, request) => ({
@@ -110,9 +110,8 @@ test("manager preserves complete and unknown provider pagination facts", async (
     truncationReason: "provider"
   }));
   const unknown = await unknownManager.bpDebugCallStack({ sessionId: "stack-contract", offset: 0, limit: 20 });
-  assert.equal(unknown.completeness, "unknown");
-  assert.equal(unknown.partial, true);
-  assert.equal(unknown.totalFrames, undefined, "missing totals must never be inferred from the page length");
+  assert.deepEqual(unknown.incomplete, ["stack"]);
+  assert.equal(unknown.nextOffset, undefined, "missing totals must never fabricate a cursor");
 });
 
 test("manager does not overwrite provider completeness when a known-total page is truncated", async () => {
@@ -132,10 +131,8 @@ test("manager does not overwrite provider completeness when a known-total page i
 
   const page = await manager.bpDebugCallStack({ sessionId: "stack-contract", offset: 2, limit: 2 });
 
-  assert.equal(page.completeness, "partial");
-  assert.equal(page.partial, true);
   assert.equal(page.nextOffset, 4);
-  assert.equal(page.truncationReason, "timeout");
+  assert.equal("truncationReason" in page, false);
 });
 
 test("manager derives partialness from known-total provider completeness", async () => {
@@ -152,8 +149,7 @@ test("manager derives partialness from known-total provider completeness", async
     offset: 0,
     limit: 20
   });
-  assert.equal(complete.completeness, "complete");
-  assert.equal(complete.partial, false);
+  assert.equal("incomplete" in complete, false);
 
   const contradictoryPartial = managerWithStack(async (threadId, request) => ({
     threadId: threadId ?? null,
@@ -170,10 +166,8 @@ test("manager derives partialness from known-total provider completeness", async
     offset: 0,
     limit: 1
   });
-  assert.equal(partial.completeness, "partial");
-  assert.equal(partial.partial, true);
   assert.equal(partial.nextOffset, 1);
-  assert.equal(partial.truncationReason, "timeout");
+  assert.equal("truncationReason" in partial, false);
 });
 
 test("legacy IDE snapshot fallback never fabricates stack completeness or a total", async () => {

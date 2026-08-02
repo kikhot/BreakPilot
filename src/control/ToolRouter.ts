@@ -42,16 +42,17 @@ export class ToolRouter {
     const clone = structuredClone(toolDefinitions) as ToolDefinition[];
     for (const tool of clone) {
       if (tool.name === "bp_debug_start") {
-        for (const property of ["language", "lang"]) {
-          const language = tool.inputSchema?.properties?.[property];
-          if (language) language.enum = identifiers;
-        }
+        const language = tool.inputSchema?.properties?.language;
+        if (language) language.enum = identifiers;
       }
     }
     return clone;
   }
 
   async callTool(name: string, args: unknown = {}): Promise<ToolResponse> {
+    const diagnostic = Boolean(
+      args && typeof args === "object" && !Array.isArray(args) && (args as AnyRecord).detail === "diagnostic"
+    );
     const handler = this.handlers.get(name);
     if (!handler) {
       return fail(new Error(`Unknown tool: ${name}`), this.manager.audit.record("unknown_tool", { name }));
@@ -74,7 +75,7 @@ export class ToolRouter {
         );
       }
       const candidate = await handler(validation.value);
-      return this.finalizer.finalize(definition, candidate, operation);
+      return this.finalizer.finalize(definition, candidate, operation, diagnostic);
     } catch (error) {
       const errorPayload = toErrorPayload(error);
       const auditId = this.manager.audit.record("tool_failed", {
@@ -82,17 +83,15 @@ export class ToolRouter {
         message: errorPayload.message,
         code: errorPayload.code
       });
-      return this.finalizer.finalize(definition, fail(error, auditId), operation);
+      return this.finalizer.finalize(definition, fail(error, auditId, diagnostic), operation, diagnostic);
     }
   }
 
   #validationSchema(definition: ToolDefinition): ToolDefinition["inputSchema"] {
     if (definition.name !== "bp_debug_start") return definition.inputSchema;
     const schema = structuredClone(definition.inputSchema);
-    for (const property of ["language", "lang"]) {
-      const language = schema.properties?.[property];
-      if (language) language.enum = this.manager.adapters.listIdentifiers();
-    }
+    const language = schema.properties?.language;
+    if (language) language.enum = this.manager.adapters.listIdentifiers();
     return schema;
   }
 }

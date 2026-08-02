@@ -1,7 +1,7 @@
 /**
- * Frozen snapshot of the legacy `src/cli/commands.ts::toolFromCommand` mapping
- * and the hand-written flag-parsing helpers it depended on, used as the ORACLE
- * for the parameter-mapping equivalence property test (Property 2 / task 8.1).
+ * Independent snapshot of the CLI-to-control mapping used as the ORACLE for
+ * the parameter-mapping property test. CLI flag names remain user-friendly,
+ * while the resulting control arguments use the canonical agent contract.
  *
  * This file is an intentional COPY (not an import) of the pre-yargs behavior so
  * the oracle stays frozen and independent of any future edits to the production
@@ -13,8 +13,8 @@
  *   - the argv-slicing performed by the legacy `runCli` (commit b3025e2) to
  *     derive `(command, subcommand, flags, positional)` from a raw argv array.
  *
- * DO NOT "modernize" or refactor this file: its whole purpose is to encode the
- * old behavior verbatim as the source of truth for the equivalence check.
+ * Keep this implementation independent from the production yargs handlers so
+ * the property test detects accidental mapping drift.
  */
 
 // ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ export function toolFromCommand(
       "bp_debug_set_breakpoint",
       {
         sessionId: stringFlag(flags, "session"),
-        workspace: stringFlag(flags, "workspace"),
+        projectPath: stringFlag(flags, "workspace"),
         clientId: stringFlag(flags, "client"),
         ide: stringFlag(flags, "ide"),
         filePath: stringFlag(flags, "file"),
@@ -151,7 +151,7 @@ export function toolFromCommand(
   if (command === "bp" && subcommand === "remove") {
     return ["bp_debug_remove_breakpoint", {
       sessionId: stringFlag(flags, "session"),
-      workspace: stringFlag(flags, "workspace"),
+      projectPath: stringFlag(flags, "workspace"),
       clientId: stringFlag(flags, "client"),
       ide: stringFlag(flags, "ide"),
       breakpointId: stringFlag(flags, "id"),
@@ -162,7 +162,7 @@ export function toolFromCommand(
   if (command === "bp" && subcommand === "list") {
     return ["bp_debug_list_breakpoints", {
       sessionId: stringFlag(flags, "session"),
-      workspace: stringFlag(flags, "workspace"),
+      projectPath: stringFlag(flags, "workspace"),
       clientId: stringFlag(flags, "client"),
       ide: stringFlag(flags, "ide"),
       filePath: stringFlag(flags, "file")
@@ -180,8 +180,7 @@ export function toolFromCommand(
       {
         sessionId: stringFlag(flags, "session"),
         threadId: parseNumber(flags.thread),
-        frameId: parseNumber(flags.frame),
-        expand: stringFlag(flags, "objects"),
+        frameIndex: parseNumber(flags.frame),
         depth: parseNumber(flags.depth),
         limit: parseNumber(flags["max-items"]),
         maxString: parseNumber(flags["max-string-length"])
@@ -193,12 +192,10 @@ export function toolFromCommand(
       "bp_debug_value",
       {
         sessionId: stringFlag(flags, "session"),
-        ref: parseNumber(flags.ref),
-        start: parseNumber(flags.start),
-        count: parseNumber(flags.count),
-        expand: stringFlag(flags, "objects") ?? "deep",
+        handle: stringFlag(flags, "ref"),
+        offset: parseNumber(flags.start),
         depth: parseNumber(flags.depth),
-        limit: parseNumber(flags["max-items"]),
+        limit: parseNumber(flags.count) ?? parseNumber(flags["max-items"]),
         maxString: parseNumber(flags["max-string-length"])
       }
     ];
@@ -247,7 +244,7 @@ export function toolFromCommand(
       "bp_debug_status",
       {
         clientId: stringFlag(flags, "client"),
-        workspace: stringFlag(flags, "workspace")
+        projectPath: stringFlag(flags, "workspace")
       }
     ];
   }
@@ -257,8 +254,8 @@ export function toolFromCommand(
       {
         clientId: stringFlag(flags, "client"),
         ideSessionId: stringFlag(flags, "ide-session"),
-        workspace: stringFlag(flags, "workspace"),
-        lang: stringFlag(flags, "lang"),
+        projectPath: stringFlag(flags, "workspace"),
+        language: stringFlag(flags, "lang"),
         mode: stringFlag(flags, "mode") ?? "ide",
         owner: stringFlag(flags, "owner")
       }
@@ -271,14 +268,12 @@ export function toolFromCommand(
         sessionId: stringFlag(flags, "session"),
         clientId: stringFlag(flags, "client"),
         ideSessionId: stringFlag(flags, "ide-session"),
-        workspace: stringFlag(flags, "workspace"),
+        projectPath: stringFlag(flags, "workspace"),
         timeout: parseNumber(flags.timeout),
         frameIndex: parseNumber(flags.frame),
-        profile: stringFlag(flags, "profile"),
-        objectFields: stringFlag(flags, "objects"),
-        maxDepth: parseNumber(flags.depth),
-        maxItems: parseNumber(flags["max-items"]),
-        maxStringLength: parseNumber(flags["max-string-length"])
+        depth: parseNumber(flags.depth),
+        variableLimit: parseNumber(flags["max-items"]),
+        maxString: parseNumber(flags["max-string-length"])
       }
     ];
   }

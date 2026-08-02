@@ -8,6 +8,7 @@ import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
 import type { ToolDefinition, ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
 import { fail, ok, toolResponseHttpStatus } from "../utils/errors.ts";
+import { summarizeToolResult } from "../control/ToolTextSummary.ts";
 import { McpSessionRegistry, type McpSessionRecord } from "./McpSessionRegistry.ts";
 import { ProjectRuntimeRegistry } from "./ProjectRuntimeRegistry.ts";
 
@@ -23,10 +24,10 @@ interface JsonRpcMessage {
   params?: AnyRecord;
 }
 
-function toolCallResult(result: ToolResponse): AnyRecord {
+function toolCallResult(name: string, result: ToolResponse): AnyRecord {
   const isError = Boolean(result.error);
   return {
-    content: [{ type: "text", text: isError ? result.error?.message ?? "error" : "ok" }],
+    content: [{ type: "text", text: summarizeToolResult(name, result as AnyRecord) }],
     structuredContent: result,
     isError
   };
@@ -300,7 +301,7 @@ export class BreakPilotHub {
     if (message.method === "tools/call") {
       const { name, arguments: args } = message.params ?? {};
       const result = await this.callTool(String(name), (args as AnyRecord | undefined) ?? {}, session);
-      return toolCallResult(result);
+      return toolCallResult(String(name), result);
     }
     if (message.method === "ping") return {};
     throw new Error(`Unsupported JSON-RPC method: ${String(message.method)}`);

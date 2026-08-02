@@ -37,13 +37,15 @@ assert.deepEqual(normalizedControl.errors, []);
 assert.notStrictEqual(normalizedControl.value, controlInput);
 assert.notStrictEqual(normalizedControl.value.redactPatterns, controlInput.redactPatterns);
 assert.deepEqual(controlInput, { action: "wait", redactPatterns: ["token"] });
-assert.equal(normalizedControl.value.includeFrame, false);
 assert.equal(normalizedControl.value.detail, "compact");
+assert.equal(normalizedControl.value.depth, 0);
+assert.equal(normalizedControl.value.limit, 10);
+assert.equal(normalizedControl.value.maxString, 200);
 
-const explicitUndefined = { action: "wait", includeFrame: undefined };
+const explicitUndefined = { action: "wait", depth: undefined };
 const undefinedResult = validateToolInput(inputSchema("bp_debug_control"), explicitUndefined);
 assert.deepEqual(undefinedResult.errors, [jsonCompatibleObjectIssue]);
-assert.deepEqual(explicitUndefined, { action: "wait", includeFrame: undefined });
+assert.deepEqual(explicitUndefined, { action: "wait", depth: undefined });
 
 const nonCloneableInputs: Array<{ label: string; value: unknown }> = [
   { label: "function", value: function nonJsonInput() {} },
@@ -632,30 +634,26 @@ manager.bpDebugRunToLine = async (args) => {
   runToLineCalls += 1;
   dispatchedRunToLine = args;
   return {
-    status: "paused",
-    targetReached: true,
-    requestedPosition: {
-      filePath: String(args?.filePath ?? args?.file ?? "src/Hello.java"),
+    state: "paused",
+    reached: true,
+    target: {
+      filePath: String(args?.filePath ?? "src/Hello.java"),
       line: Number(args?.line ?? 1)
-    },
-    cleanedUp: true
+    }
   };
 };
 manager.bpDebugStatus = async () => {
   statusCalls += 1;
-  return { sessions: [] };
+  return { sessions: [], ideConnected: false };
 };
 manager.bpDebugSetBreakpoint = async (args) => {
   breakpointCalls += 1;
   dispatchedBreakpoints.push(structuredClone(args ?? {}));
   return {
-    breakpointId: "bp_test",
-    filePath: "src/Hello.java",
-    line: 12,
+    id: "bp_test",
+    at: { filePath: "src/Hello.java", line: 12 },
     verified: true,
-    owner: "agent",
-    enabled: true,
-    temporary: false
+    owner: "agent"
   };
 };
 const router = new ToolRouter(manager);
@@ -663,7 +661,8 @@ const router = new ToolRouter(manager);
 const expectedStatusRootError = {
   code: "INVALID_ARGUMENT",
   message: "Invalid arguments for bp_debug_status.",
-  details: { issues: [jsonCompatibleObjectIssue] }
+  retrySafe: true,
+  actionMayHaveApplied: false
 };
 const nonCloneableRouterResults = [];
 for (const { label, value } of nonCloneableInputs) {
@@ -702,7 +701,8 @@ assert.equal(containedAccessorReads, 0, "router validation must not invoke Map v
 const expectedExoticRootError = {
   code: "INVALID_ARGUMENT",
   message: "Invalid arguments for bp_debug_status.",
-  details: { issues: [{ path: "$", keyword: "type", message: "must be object" }] }
+  retrySafe: true,
+  actionMayHaveApplied: false
 };
 const exoticRootRouterResults = [];
 for (const { label, value } of exoticObjectInputs) {
@@ -732,19 +732,20 @@ assert.equal(statusCalls, 0, "cyclic arguments must not invoke the manager");
 
 const invalidLine = await router.callTool("bp_debug_run_to_line", {
   filePath: "src/Hello.java",
-  line: 0
+  line: 0,
+  detail: "diagnostic"
 });
 assert.equal(invalidLine.error?.code, "INVALID_ARGUMENT");
-assert.deepEqual(invalidLine.error?.details?.issues, [{
+assert.deepEqual(invalidLine.error?.diagnostics?.issues, [{
   path: "$.line",
   keyword: "minimum",
   message: "must be >= 1"
 }]);
 assert.equal(runToLineCalls, 0, "invalid arguments must not invoke the manager");
 
-const unknownField = await router.callTool("bp_debug_status", { typo: true });
+const unknownField = await router.callTool("bp_debug_status", { typo: true, detail: "diagnostic" });
 assert.equal(unknownField.error?.code, "INVALID_ARGUMENT");
-assert.deepEqual(unknownField.error?.details?.issues, [{
+assert.deepEqual(unknownField.error?.diagnostics?.issues, [{
   path: "$.typo",
   keyword: "additionalProperties",
   message: "is not allowed"
@@ -761,13 +762,14 @@ assert.equal(breakpointCalls, 1);
 assert.deepEqual(dispatchedBreakpoints[0], {
   breakpointId: "bp_1",
   filePath: "src/Hello.java",
-  line: 12
+  line: 12,
+  detail: "compact"
 });
 
 const validPatchInputs = [
   { breakpointId: "bp_1" },
   { breakpointId: "bp_1", line: 13 },
-  { breakpointId: "bp_1", file: "src/Legacy.java", line: 14 },
+  { breakpointId: "bp_1", filePath: "src/Relocated.java", line: 14 },
   { breakpointId: "bp_1", column: null, condition: null, hitCondition: null, logMessage: null },
   { breakpointId: "bp_1", enabled: false, owner: "all", requireVerified: true }
 ];
@@ -781,20 +783,18 @@ assert.deepEqual(dispatchedBreakpoints[4], {
   column: null,
   condition: null,
   hitCondition: null,
-  logMessage: null
+  logMessage: null,
+  detail: "compact"
 });
 assert.equal("enabled" in (dispatchedBreakpoints[1] ?? {}), false, "id-only patches must remain default-free");
 assert.equal("owner" in (dispatchedBreakpoints[1] ?? {}), false, "id-only patches must remain default-free");
 
 const invalidPatchInputs = [
-  { breakpointId: "bp_1", filePath: "src/Relocated.java" },
   { breakpointId: "bp_1", file: "src/Legacy.java" },
   { breakpointId: "bp_1", filePath: "src/Canonical.java", file: "src/Legacy.java", line: 15 },
   { breakpointId: "bp_1", line: null },
   { breakpointId: "bp_1", enabled: null },
-  { breakpointId: "bp_1", unknownPatchField: true },
-  { breakpointId: "bp_1", temporary: true },
-  { breakpointId: "bp_1", suspendPolicy: "ALL" }
+  { breakpointId: "bp_1", unknownPatchField: true }
 ];
 for (const patchInput of invalidPatchInputs) {
   const response = await router.callTool("bp_debug_set_breakpoint", patchInput);
@@ -808,20 +808,24 @@ assert.equal(
 
 const aliasInput = { file: "src/Hello.java", line: 12 };
 const aliasOnly = await router.callTool("bp_debug_run_to_line", aliasInput);
-assert.equal(aliasOnly.error, undefined);
-assert.equal(runToLineCalls, 1);
+assert.equal(aliasOnly.error?.code, "INVALID_ARGUMENT");
+assert.equal(runToLineCalls, 0);
 assert.deepEqual(aliasInput, { file: "src/Hello.java", line: 12 }, "router validation must not mutate callers");
-assert.notStrictEqual(dispatchedRunToLine, aliasInput);
-assert.equal(dispatchedRunToLine?.file, "src/Hello.java");
-assert.equal(dispatchedRunToLine?.includeFrame, false);
+const canonicalInput = { filePath: "src/Hello.java", line: 12 };
+const canonicalOnly = await router.callTool("bp_debug_run_to_line", canonicalInput);
+assert.equal(canonicalOnly.error, undefined);
+assert.equal(runToLineCalls, 1);
+assert.notStrictEqual(dispatchedRunToLine, canonicalInput);
+assert.equal(dispatchedRunToLine?.filePath, "src/Hello.java");
 assert.equal(dispatchedRunToLine?.detail, "compact");
 
 const malformedRunToLineManager = new DebugSessionManager({ policy: loadPolicy() });
-malformedRunToLineManager.bpDebugRunToLine = async () => ({ status: "paused" });
+malformedRunToLineManager.bpDebugRunToLine = async () => ({ state: "paused" });
 const malformedRunToLineRouter = new ToolRouter(malformedRunToLineManager);
 const malformedRunToLine = await malformedRunToLineRouter.callTool("bp_debug_run_to_line", {
   filePath: "src/Hello.java",
-  line: 12
+  line: 12,
+  detail: "diagnostic"
 });
 assert.equal(
   malformedRunToLine.error?.code,
@@ -829,8 +833,8 @@ assert.equal(
   "the router finalizer must reject provider results that omit required run-to-line truth fields"
 );
 assert.deepEqual(
-  malformedRunToLine.error?.details?.issues?.map((issue: AnyRecord) => issue.path).sort(),
-  ["$.cleanedUp", "$.requestedPosition", "$.targetReached"]
+  (malformedRunToLine.error?.diagnostics?.issues as AnyRecord[] | undefined)?.map((issue) => issue.path).sort(),
+  ["$.reached", "$.target"]
 );
 
 const ambiguousFile = await router.callTool("bp_debug_run_to_line", {
@@ -853,23 +857,9 @@ dynamicManager.bpDebugStart = async (args) => {
   dispatchedStart = args;
   return {
     sessionId: "sess_dynamic",
-    language: String(args?.language),
-    mode: "headless",
     state: "running",
     startMode: "launch",
-    providerKind: "dap",
-    capabilities: {
-      pause: "native",
-      stepping: "native",
-      runToLine: "native",
-      variableReferences: "native",
-      setValue: "native",
-      breakpointUpdate: "unsupported",
-      conditionalBreakpoints: "native",
-      hitConditionalBreakpoints: "native",
-      tracepoints: "native",
-      eventDrain: "native"
-    }
+    target: { language: String(args?.language) }
   };
 };
 const dynamicRouter = new ToolRouter(dynamicManager);
@@ -891,7 +881,8 @@ for (const { label, value } of exoticObjectInputs) {
 const expectedExoticNestedError = {
   code: "INVALID_ARGUMENT",
   message: "Invalid arguments for bp_debug_start.",
-  details: { issues: [{ path: "$.env", keyword: "type", message: "must be object" }] }
+  retrySafe: true,
+  actionMayHaveApplied: false
 };
 assert.deepEqual(
   exoticNestedRouterResults,
@@ -910,7 +901,8 @@ for (const { label, value } of nonCloneableExoticInputs) {
 const expectedStartRootCompatibilityError = {
   code: "INVALID_ARGUMENT",
   message: "Invalid arguments for bp_debug_start.",
-  details: { issues: [jsonCompatibleObjectIssue] }
+  retrySafe: true,
+  actionMayHaveApplied: false
 };
 assert.deepEqual(
   nonCloneableExoticNestedRouterResults,
@@ -928,13 +920,8 @@ const nestedOneOfRouterResult = await dynamicRouter.callTool("bp_debug_start", {
 assert.deepEqual(nestedOneOfRouterResult.error, {
   code: "INVALID_ARGUMENT",
   message: "Invalid arguments for bp_debug_start.",
-  details: {
-    issues: [{
-      path: "$.env.KEY",
-      keyword: "oneOf",
-      message: "must match exactly one schema in oneOf"
-    }]
-  }
+  retrySafe: true,
+  actionMayHaveApplied: false
 });
 assert.equal(startCalls, 0, "invalid nested oneOf values must not invoke the manager");
 

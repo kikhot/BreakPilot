@@ -9,6 +9,7 @@ import { IdeRuntimeProvider } from "../src/runtime/providers/IdeRuntimeProvider.
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
 import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import type { BridgeMessage, IdeDebugSessionInfo } from "../src/types/ide.ts";
+import type { AnyRecord } from "../src/types/json.ts";
 import { ErrorCodes } from "../src/utils/errors.ts";
 
 const features = {
@@ -245,9 +246,42 @@ test("negotiated ref mutation preserves native read-back evidence through the ma
     ideSessionId: provider.ideSessionId
   });
 
+  const framePending = manager.bpDebugFrame({ sessionId: provider.sessionId });
+  await nextTurn();
+  const frameRequest = bridge.last(IdeMessageTypes.AGENT_REQUEST_VARIABLES);
+  bridge.reply(frameRequest, {
+    type: IdeMessageTypes.IDE_VARIABLES_SNAPSHOT,
+    snapshot: {
+      threadId: 7,
+      frameId: "frame-0",
+      stackFrames: [{ id: "frame-0", name: "work", line: 20, source: { path: "/workspace/Score.java" } }],
+      variables: {
+        locals: {
+          name: "Locals",
+          category: "locals",
+          variables: {
+            score: {
+              name: "score",
+              kind: "number",
+              valuePreview: "41",
+              variablesReference: "bpref_score",
+              pauseEpoch: 8,
+              modifiable: true,
+              mutationMode: "native",
+              truncated: false
+            }
+          }
+        }
+      }
+    }
+  });
+  const frame = await framePending;
+  const handle = ((frame.locals as AnyRecord[])[0]?.handle) as string;
+  assert.equal(handle, "v1");
+
   const pending = manager.bpDebugSetValue({
     sessionId: provider.sessionId,
-    ref: "bpref_score",
+    handle,
     newValue: "42"
   });
   await nextTurn();
@@ -268,10 +302,10 @@ test("negotiated ref mutation preserves native read-back evidence through the ma
   });
 
   const result = await pending;
-  assert.equal(result.ref, "bpref_score");
+  assert.deepEqual(result.target, { handle: "v1" });
   assert.equal(result.applied, true);
   assert.equal(result.verified, true);
-  assert.equal(result.mutationMode, "native");
+  assert.equal("mutationMode" in result, false);
   assert.equal(result.oldValue, "41");
 });
 

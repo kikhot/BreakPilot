@@ -19,7 +19,14 @@ export async function postTool(
   try {
     return JSON.parse(text) as ToolResponse;
   } catch {
-    return { error: { code: "CLI_PARSE_FAILED", message: text } };
+    return {
+      error: {
+        code: "CLI_PARSE_FAILED",
+        message: text,
+        retrySafe: false,
+        actionMayHaveApplied: false
+      }
+    };
   }
 }
 

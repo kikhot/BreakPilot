@@ -93,6 +93,17 @@ function issue(path: string, keyword: string, message: string): ToolValidationIs
   return { path, keyword, message };
 }
 
+function resolveSchema(schema: JsonSchema | undefined, root: JsonSchema): JsonSchema | undefined {
+  if (!schema?.$ref) return schema;
+  if (!schema.$ref.startsWith("#/$defs/")) return schema;
+  const token = schema.$ref.slice("#/$defs/".length).replaceAll("~1", "/").replaceAll("~0", "~");
+  const target = root.$defs?.[token];
+  if (!target) return schema;
+  const siblings = { ...schema };
+  delete siblings.$ref;
+  return Object.keys(siblings).length === 0 ? target : { ...target, ...siblings };
+}
+
 function jsonCompatibilityIssue(): ToolValidationIssue {
   return issue("$", "type", "must be a JSON-compatible object");
 }
@@ -100,10 +111,13 @@ function jsonCompatibilityIssue(): ToolValidationIssue {
 function matchesSchemaWithoutDefaults(
   schema: JsonSchema,
   value: unknown,
-  active: WeakSet<object> = new WeakSet()
+  active: WeakSet<object> = new WeakSet(),
+  root: JsonSchema = schema
 ): boolean {
+  schema = resolveSchema(schema, root) ?? schema;
   if (schema.type && !matchesType(schema.type, value)) return false;
   if (schema.enum && !schema.enum.some((candidate) => jsonEqual(candidate, value))) return false;
+  if (typeof value === "string" && schema.minLength !== undefined && value.length < schema.minLength) return false;
   if (typeof value === "number" && Number.isFinite(value)) {
     if (schema.minimum !== undefined && value < schema.minimum) return false;
     if (schema.maximum !== undefined && value > schema.maximum) return false;
@@ -120,7 +134,7 @@ function matchesSchemaWithoutDefaults(
           if (
             !descriptor ||
             !("value" in descriptor) ||
-            !matchesSchemaWithoutDefaults(schema.items, descriptor.value, active)
+            !matchesSchemaWithoutDefaults(schema.items, descriptor.value, active, root)
           ) {
             return false;
           }
@@ -146,7 +160,7 @@ function matchesSchemaWithoutDefaults(
         if (
           !descriptor ||
           !("value" in descriptor) ||
-          !matchesSchemaWithoutDefaults(propertySchema, descriptor.value, active)
+          !matchesSchemaWithoutDefaults(propertySchema, descriptor.value, active, root)
         ) {
           return false;
         }
@@ -159,7 +173,7 @@ function matchesSchemaWithoutDefaults(
           if (
             !descriptor ||
             !("value" in descriptor) ||
-            !matchesSchemaWithoutDefaults(schema.additionalProperties, descriptor.value, active)
+            !matchesSchemaWithoutDefaults(schema.additionalProperties, descriptor.value, active, root)
           ) {
             return false;
           }
@@ -172,7 +186,7 @@ function matchesSchemaWithoutDefaults(
 
   if (schema.oneOf) {
     const matches = schema.oneOf.filter((branch) =>
-      matchesSchemaWithoutDefaults(branch, value)
+      matchesSchemaWithoutDefaults(branch, value, new WeakSet(), root)
     );
     if (matches.length !== 1) return false;
   }
@@ -182,8 +196,10 @@ function matchesSchemaWithoutDefaults(
 function incompatibleValueIssue(
   schema: JsonSchema | undefined,
   value: unknown,
-  path: string
+  path: string,
+  root: JsonSchema = schema ?? {}
 ): ToolValidationIssue {
+  schema = resolveSchema(schema, root);
   if (schema?.type && !matchesType(schema.type, value)) {
     return issue(path, "type", `must be ${schema.type}`);
   }
@@ -192,14 +208,15 @@ function incompatibleValueIssue(
   }
   if (
     schema?.oneOf &&
-    schema.oneOf.filter((branch) => matchesSchemaWithoutDefaults(branch, value)).length !== 1
+    schema.oneOf.filter((branch) => matchesSchemaWithoutDefaults(branch, value, new WeakSet(), root)).length !== 1
   ) {
     return issue(path, "oneOf", "must match exactly one schema in oneOf");
   }
   return jsonCompatibilityIssue();
 }
 
-function childSchema(schema: JsonSchema | undefined, property: string): JsonSchema | undefined {
+function childSchema(schema: JsonSchema | undefined, property: string, root: JsonSchema): JsonSchema | undefined {
+  schema = resolveSchema(schema, root);
   const properties = schema?.properties;
   if (properties && hasOwn(properties, property)) return properties[property];
   const additionalProperties = schema?.additionalProperties;
@@ -328,8 +345,10 @@ function preflightJsonValue(
   schema: JsonSchema | undefined,
   value: unknown,
   path: string,
-  active: WeakSet<object>
+  active: WeakSet<object>,
+  root: JsonSchema = schema ?? {}
 ): ToolValidationIssue | undefined {
+  schema = resolveSchema(schema, root);
   if (value === null || typeof value === "string" || typeof value === "boolean") {
     return undefined;
   }
@@ -348,7 +367,7 @@ function preflightJsonValue(
   try {
     if (Array.isArray(value)) {
       if (Object.getPrototypeOf(value) !== Array.prototype) {
-        return incompatibleValueIssue(schema, value, path);
+        return incompatibleValueIssue(schema, value, path, root);
       }
 
       const ownKeys = Reflect.ownKeys(value);
@@ -368,7 +387,8 @@ function preflightJsonValue(
           itemSchema,
           descriptor.value,
           `${path}[${index}]`,
-          active
+          active,
+          root
         );
         if (childIssue) return childIssue;
       }
@@ -379,7 +399,7 @@ function preflightJsonValue(
       const safetyIssue = preflightCloneSafety(value);
       if (safetyIssue) return safetyIssue;
       if (!isStructuredCloneable(value)) return jsonCompatibilityIssue();
-      return incompatibleValueIssue(schema, value, path);
+      return incompatibleValueIssue(schema, value, path, root);
     }
 
     const ownKeys = Reflect.ownKeys(value);
@@ -391,10 +411,11 @@ function preflightJsonValue(
         return jsonCompatibilityIssue();
       }
       const childIssue = preflightJsonValue(
-        childSchema(schema, property),
+        childSchema(schema, property, root),
         descriptor.value,
         propertyPath(path, property),
-        active
+        active,
+        root
       );
       if (childIssue) return childIssue;
     }
@@ -408,8 +429,10 @@ function validateNode(
   schema: JsonSchema,
   input: unknown,
   path: string,
-  options: NodeValidationOptions
+  options: NodeValidationOptions,
+  root: JsonSchema = schema
 ): NodeValidationResult {
+  schema = resolveSchema(schema, root) ?? schema;
   let value = input;
   const errors: ToolValidationIssue[] = [];
 
@@ -422,6 +445,10 @@ function validateNode(
 
   if (schema.enum && !schema.enum.some((candidate) => jsonEqual(candidate, value))) {
     errors.push(issue(path, "enum", `must be one of ${JSON.stringify(schema.enum)}`));
+  }
+
+  if (typeof value === "string" && schema.minLength !== undefined && value.length < schema.minLength) {
+    errors.push(issue(path, "minLength", `must contain at least ${schema.minLength} characters`));
   }
 
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -444,7 +471,7 @@ function validateNode(
           errors.push(jsonCompatibilityIssue());
           continue;
         }
-        const itemResult = validateNode(schema.items, descriptor.value, `${path}[${index}]`, options);
+        const itemResult = validateNode(schema.items, descriptor.value, `${path}[${index}]`, options, root);
         if (options.clone) value[index] = itemResult.value;
         errors.push(...itemResult.errors);
       }
@@ -469,7 +496,7 @@ function validateNode(
           errors.push(jsonCompatibilityIssue());
           continue;
         }
-        const propertyResult = validateNode(propertySchema, descriptor.value, childPath, options);
+        const propertyResult = validateNode(propertySchema, descriptor.value, childPath, options, root);
         if (options.clone) setOwn(value, property, propertyResult.value);
         errors.push(...propertyResult.errors);
       } else if (options.applyDefaults && hasOwn(propertySchema, "default")) {
@@ -477,7 +504,8 @@ function validateNode(
           propertySchema,
           structuredClone(propertySchema.default),
           childPath,
-          { applyDefaults: true, clone: true }
+          { applyDefaults: true, clone: true },
+          root
         );
         setOwn(value, property, defaultResult.value);
         errors.push(...defaultResult.errors);
@@ -502,7 +530,8 @@ function validateNode(
           additionalProperties,
           descriptor.value,
           childPath,
-          options
+          options,
+          root
         );
         if (options.clone) setOwn(value, property, propertyResult.value);
         errors.push(...propertyResult.errors);
@@ -518,7 +547,8 @@ function validateNode(
         branch,
         options.clone ? structuredClone(value) : value,
         path,
-        { applyDefaults: false, clone: options.clone }
+        { applyDefaults: false, clone: options.clone },
+        root
       );
       if (branchResult.errors.length === 0) matches.push(index);
     }
@@ -532,7 +562,8 @@ function validateNode(
         selectedBranch,
         structuredClone(value),
         path,
-        { applyDefaults: true, clone: true }
+        { applyDefaults: true, clone: true },
+        root
       );
       value = branchResult.value;
       errors.push(...branchResult.errors);

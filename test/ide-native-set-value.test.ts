@@ -83,12 +83,11 @@ function dapManagerForFrameGuard(
   return manager;
 }
 
-test("set-value accepts exactly one closed path or numeric/opaque ref target", () => {
+test("set-value accepts exactly one closed path or short-handle target", () => {
   const schema = definition("bp_debug_set_value").inputSchema;
   for (const accepted of [
     { path: ["x"], newValue: "42" },
-    { ref: 7, newValue: "42" },
-    { ref: "bpref_opaque", newValue: "42" }
+    { handle: "v1", newValue: "42" }
   ]) {
     assert.deepEqual(validateToolInput(schema, accepted).errors, [], JSON.stringify(accepted));
   }
@@ -96,42 +95,42 @@ test("set-value accepts exactly one closed path or numeric/opaque ref target", (
   for (const rejected of [
     { newValue: "42" },
     { path: [], newValue: "42" },
-    { path: ["x"], ref: "bpref_opaque", newValue: "42" },
-    { ref: "bpref_opaque", newValue: "42", unknown: true }
+    { path: ["x"], handle: "v1", newValue: "42" },
+    { ref: "bpref_opaque", newValue: "42" },
+    { handle: "v1", newValue: "42", unknown: true }
   ]) {
     assert.notDeepEqual(validateToolInput(schema, rejected).errors, [], JSON.stringify(rejected));
   }
 });
 
-test("value keeps its legacy alias while accepting numeric and opaque references", () => {
+test("value accepts paths and short handles while rejecting provider references", () => {
   const schema = definition("bp_debug_value").inputSchema;
   for (const accepted of [
-    { ref: 7 },
-    { ref: "bpref_opaque" },
-    { variablesReference: 7 },
-    { variablesReference: "bpref_opaque" }
+    { path: ["x"] },
+    { handle: "v1" }
   ]) {
     assert.deepEqual(validateToolInput(schema, accepted).errors, [], JSON.stringify(accepted));
+  }
+  for (const rejected of [{ ref: 7 }, { variablesReference: "bpref_opaque" }]) {
+    assert.notDeepEqual(validateToolInput(schema, rejected).errors, [], JSON.stringify(rejected));
   }
 });
 
 test("successful set-value output requires exactly one target and truthful mutation facts", () => {
   const schema = definition("bp_debug_set_value").outputSchema as JsonSchema;
   const pathSuccess = {
-    path: ["x"],
+    target: { path: ["x"] },
     oldValue: "41",
     newValue: "42",
     applied: true,
     verified: false,
-    mutationMode: "native"
   };
   const refSuccess = {
-    ref: "bpref_opaque",
+    target: { handle: "v1" },
     oldValue: "41",
     newValue: "42",
     applied: true,
-    verified: false,
-    mutationMode: "native"
+    verified: false
   };
   assert.deepEqual(validateToolOutput(schema, pathSuccess).errors, []);
   assert.deepEqual(validateToolOutput(schema, refSuccess).errors, []);
@@ -140,13 +139,10 @@ test("successful set-value output requires exactly one target and truthful mutat
     newValue: "42",
     applied: true,
     verified: false,
-    mutationMode: "native"
   }).errors, []);
-  assert.notDeepEqual(validateToolOutput(schema, { ...pathSuccess, ref: "bpref_opaque" }).errors, []);
+  assert.notDeepEqual(validateToolOutput(schema, { ...pathSuccess, unknown: true }).errors, []);
   const { verified: _verified, ...withoutVerified } = pathSuccess;
   assert.notDeepEqual(validateToolOutput(schema, withoutVerified).errors, []);
-  const { mutationMode: _mutationMode, ...withoutMutationMode } = pathSuccess;
-  assert.notDeepEqual(validateToolOutput(schema, withoutMutationMode).errors, []);
   const { oldValue: _oldValue, ...withoutOldValue } = pathSuccess;
   assert.notDeepEqual(validateToolOutput(schema, withoutOldValue).errors, []);
   const { newValue: _newValue, ...withoutNewValue } = pathSuccess;
@@ -476,7 +472,7 @@ test("all public frame routes use live DAP identity without a session mirror", a
   }
 });
 
-test("legacy path mutation is applied but remains unverified", async () => {
+test("path mutation preserves explicit provider verification", async () => {
   const policy = loadPolicy("breakpilot.yaml");
   const manager = new DebugSessionManager({ policy });
   let setArgs: AnyRecord | undefined;
@@ -552,7 +548,8 @@ test("legacy path mutation is applied but remains unverified", async () => {
 
   assert.deepEqual(setArgs?.path, ["x"]);
   assert.equal(result.applied, true);
-  assert.equal(result.verified, false);
-  assert.equal(result.mutationMode, "native");
-  assert.deepEqual(result.result, { detail: "accepted" });
+  assert.equal(result.verified, true);
+  assert.deepEqual(result.target, { path: ["x"] });
+  assert.equal("mutationMode" in result, false);
+  assert.equal("result" in result, false);
 });

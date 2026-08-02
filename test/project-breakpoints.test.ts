@@ -212,7 +212,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
 
   const response = await manager.bpDebugSetBreakpoint({ filePath, line: 1 });
 
-  assert.equal(response.line, 1);
+  assert.equal((response.at as AnyRecord).line, 1);
   assert.equal(response.verified, true);
   assert.equal("clientId" in response, false);
   assert.equal("ide" in response, false);
@@ -228,7 +228,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
   const response = await manager.bpDebugSetBreakpoint({ filePath, line: 2 });
   const listed = await manager.bpDebugListBreakpoints({});
 
-  assert.equal(response.line, 2);
+  assert.equal((response.at as AnyRecord).line, 2);
   assert.equal((listed.breakpoints as AnyRecord[]).length, 1);
   assert.equal(bridge.sent.length, 1);
   assert.equal(bridge.sent[0]?.sessionId, "sess_existing");
@@ -244,7 +244,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
 
   const response = await manager.bpDebugSetBreakpoint({ filePath, line: 3 });
 
-  assert.equal(response.line, 3);
+  assert.equal((response.at as AnyRecord).line, 3);
   assert.equal("clientId" in response, false);
   assert.equal("ideSessionId" in response, false);
   assert.equal(bridge.sent.at(-1)?.clientId, "idea_one");
@@ -269,7 +269,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
 
   const response = await manager.bpDebugSetBreakpoint({ filePath, line: 5, ide: "idea" });
 
-  assert.equal(response.line, 5);
+  assert.equal((response.at as AnyRecord).line, 5);
   assert.equal("clientId" in response, false);
   assert.equal(bridge.sent.at(-1)?.clientId, "idea_one");
 }
@@ -294,19 +294,19 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
   const vscodeList = await manager.bpDebugListBreakpoints({ ide: "vscode" });
   const ideaList = await manager.bpDebugListBreakpoints({ ide: "idea" });
 
-  assert.equal(vscodeList.totalCount, 1);
-  assert.equal(ideaList.totalCount, 1);
+  assert.equal((vscodeList.breakpoints as AnyRecord[]).length, 1);
+  assert.equal((ideaList.breakpoints as AnyRecord[]).length, 1);
 
   const vscodeBreakpoint = vscode as AnyRecord;
   const ideaBreakpoint = idea as AnyRecord;
-  assert.equal(vscodeBreakpoint.line, 7);
-  assert.equal(ideaBreakpoint.line, 8);
+  assert.equal((vscodeBreakpoint.at as AnyRecord).line, 7);
+  assert.equal((ideaBreakpoint.at as AnyRecord).line, 8);
 
-  const removed = await manager.bpDebugRemoveBreakpoint({ breakpointId: String(vscodeBreakpoint.breakpointId), ide: "vscode" });
+  const removed = await manager.bpDebugRemoveBreakpoint({ breakpointId: String(vscodeBreakpoint.id), ide: "vscode" });
   const afterRemove = await manager.bpDebugListBreakpoints({ ide: "vscode" });
 
   assert.equal(removed.removed, true);
-  assert.equal(afterRemove.totalCount, 1);
+  assert.equal((afterRemove.breakpoints as AnyRecord[]).length, 1);
   assert.equal((afterRemove.breakpoints as AnyRecord[])[0]?.owner, "user");
   assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_REMOVE_BREAKPOINT), true);
 }
@@ -320,11 +320,11 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
 
   assert.deepEqual(
     (listed.breakpoints as AnyRecord[]).map((breakpoint) => ({
-      breakpointId: breakpoint.breakpointId,
+      id: breakpoint.id,
       owner: breakpoint.owner,
-      line: breakpoint.line
+      line: (breakpoint.at as AnyRecord).line
     })),
-    [{ breakpointId: "idea_one:user:21", owner: "user", line: 21 }]
+    [{ id: "idea_one:user:21", owner: "user", line: 21 }]
   );
   assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_LIST_BREAKPOINTS);
 }
@@ -357,7 +357,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
     owner: "all"
   });
   assert.equal(removed.removed, true);
-  assert.equal(removed.breakpointId, "idea-native-user-63");
+  assert.equal(removed.id, "idea-native-user-63");
   assert.equal(bridge.sent.at(-1)?.type, IdeMessageTypes.AGENT_REMOVE_BREAKPOINT);
   assert.equal(bridge.sent.at(-1)?.breakpointId, "idea-native-user-63");
 }
@@ -377,7 +377,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
     owner: "all"
   });
   assert.equal(missing.removed, false);
-  assert.equal(Object.hasOwn(missing, "breakpointId"), false);
+  assert.equal(Object.hasOwn(missing, "id"), false);
 }
 
 {
@@ -389,10 +389,8 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
   assert.deepEqual(configurations.configurations, [
     {
       name: "DemoApplication",
-      description: "Spring Boot Application",
-      ide: "idea",
-      projectPath: workspaceRoot,
-      supportsDynamicLaunchOverrides: true
+      type: "Spring Boot Application",
+      overrides: ["location"]
     }
   ]);
   assert.equal(Object.hasOwn(configurations, "runPoints"), false);
@@ -403,9 +401,9 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
   });
   assert.deepEqual(runPoints.runPoints, [
     {
+      filePath: "src/main/java/com/example/demo/DemoApplication.java",
       line: 9,
-      description: "Run 'DemoApplication.main()'\nDebug 'DemoApplication.main()'",
-      elementText: "com.example.demo.DemoApplication"
+      function: "com.example.demo.DemoApplication"
     }
   ]);
   assert.equal(Object.hasOwn(runPoints, "configurations"), false);
@@ -422,7 +420,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
     filePath,
     line: 31
   });
-  const breakpointId = String(created.breakpointId);
+  const breakpointId = String(created.id);
 
   const missing = await manager.bpDebugRemoveBreakpoint({
     sessionId: "sess_removal_truth",
@@ -445,7 +443,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
   bridge.addClient("vscode_one", "vscode", workspaceRoot);
   const manager = managerWithBridge(bridge);
   const created = await manager.bpDebugSetBreakpoint({ filePath, line: 32, ide: "vscode" });
-  const breakpointId = String(created.breakpointId);
+  const breakpointId = String(created.id);
 
   bridge.removeAcknowledged = false;
   const missing = await manager.bpDebugRemoveBreakpoint({ breakpointId, ide: "vscode" });
@@ -476,7 +474,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
     includeDisabled: true
   });
   assert.deepEqual(
-    (allForFile.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+    (allForFile.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.id),
     ["disabled-target", "enabled-target"]
   );
   assert.equal((allForFile.breakpoints as AnyRecord[])[0]?.enabled, false);
@@ -488,7 +486,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
     includeDisabled: false
   });
   assert.deepEqual(
-    (enabledForFile.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+    (enabledForFile.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.id),
     ["enabled-target"]
   );
 }
@@ -498,7 +496,7 @@ async function assertRejectsWithCode(code: string, action: () => Promise<unknown
   bridge.addClient("idea_one", "idea", workspaceRoot);
   const manager = managerWithBridge(bridge);
   const created = await manager.bpDebugSetBreakpoint({ filePath, line: 51, ide: "idea" });
-  const breakpointId = String(created.breakpointId);
+  const breakpointId = String(created.id);
   const sentBeforeUpdate = bridge.sent.length;
 
   await assertRejectsWithCode(ErrorCodes.UNSUPPORTED_CAPABILITY, () =>

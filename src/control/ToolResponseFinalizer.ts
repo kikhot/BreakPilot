@@ -67,7 +67,8 @@ export class ToolResponseFinalizer {
   finalize(
     definition: ToolDefinition,
     candidate: ToolResponse,
-    operation: ToolOperationKind
+    operation: ToolOperationKind,
+    diagnostic = false
   ): ToolResponse {
     const schema = definition.outputSchema;
     const result = schema
@@ -101,6 +102,6 @@ export class ToolResponseFinalizer {
         outcome: indeterminate ? "indeterminate" : "failed",
         retrySafe: !indeterminate
       }
-    ), auditId);
+    ), auditId, diagnostic);
   }
 }

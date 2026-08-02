@@ -67,10 +67,21 @@ const SAFE_ERROR_DETAILS_SCHEMA: JsonSchema = {
   additionalProperties: true
 };
 
-function unknownToolFailurePayload(): { code: string; message: string } {
+type AgentErrorPayload = {
+  code: string;
+  message: string;
+  retrySafe: boolean;
+  actionMayHaveApplied: boolean;
+  hint?: string;
+  diagnostics?: AnyRecord;
+};
+
+function unknownToolFailurePayload(): AgentErrorPayload {
   return {
     code: ErrorCodes.TOOL_FAILED,
-    message: UNKNOWN_TOOL_FAILURE_MESSAGE
+    message: UNKNOWN_TOOL_FAILURE_MESSAGE,
+    retrySafe: false,
+    actionMayHaveApplied: false
   };
 }
 
@@ -111,11 +122,7 @@ function safeErrorMessage(error: unknown): string {
   }
 }
 
-export function toErrorPayload(error: unknown): {
-  code: string;
-  message: string;
-  details?: AnyRecord;
-} {
+export function toErrorPayload(error: unknown, diagnostic = false): AgentErrorPayload {
   try {
     if (typeof error === "object" && error !== null && types.isProxy(error)) {
       return unknownToolFailurePayload();
@@ -134,11 +141,34 @@ export function toErrorPayload(error: unknown): {
       ) {
         return unknownToolFailurePayload();
       }
-      const payload: { code: string; message: string; details?: AnyRecord } = {
+      const retrySafeCodes = new Set<string>([
+        ErrorCodes.INVALID_ARGUMENT,
+        ErrorCodes.SESSION_NOT_FOUND,
+        ErrorCodes.SESSION_AMBIGUOUS,
+        ErrorCodes.BREAKPOINT_TIMEOUT,
+        ErrorCodes.EVALUATE_TIMEOUT,
+        ErrorCodes.EVALUATE_BLOCKED_BY_POLICY,
+        ErrorCodes.STALE_RUNTIME_HANDLE,
+        ErrorCodes.IDE_RESPONSE_TIMEOUT
+      ]);
+      const payload: AgentErrorPayload = {
         code: code.value,
-        message: message.value
+        message: message.value,
+        retrySafe: typeof normalizedDetails.retrySafe === "boolean"
+          ? normalizedDetails.retrySafe
+          : retrySafeCodes.has(code.value),
+        actionMayHaveApplied: normalizedDetails.actionMayHaveApplied === true
       };
-      if (Object.keys(normalizedDetails).length > 0) payload.details = normalizedDetails;
+      const recommendedAction = normalizedDetails.recommendedAction;
+      const suggestedExpression = normalizedDetails.suggestedExpression;
+      if (typeof recommendedAction === "string" && recommendedAction) {
+        payload.hint = recommendedAction;
+      } else if (typeof suggestedExpression === "string" && suggestedExpression) {
+        payload.hint = `Try the read-only expression: ${suggestedExpression}`;
+      }
+      if (diagnostic && Object.keys(normalizedDetails).length > 0) {
+        payload.diagnostics = normalizedDetails;
+      }
       return payload;
     }
   } catch {
@@ -146,7 +176,9 @@ export function toErrorPayload(error: unknown): {
   }
   return {
     code: ErrorCodes.TOOL_FAILED,
-    message: safeErrorMessage(error)
+    message: safeErrorMessage(error),
+    retrySafe: false,
+    actionMayHaveApplied: false
   };
 }
 
@@ -161,9 +193,9 @@ export function ok<TData extends AnyRecord>(
   return response;
 }
 
-export function fail(error: unknown, _auditId: string): ToolResponse {
+export function fail(error: unknown, _auditId: string, diagnostic = false): ToolResponse {
   return {
-    error: toErrorPayload(error)
+    error: toErrorPayload(error, diagnostic)
   };
 }
 

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import { ToolRouter } from "../src/control/ToolRouter.ts";
-import { toolDefinitions } from "../src/control/toolDefinitions.ts";
 import { dapProviderCapabilities, ideProviderCapabilities } from "../src/runtime/ProviderCapabilities.ts";
 import { DebugSessionManager } from "../src/sessions/DebugSessionManager.ts";
 import { loadPolicy } from "../src/security/PolicyLoader.ts";
@@ -10,306 +9,11 @@ import type { AnyRecord } from "../src/types/json.ts";
 import type { RuntimeDebugProvider } from "../src/types/sessions.ts";
 import { ErrorCodes } from "../src/utils/errors.ts";
 
-function tool(name: string): AnyRecord {
-  const found = toolDefinitions.find((candidate) => candidate.name === name);
-  assert.ok(found, `expected ${name} to exist`);
-  return found as unknown as AnyRecord;
-}
-
-function properties(name: string): AnyRecord {
-  const inputSchema = tool(name).inputSchema as AnyRecord;
-  if (name === "bp_debug_control" && Array.isArray(inputSchema.oneOf)) {
-    const ordinary = inputSchema.oneOf.find(
-      (branch: AnyRecord) => !branch.properties?.action?.enum?.includes("drainEvents")
-    ) as AnyRecord | undefined;
-    return (ordinary?.properties ?? {}) as AnyRecord;
-  }
-  return (inputSchema.properties ?? {}) as AnyRecord;
-}
-
-function propertyNames(name: string): string[] {
-  return Object.keys(properties(name)).sort();
-}
-
-function assertHasProperties(name: string, expected: string[]): void {
-  const names = propertyNames(name);
-  for (const field of expected) {
-    assert.ok(names.includes(field), `${name} should expose ${field}`);
-  }
-}
-
-const runToLine = tool("bp_debug_run_to_line");
-assert.equal(runToLine.description, "Run the selected debug session to a source line.");
-assert.deepEqual((runToLine.inputSchema as AnyRecord).required, ["line"]);
-assert.deepEqual((runToLine.inputSchema as AnyRecord).oneOf, [
-  { required: ["filePath"] },
-  { required: ["file"] }
-]);
-assert.equal(properties("bp_debug_run_to_line").line.minimum, 1);
-assertHasProperties("bp_debug_run_to_line", [
-  "projectPath",
-  "sessionId",
-  "filePath",
-  "line",
-  "column",
-  "threadId",
-  "timeout",
-  "includeFrame",
-  "detail"
-]);
-const breakpointInput = tool("bp_debug_set_breakpoint").inputSchema as AnyRecord;
-assert.equal(breakpointInput.type, "object");
-assert.ok(Array.isArray(breakpointInput.oneOf));
-assert.equal(breakpointInput.oneOf.length, 5);
-const breakpointLocationInput = breakpointInput.oneOf[0] as AnyRecord;
-const breakpointPatchByIdInput = breakpointInput.oneOf[1] as AnyRecord;
-const breakpointPatchWithinSourceInput = breakpointInput.oneOf[2] as AnyRecord;
-const breakpointPatchAcrossSourceInput = breakpointInput.oneOf[3] as AnyRecord;
-const breakpointPatchAcrossSourceAliasInput = breakpointInput.oneOf[4] as AnyRecord;
-assert.deepEqual(breakpointLocationInput.required, ["line"]);
-assert.deepEqual(breakpointLocationInput.oneOf, [
-  { required: ["filePath"] },
-  { required: ["file"] }
-]);
-assert.equal(breakpointLocationInput.additionalProperties, false);
-assert.equal("breakpointId" in breakpointLocationInput.properties, false);
-assert.ok("column" in breakpointLocationInput.properties);
-
-assert.equal(breakpointLocationInput.properties.enabled.default, true);
-assert.equal(breakpointLocationInput.properties.owner.default, "agent");
-assert.equal(breakpointLocationInput.properties.temporary.default, false);
-
-const breakpointOutput = tool("bp_debug_set_breakpoint").outputSchema as AnyRecord;
-const breakpointSuccessOutput = breakpointOutput.oneOf?.[0] as AnyRecord;
-assert.equal(breakpointSuccessOutput.type, "object");
-assert.ok(Array.isArray(breakpointSuccessOutput.oneOf), "breakpoint success must distinguish create from update");
-assert.equal(breakpointSuccessOutput.oneOf.length, 2);
-const breakpointCreateOutput = breakpointSuccessOutput.oneOf[0] as AnyRecord;
-const breakpointUpdateOutput = breakpointSuccessOutput.oneOf[1] as AnyRecord;
-assert.equal(breakpointCreateOutput.additionalProperties, false);
-assert.equal(breakpointUpdateOutput.additionalProperties, false);
-assert.ok("lineText" in breakpointCreateOutput.properties);
-assert.equal("lineText" in breakpointUpdateOutput.properties, false);
-for (const field of ["operation", "previous", "current", "changedFields"]) {
-  assert.ok(field in breakpointUpdateOutput.properties, `update success must expose ${field}`);
-  assert.ok(breakpointUpdateOutput.required.includes(field), `update success must require ${field}`);
-}
-assert.ok("rollbackApplied" in breakpointUpdateOutput.properties);
-assert.ok("column" in breakpointUpdateOutput.properties);
-assert.deepEqual(
-  breakpointUpdateOutput.properties.changedFields.items.enum,
-  ["filePath", "line", "column", "condition", "hitCondition", "logMessage", "enabled"]
-);
-for (const field of ["previous", "current"]) {
-  const view = breakpointUpdateOutput.properties[field] as AnyRecord;
-  assert.equal(view.additionalProperties, false, `${field} must be a closed public breakpoint view`);
-  assert.ok("column" in view.properties, `${field} must preserve source columns`);
-}
-
-const breakpointPatchInputs = [
-  breakpointPatchByIdInput,
-  breakpointPatchWithinSourceInput,
-  breakpointPatchAcrossSourceInput,
-  breakpointPatchAcrossSourceAliasInput
-];
-assert.deepEqual(breakpointPatchByIdInput.required, ["breakpointId"]);
-assert.deepEqual(breakpointPatchWithinSourceInput.required, ["breakpointId", "line"]);
-assert.deepEqual(breakpointPatchAcrossSourceInput.required, ["breakpointId", "filePath", "line"]);
-assert.deepEqual(breakpointPatchAcrossSourceAliasInput.required, ["breakpointId", "file", "line"]);
-assert.equal("line" in breakpointPatchByIdInput.properties, false);
-assert.equal("filePath" in breakpointPatchWithinSourceInput.properties, false);
-assert.equal("file" in breakpointPatchWithinSourceInput.properties, false);
-assert.equal("file" in breakpointPatchAcrossSourceInput.properties, false);
-assert.equal("filePath" in breakpointPatchAcrossSourceAliasInput.properties, false);
-
-const breakpointSharedProperties = [
-  "projectPath",
-  "workspace",
-  "sessionId",
-  "clientId",
-  "ide",
-  "enabled",
-  "owner",
-  "requireVerified"
-];
-for (const branch of breakpointPatchInputs) {
-  assert.equal(branch.additionalProperties, false);
-  for (const field of breakpointSharedProperties) {
-    assert.ok(field in branch.properties, `breakpoint branch should expose ${field}`);
-  }
-  for (const nullableField of ["condition", "hitCondition", "logMessage"]) {
-    assert.deepEqual(branch.properties[nullableField].oneOf, [
-      { type: "string" },
-      { type: "null" }
-    ]);
-  }
-  assert.deepEqual(branch.properties.column.oneOf, [
-    { type: "integer", minimum: 1, maximum: 2_147_483_647 },
-    { type: "null" }
-  ]);
-  assert.deepEqual(branch.properties.owner.enum, ["agent", "user", "all"]);
-  for (const field of ["enabled", "owner", "requireVerified"]) {
-    assert.equal("default" in branch.properties[field], false, `patch ${field} must be default-free`);
-  }
-  for (const createOnlyField of ["temporary", "suspendPolicy", "isLogMessage", "isLogStack", "detail"]) {
-    assert.equal(createOnlyField in branch.properties, false, `patch must not accept ${createOnlyField}`);
-  }
-}
-
-assertHasProperties("bp_debug_list_breakpoints", [
-  "owner",
-  "includeDisabled",
-  "detail"
-]);
-
-assertHasProperties("bp_debug_remove_breakpoint", [
-  "owner"
-]);
-
-assertHasProperties("bp_debug_threads", [
-  "offset",
-  "detail"
-]);
-
-assertHasProperties("bp_debug_call_stack", [
-  "offset",
-  "detail"
-]);
-
-assertHasProperties("bp_debug_set_value", [
-  "detail"
-]);
-
-assertHasProperties("bp_debug_control", [
-  "detail"
-]);
-
-const control = tool("bp_debug_control");
-const controlInput = control.inputSchema as AnyRecord;
-assert.equal(controlInput.type, "object");
-assert.ok(Array.isArray(controlInput.oneOf), "bp_debug_control should separate drain events from ordinary actions");
-const drainBranch = (controlInput.oneOf as AnyRecord[]).find(
-  (branch) => branch.properties?.action?.enum?.includes("drainEvents")
-);
-assert.deepEqual(drainBranch?.properties?.cursor?.type, "integer");
-assert.deepEqual(drainBranch?.properties?.cursor?.minimum, 0);
-assert.deepEqual(drainBranch?.properties?.limit?.maximum, 256);
-const serializedControlOutput = JSON.stringify(control.outputSchema);
-for (const field of ["items", "nextCursor", "oldestCursor", "overflowed", "droppedCount"]) {
-  assert.match(serializedControlOutput, new RegExp(field));
-}
-
-assertHasProperties("bp_debug_context", [
-  "detail"
-]);
-
-for (const definition of toolDefinitions) {
-  if (definition.name === "bp_debug_set_breakpoint" || definition.name === "bp_debug_control") continue;
-  assert.equal(
-    (definition.inputSchema as AnyRecord).additionalProperties,
-    false,
-    `${definition.name} input should reject undeclared arguments`
-  );
-}
-
-assertHasProperties("bp_debug_start", [
-  "workspace",
-  "lang",
-  "owner",
-  "adapterPort",
-  "file",
-  "timeout",
-  "timeoutMs"
-]);
-assertHasProperties("bp_debug_run_configurations", ["workspace", "file"]);
-assertHasProperties("bp_debug_status", ["workspace", "clientId", "detail"]);
-assertHasProperties("bp_debug_control", [
-  "workspace",
-  "timeoutMs",
-  "objectFields",
-  "maxDepth",
-  "maxItems",
-  "maxStringLength",
-  "redactPatterns"
-]);
-assertHasProperties("bp_debug_run_to_line", ["workspace", "file", "timeoutMs"]);
-assertHasProperties("bp_debug_threads", ["workspace"]);
-assertHasProperties("bp_debug_call_stack", ["workspace"]);
-for (const name of ["bp_debug_frame", "bp_debug_value", "bp_debug_set_value"]) {
-  assertHasProperties(name, [
-    "workspace",
-    "timeout",
-    "timeoutMs",
-    "objectFields",
-    "maxDepth",
-    "maxItems",
-    "maxStringLength",
-    "redactPatterns"
-  ]);
-}
-assertHasProperties("bp_debug_value", ["variablesReference"]);
-assertHasProperties("bp_debug_set_value", [
-  "threadId",
-  "frameId",
-  "expand",
-  "depth",
-  "limit",
-  "maxString"
-]);
-assertHasProperties("bp_debug_eval", ["workspace", "timeoutMs", "context"]);
-assertHasProperties("bp_debug_context", [
-  "workspace",
-  "clientId",
-  "ideSessionId",
-  "frameIndex",
-  "profile",
-  "objectFields",
-  "maxDepth",
-  "maxItems",
-  "maxStringLength",
-  "timeoutMs",
-  "threadId",
-  "frameId",
-  "maxString",
-  "redactPatterns"
-]);
-assert.ok("file" in breakpointLocationInput.properties);
-assertHasProperties("bp_debug_list_breakpoints", ["workspace", "file"]);
-assertHasProperties("bp_debug_remove_breakpoint", ["workspace", "file"]);
-
-for (const name of [
-  "bp_debug_control",
-  "bp_debug_frame",
-  "bp_debug_value",
-  "bp_debug_set_value",
-  "bp_debug_context"
-]) {
-  for (const field of ["depth", "maxDepth"]) {
-    const schema = properties(name)[field] as AnyRecord;
-    assert.equal(schema.minimum, 0, `${name}.${field} should reject negative expansion depth`);
-    assert.equal(schema.maximum, 8, `${name}.${field} should cap expansion depth`);
-  }
-}
-
-const statusOutput = tool("bp_debug_status").outputSchema as AnyRecord;
-assert.match(JSON.stringify(statusOutput), /capabilities/);
-
-const startOutput = tool("bp_debug_start").outputSchema as AnyRecord;
-assert.match(JSON.stringify(startOutput), /capabilities/);
-
 const manager = new DebugSessionManager({ policy: loadPolicy() });
 const router = new ToolRouter(manager);
 const listed = router.listTools().map((candidate) => candidate.name);
 assert.ok(listed.includes("bp_debug_run_to_line"), "ToolRouter should advertise bp_debug_run_to_line");
 assert.ok(listed.includes("bp_debug_run_configurations"), "ToolRouter should advertise bp_debug_run_configurations");
-
-assertHasProperties("bp_debug_run_configurations", [
-  "projectPath",
-  "clientId",
-  "ide",
-  "filePath",
-  "detail"
-]);
 
 const response = await router.callTool("bp_debug_run_to_line", {
   filePath: "src/Hello.java",
@@ -512,11 +216,9 @@ const updateBreakpoint = await router.callTool("bp_debug_set_breakpoint", {
 });
 assert.equal(updateBreakpoint.error?.code, "UNSUPPORTED_CAPABILITY");
 assert.match(updateBreakpoint.error?.message ?? "", /does not support breakpoint updates/i);
-assert.deepEqual(updateBreakpoint.error?.details, {
-  sessionId: "sess_contract",
-  providerKind: "ide",
-  capability: "breakpointUpdate"
-});
+assert.equal(updateBreakpoint.error?.retrySafe, false);
+assert.equal(updateBreakpoint.error?.actionMayHaveApplied, false);
+assert.equal("details" in (updateBreakpoint.error ?? {}), false);
 assert.equal(ideSetBreakpointCalls, 0, "IDE update refusal must not call setBreakpoints");
 
 const filteredBreakpoints = await router.callTool("bp_debug_list_breakpoints", {
@@ -525,7 +227,7 @@ const filteredBreakpoints = await router.callTool("bp_debug_list_breakpoints", {
   includeDisabled: false
 });
 assert.deepEqual(
-  (filteredBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+  (filteredBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.id),
   ["ide_agent_enabled"]
 );
 
@@ -535,7 +237,7 @@ const allBreakpoints = await router.callTool("bp_debug_list_breakpoints", {
   includeDisabled: true
 });
 assert.deepEqual(
-  (allBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+  (allBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.id),
   ["ide_user_enabled", "ide_agent_enabled", "ide_agent_disabled"]
 );
 
@@ -545,7 +247,7 @@ const enabledIdeBreakpoints = await router.callTool("bp_debug_list_breakpoints",
   includeDisabled: false
 });
 assert.deepEqual(
-  (enabledIdeBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+  (enabledIdeBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.id),
   ["ide_user_enabled", "ide_agent_enabled"]
 );
 
@@ -557,9 +259,9 @@ assert.deepEqual(
   {
     removed: protectedDefaultRemove.removed,
     protected: protectedDefaultRemove.protected,
-    breakpointId: protectedDefaultRemove.breakpointId
+    id: protectedDefaultRemove.id
   },
-  { removed: false, protected: true, breakpointId: "bp_user_enabled" }
+  { removed: false, protected: true, id: "bp_user_enabled" }
 );
 
 const protectedAgentRemove = await router.callTool("bp_debug_remove_breakpoint", {
@@ -571,9 +273,9 @@ assert.deepEqual(
   {
     removed: protectedAgentRemove.removed,
     protected: protectedAgentRemove.protected,
-    breakpointId: protectedAgentRemove.breakpointId
+    id: protectedAgentRemove.id
   },
-  { removed: false, protected: true, breakpointId: "bp_user_enabled" }
+  { removed: false, protected: true, id: "bp_user_enabled" }
 );
 
 const allOwnerRemove = await router.callTool("bp_debug_remove_breakpoint", {
@@ -584,9 +286,9 @@ const allOwnerRemove = await router.callTool("bp_debug_remove_breakpoint", {
 assert.deepEqual(
   {
     removed: allOwnerRemove.removed,
-    breakpointId: allOwnerRemove.breakpointId
+    id: allOwnerRemove.id
   },
-  { removed: true, breakpointId: "bp_user_enabled" }
+  { removed: true, id: "bp_user_enabled" }
 );
 
 manager.breakpoints.addProject({
@@ -625,7 +327,7 @@ const filteredProjectBreakpoints = await router.callTool("bp_debug_list_breakpoi
   includeDisabled: false
 });
 assert.deepEqual(
-  (filteredProjectBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+  (filteredProjectBreakpoints.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.id),
   ["project_agent_enabled"]
 );
 
@@ -641,15 +343,11 @@ assert.deepEqual(runToLineArgs, {
   threadId: undefined,
   timeoutMs: 1000
 });
-assert.equal(runToLineResult.status, "paused");
-assert.equal(runToLineResult.targetReached, true);
-assert.equal(runToLineResult.cleanedUp, true);
-assert.deepEqual(runToLineResult.requestedPosition, {
-  filePath: path.resolve(loadPolicy().workspace.root, "src/Hello.java"),
-  line: 24
-});
-assert.deepEqual(runToLineResult.position, {
-  filePath: path.resolve(loadPolicy().workspace.root, "src/Hello.java"),
+assert.equal(runToLineResult.state, "paused");
+assert.equal(runToLineResult.reached, true);
+assert.equal("cleanedUp" in runToLineResult, false);
+assert.deepEqual(runToLineResult.target, {
+  filePath: "src/Hello.java",
   line: 24
 });
 
@@ -662,14 +360,12 @@ assert.deepEqual((setVariableArgs as AnyRecord).path, ["name"]);
 assert.equal((setVariableArgs as AnyRecord).newValue, "\"Katherine Johnson\"");
 assert.equal((setVariableArgs as AnyRecord).parentRef, undefined);
 assert.equal((setVariableArgs as AnyRecord).name, "name");
-assert.deepEqual(setValueResult.result, {
-  path: ["name"],
-  oldValue: "Alan Turing",
-  newValue: "\"Katherine Johnson\""
-});
+assert.deepEqual(setValueResult.target, { path: ["name"] });
+assert.equal(setValueResult.oldValue, "Alan Turing");
+assert.equal(setValueResult.newValue, "\"Katherine Johnson\"");
 assert.equal(setValueResult.applied, true);
 assert.equal(setValueResult.verified, false);
-assert.equal(setValueResult.mutationMode, "native");
+assert.equal("mutationMode" in setValueResult, false);
 
 const threads = await router.callTool("bp_debug_threads", {
   sessionId: "sess_contract",
@@ -678,8 +374,7 @@ const threads = await router.callTool("bp_debug_threads", {
 });
 assert.equal(listThreadsArgs, undefined);
 assert.deepEqual((threads.threads as AnyRecord[]).map((thread) => thread.id), ["thread-b", "thread-c"]);
-assert.equal(threads.offset, 1);
-assert.equal(threads.totalCount, 4);
+assert.equal(threads.nextOffset, 3);
 
 const stack = await router.callTool("bp_debug_call_stack", {
   sessionId: "sess_contract",
@@ -688,16 +383,11 @@ const stack = await router.callTool("bp_debug_call_stack", {
 });
 assert.deepEqual(callStackArgs, { offset: 2, limit: 2 });
 assert.deepEqual((stack.frames as AnyRecord[]).map((frame) => frame.index), [2, 3]);
-assert.equal(stack.offset, 2);
-assert.equal(stack.totalFrames, 6);
-assert.equal(stack.completeness, "partial");
-assert.equal(stack.partial, true);
 assert.equal(stack.nextOffset, 4);
 
 await router.callTool("bp_debug_control", {
   sessionId: "sess_contract",
-  action: "wait",
-  includeFrame: true
+  action: "wait"
 });
 assert.equal(snapshotThreadId, "opaque-thread");
 
@@ -812,7 +502,7 @@ assert.equal(snapshotThreadId, "opaque-thread");
     owner: "all"
   });
   assert.equal(userBreakpointWithAllOwner.error, undefined);
-  assert.equal((userBreakpointWithAllOwner.current as AnyRecord).owner, "user");
+  assert.equal(userBreakpointWithAllOwner.owner, "user");
   assert.equal(updateManager.breakpoints.get(provider.sessionId, "dap_user")?.owner, "user");
 
   const moved = await updateRouter.callTool("bp_debug_set_breakpoint", {
@@ -822,16 +512,14 @@ assert.equal(snapshotThreadId, "opaque-thread");
   });
   assert.equal(moved.error, undefined);
   assert.equal(moved.operation, "relocated");
-  assert.equal(moved.breakpointId, "dap_agent");
-  assert.equal(moved.line, 44);
-  assert.equal(moved.column, 3);
+  assert.equal(moved.id, "dap_agent");
+  assert.equal((moved.at as AnyRecord).line, 44);
+  assert.equal((moved.at as AnyRecord).column, 3);
   assert.equal(moved.verified, true);
-  assert.deepEqual(moved.changedFields, ["line"]);
-  assert.equal((moved.previous as AnyRecord).line, 10);
-  assert.equal((moved.current as AnyRecord).line, 44);
-  assert.equal((moved.current as AnyRecord).message, "", "defined empty adapter messages must remain visible");
-  (moved.previous as AnyRecord).line = 999;
-  assert.equal((moved.current as AnyRecord).line, 44, "previous and current must be independent public snapshots");
+  assert.deepEqual(moved.changed, ["line"]);
+  assert.equal(moved.message, "", "defined empty adapter messages must remain visible");
+  assert.equal("previous" in moved, false);
+  assert.equal("current" in moved, false);
   assert.deepEqual(providerCalls[1]?.breakpoints.map((breakpoint) => breakpoint.id), ["dap_agent", "dap_user"]);
   assert.equal(providerCalls[1]?.breakpoints.find((breakpoint) => breakpoint.id === "dap_agent")?.line, 44);
 
@@ -848,8 +536,8 @@ assert.equal(snapshotThreadId, "opaque-thread");
     condition: null
   });
   assert.equal(cleared.error, undefined);
-  assert.deepEqual(cleared.changedFields, ["condition"]);
-  assert.equal("condition" in (cleared.current as AnyRecord), false);
+  assert.deepEqual(cleared.changed, ["condition"]);
+  assert.equal("condition" in cleared, false);
   assert.deepEqual(workspacePathChecks, [], "non-relocation patches must not revalidate stored source paths");
 
   const rejectedPath = await updateRouter.callTool("bp_debug_set_breakpoint", {
@@ -899,7 +587,7 @@ assert.equal(snapshotThreadId, "opaque-thread");
     line: 61
   });
   assert.equal(created.error, undefined);
-  assert.equal("operation" in created, false, "create output must retain the flat compatibility shape");
+  assert.equal("operation" in created, false, "create output is already the compact breakpoint shape");
 }
 
 console.log("debugger mcp contract tests ok");

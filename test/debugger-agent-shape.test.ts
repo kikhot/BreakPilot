@@ -136,45 +136,135 @@ assert.equal("auditId" in status, false);
 assert.equal("hub" in status, false);
 assert.equal("languages" in status, false);
 assert.equal("capabilities" in status, false);
-assert.deepEqual((status.sessions as AnyRecord[]).map((session) => session.sessionId), ["sess_shape"]);
+assert.deepEqual(status, {
+  activeSessionId: "sess_shape",
+  sessions: [{
+    sessionId: "sess_shape",
+    state: "paused",
+    mode: "ide",
+    active: true
+  }],
+  ideConnected: false
+});
 
 const wait = await manager.bpDebugControl({ sessionId: "sess_shape", action: "wait" });
 assert.equal("ok" in wait, false);
 assert.equal("data" in wait, false);
 assert.equal("stopped" in wait, false);
 assert.equal("events" in wait, false);
-assert.equal(wait.frame, undefined);
-assert.deepEqual(wait.position, {
-  filePath: `${policy.workspace.root}/src/Hello.java`,
-  line: 21
+assert.equal("position" in wait, false);
+assert.equal("variables" in wait, false);
+assert.deepEqual(wait, {
+  state: "paused",
+  reason: "breakpoint",
+  at: {
+    filePath: "src/Hello.java",
+    line: 21,
+    column: 1,
+    function: "hello"
+  },
+  locals: [{
+    name: "analysis",
+    value: "Analysis(score=42)",
+    handle: "v1"
+  }],
+  pauseId: 1
 });
 
-const waitWithFrame = await manager.bpDebugControl({ sessionId: "sess_shape", action: "wait", includeFrame: true });
-assert.ok(waitWithFrame.frame);
-assert.ok(Array.isArray(waitWithFrame.variables));
+const threads = await manager.bpDebugThreads({ sessionId: "sess_shape", limit: 1 });
+assert.deepEqual(threads, {
+  threads: [{ id: 1, name: "main", current: true }]
+});
+
+const stack = await manager.bpDebugCallStack({ sessionId: "sess_shape", limit: 1 });
+assert.deepEqual(stack, {
+  threadId: 1,
+  frames: [{
+    index: 0,
+    at: {
+      filePath: "src/Hello.java",
+      line: 21,
+      column: 1,
+      function: "hello"
+    }
+  }],
+  pauseId: 1,
+  nextOffset: 1
+});
+
+const frame = await manager.bpDebugFrame({ sessionId: "sess_shape" });
+assert.deepEqual(frame, {
+  frame: {
+    index: 0,
+    at: {
+      filePath: "src/Hello.java",
+      line: 21,
+      column: 1,
+      function: "hello"
+    }
+  },
+  locals: [{
+    name: "analysis",
+    value: "Analysis(score=42)",
+    handle: "v1"
+  }],
+  pauseId: 1
+});
 
 const score = await manager.bpDebugValue({ sessionId: "sess_shape", path: ["analysis", "score"], depth: 0 });
-assert.equal(score.value, "42");
+assert.deepEqual(score, { value: { name: "score", value: "42" } });
 assert.equal("raw" in score, false);
 assert.equal("summary" in score, false);
 assert.equal("kind" in score, false);
-assert.deepEqual(score.path, ["analysis", "score"]);
 
 const analysis = await manager.bpDebugValue({ sessionId: "sess_shape", path: ["analysis"] });
 assert.equal("raw" in analysis, false);
 assert.equal("summary" in analysis, false);
 assert.equal("debugRaw" in analysis, false);
-assert.ok(Array.isArray(analysis.children));
+assert.deepEqual(analysis, {
+  value: {
+    name: "analysis",
+    value: "Analysis(score=42)",
+    handle: "v1",
+    children: [{ name: "score", value: "42" }]
+  }
+});
+
+const expanded = await manager.bpDebugValue({ sessionId: "sess_shape", handle: "v1" });
+assert.deepEqual(expanded, analysis);
+
+const context = await manager.bpDebugContext({ sessionId: "sess_shape" });
+assert.equal(Buffer.byteLength(JSON.stringify(context), "utf8") < 2_000, true);
+assert.deepEqual(context, {
+  state: "paused",
+  reason: "breakpoint",
+  at: {
+    filePath: "src/Hello.java",
+    line: 21,
+    column: 1,
+    function: "hello"
+  },
+  stack: [
+    { index: 0, at: { filePath: "src/Hello.java", line: 21, column: 1, function: "hello" } },
+    { index: 1, at: { filePath: "src/Caller.java", line: 12, column: 1, function: "caller" } }
+  ],
+  locals: [{ name: "analysis", value: "Analysis(score=42)", handle: "v1" }],
+  pauseId: 1
+});
 
 const evalAccessor = await router.callTool("bp_debug_eval", { sessionId: "sess_shape", expression: "analysis.score()", mode: "readonly" });
 assert.equal(evalAccessor.value, "42");
 
 const evalBlocked = await router.callTool("bp_debug_eval", { sessionId: "sess_shape", expression: "analysis.delete()", mode: "readonly" });
 assert.equal(evalBlocked.error?.code, "EVALUATE_BLOCKED_BY_POLICY");
-assert.equal(evalBlocked.error?.details?.suggestedExpression, "analysis.delete");
+assert.equal(evalBlocked.error?.retrySafe, true);
+assert.equal(evalBlocked.error?.actionMayHaveApplied, false);
+assert.equal(evalBlocked.error?.hint, "Try the read-only expression: analysis.delete");
+assert.equal("details" in (evalBlocked.error ?? {}), false);
 
 const missingDisconnect = await manager.bpDebugControl({ sessionId: "missing", action: "disconnect" });
-assert.equal(missingDisconnect.status, "stopped");
+assert.equal(missingDisconnect.state, "stopped");
+assert.equal(missingDisconnect.alreadyStopped, true);
 assert.ok(Array.isArray(missingDisconnect.warnings));
 
 console.log("debugger agent shape tests ok");

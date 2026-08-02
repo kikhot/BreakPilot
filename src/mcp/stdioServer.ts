@@ -1,5 +1,6 @@
 import type { ControlGateway } from "../control/ControlGateway.ts";
 import type { AnyRecord } from "../types/json.ts";
+import { summarizeToolResult } from "../control/ToolTextSummary.ts";
 
 const MCP_PROTOCOL_VERSION = "2025-11-25";
 
@@ -10,13 +11,13 @@ interface JsonRpcMessage {
   params?: AnyRecord;
 }
 
-function toolCallResult(result: AnyRecord): AnyRecord {
+function toolCallResult(name: string, result: AnyRecord): AnyRecord {
   const isError = Boolean(result.error);
   return {
     content: [
       {
         type: "text",
-        text: isError ? String((result.error as AnyRecord | undefined)?.message ?? "error") : "ok"
+        text: summarizeToolResult(name, result)
       }
     ],
     structuredContent: result,
@@ -53,7 +54,7 @@ async function handleJsonRpc(gateway: ControlGateway, message: JsonRpcMessage): 
   if (message.method === "tools/call") {
     const { name, arguments: args } = message.params ?? {};
     const result = await gateway.callTool(name, args ?? {});
-    return toolCallResult(result as AnyRecord);
+    return toolCallResult(String(name), result as AnyRecord);
   }
   if (message.method === "ping") return {};
   throw new Error(`Unsupported JSON-RPC method: ${message.method}`);

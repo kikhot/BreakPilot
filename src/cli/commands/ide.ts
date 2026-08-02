@@ -54,7 +54,7 @@ export function registerIdeCommands(y: Argv, ctx: CommandContext): Argv {
           "bp_debug_status",
           {
             clientId: argv.client as string | undefined,
-            workspace: argv.workspace as string | undefined
+            projectPath: argv.workspace as string | undefined
           },
           Boolean(argv.pretty)
         )
@@ -78,8 +78,8 @@ export function registerIdeCommands(y: Argv, ctx: CommandContext): Argv {
           {
             clientId: argv.client as string | undefined,
             ideSessionId: argv["ide-session"] as string | undefined,
-            workspace: argv.workspace as string | undefined,
-            lang: argv.lang as string | undefined,
+            projectPath: argv.workspace as string | undefined,
+            language: argv.lang as string | undefined,
             mode: (argv.mode as string | undefined) ?? "ide",
             owner: argv.owner as string | undefined
           },
@@ -111,14 +111,12 @@ export function registerIdeCommands(y: Argv, ctx: CommandContext): Argv {
             sessionId: argv.session as string | undefined,
             clientId: argv.client as string | undefined,
             ideSessionId: argv["ide-session"] as string | undefined,
-            workspace: argv.workspace as string | undefined,
+            projectPath: argv.workspace as string | undefined,
             timeout: parseNumber(argv.timeout as number | undefined),
             frameIndex: parseNumber(argv.frame as number | undefined),
-            profile: argv.profile as string | undefined,
-            objectFields: argv.objects as string | undefined,
-            maxDepth: parseNumber(argv.depth as number | undefined),
-            maxItems: parseNumber(argv["max-items"] as number | undefined),
-            maxStringLength: parseNumber(argv["max-string-length"] as number | undefined)
+            depth: parseNumber(argv.depth as number | undefined),
+            variableLimit: parseNumber(argv["max-items"] as number | undefined),
+            maxString: parseNumber(argv["max-string-length"] as number | undefined)
           },
           Boolean(argv.pretty)
         )

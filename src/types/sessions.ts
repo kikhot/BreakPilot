@@ -255,4 +255,6 @@ export interface DebugSessionRecord {
   dap?: DapSession;
   ideClientId?: string;
   ideSessionId?: string;
+  /** Core-owned generation used to scope agent-facing runtime handles. */
+  pauseId?: number;
 }

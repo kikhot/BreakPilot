@@ -103,7 +103,7 @@ try {
   assert.deepEqual(call.result?.structuredContent?.sessions, [], JSON.stringify(call));
   assert.equal("ok" in (call.result?.structuredContent ?? {}), false);
   assert.equal("data" in (call.result?.structuredContent ?? {}), false);
-  assert.equal(call.result?.content?.[0]?.text, "ok");
+  assert.equal(call.result?.content?.[0]?.text, "No active debug sessions; IDE disconnected.");
   assert.equal(call.result?.isError, false);
 
   child.stdin.write(`${JSON.stringify({

@@ -60,7 +60,7 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
           "bp_debug_set_breakpoint",
           {
             sessionId: argv.session as string | undefined,
-            workspace: argv.workspace as string | undefined,
+            projectPath: argv.workspace as string | undefined,
             clientId: argv.client as string | undefined,
             ide: argv.ide as string | undefined,
             filePath: argv.file as string | undefined,
@@ -93,7 +93,7 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
           "bp_debug_remove_breakpoint",
           {
             sessionId: argv.session as string | undefined,
-            workspace: argv.workspace as string | undefined,
+            projectPath: argv.workspace as string | undefined,
             clientId: argv.client as string | undefined,
             ide: argv.ide as string | undefined,
             breakpointId: argv.id as string | undefined,
@@ -119,7 +119,7 @@ export function registerBreakpointCommands(y: Argv, ctx: CommandContext): Argv {
           "bp_debug_list_breakpoints",
           {
             sessionId: argv.session as string | undefined,
-            workspace: argv.workspace as string | undefined,
+            projectPath: argv.workspace as string | undefined,
             clientId: argv.client as string | undefined,
             ide: argv.ide as string | undefined,
             filePath: argv.file as string | undefined

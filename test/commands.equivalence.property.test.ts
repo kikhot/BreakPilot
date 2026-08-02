@@ -5,9 +5,9 @@
  *
  * Covers the design's Correctness Property 2 (parameter mapping equivalence):
  * for any valid command + valid flag combination, the NEW yargs handlers
- * produce a control-plane tool name and argument object that is DEEPLY EQUAL
- * to the frozen legacy `toolFromCommand` oracle. This guards against any
- * behavior drift introduced by the yargs migration.
+ * produce a control-plane tool name and canonical argument object that is
+ * DEEPLY EQUAL to an independent oracle. This guards the CLI-only aliases
+ * (`--workspace`, `--file`, and `--ref`) at the control-plane boundary.
  *
  * How it works:
  * - The ORACLE side derives `(command, subcommand, flags, positional)` from the
@@ -181,7 +181,7 @@ const snapshotCase = fc
 const inspectVariableCase = fc
   .tuple(
     optStr("session"),
-    optNum("ref"),
+    optStr("ref"),
     optNum("start"),
     optNum("count"),
     optStr("objects"),

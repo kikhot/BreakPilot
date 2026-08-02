@@ -56,19 +56,14 @@ try {
   assert.deepEqual(callBody.result?.structuredContent?.sessions, []);
   assert.equal("ok" in (callBody.result?.structuredContent ?? {}), false);
   assert.equal("data" in (callBody.result?.structuredContent ?? {}), false);
-  assert.equal(callBody.result?.content?.[0]?.text, "ok");
+  assert.equal(callBody.result?.content?.[0]?.text, "No active debug sessions; IDE disconnected.");
   assert.equal(callBody.result?.isError, false);
 
   const expectedInvalidLineError = {
     code: "INVALID_ARGUMENT",
     message: "Invalid arguments for bp_debug_run_to_line.",
-    details: {
-      issues: [{
-        path: "$.line",
-        keyword: "minimum",
-        message: "must be >= 1"
-      }]
-    }
+    retrySafe: true,
+    actionMayHaveApplied: false
   };
 
   const httpErrorCall = await fetch(`${handle.url}/tools/call`, {
@@ -108,13 +103,8 @@ try {
   const expectedUnknownPropertyError = {
     code: "INVALID_ARGUMENT",
     message: "Invalid arguments for bp_debug_status.",
-    details: {
-      issues: [{
-        path: "$.typo",
-        keyword: "additionalProperties",
-        message: "is not allowed"
-      }]
-    }
+    retrySafe: true,
+    actionMayHaveApplied: false
   };
   const httpUnknownPropertyCall = await fetch(`${handle.url}/tools/call`, {
     method: "POST",
@@ -151,21 +141,14 @@ try {
   assert.deepEqual(streamUnknownPropertyBody.result?.structuredContent?.error, expectedUnknownPropertyError);
 
   hub.projects.getOrCreate().manager.bpDebugStatus = async () => ({
-    activeSessionId: null,
     sessions: "invalid",
-    ideConnected: false,
-    ideSessions: []
+    ideConnected: false
   });
   const expectedOutputContractError = {
     code: "OUTPUT_CONTRACT_VIOLATION",
     message: "Debugger tool returned a result that violates its published contract.",
-    details: {
-      tool: "bp_debug_status",
-      issues: [{ path: "$.sessions", keyword: "type" }],
-      issueCount: 1,
-      outcome: "failed",
-      retrySafe: true
-    }
+    retrySafe: true,
+    actionMayHaveApplied: false
   };
 
   const httpMalformedOutputCall = await fetch(`${handle.url}/tools/call`, {
@@ -206,24 +189,15 @@ try {
   );
 
   hub.projects.getOrCreate().manager.bpDebugControl = async () => ({
-    status: "paused",
+    state: "paused",
     events: {
       items: [{
         sequence: 7,
-        timestamp: "2026-07-25T00:00:00.000Z",
         kind: "breakpoint",
-        sessionId: "sess-overflow",
         message: "retained"
       }],
-      cursor: 0,
       nextCursor: 7,
-      oldestCursor: 7,
-      hasMore: false,
-      overflowed: true,
-      droppedCount: 6,
-      supportedKinds: ["breakpoint"],
-      breakpointErrors: [],
-      tracepoints: []
+      dropped: 6
     }
   });
   const overflowDrainCall = await fetch(`${handle.url}/tools/call`, {
@@ -236,16 +210,14 @@ try {
   });
   assert.equal(overflowDrainCall.status, 200);
   const overflowDrainBody = await overflowDrainCall.json() as {
-    events?: { overflowed?: boolean; items?: { sequence?: number }[] };
+    events?: { dropped?: number; items?: { sequence?: number }[] };
     error?: { code?: string };
   };
   assert.equal(overflowDrainBody.error?.code, undefined);
-  assert.equal(overflowDrainBody.events?.overflowed, true);
+  assert.equal(overflowDrainBody.events?.dropped, 6);
   assert.deepEqual(overflowDrainBody.events?.items, [{
     sequence: 7,
-    timestamp: "2026-07-25T00:00:00.000Z",
     kind: "breakpoint",
-    sessionId: "sess-overflow",
     message: "retained"
   }]);
 

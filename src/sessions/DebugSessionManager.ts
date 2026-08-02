@@ -50,6 +50,8 @@ import { SessionStore } from "./SessionStore.ts";
 import { ideProviderCapabilities, mergeIdeCapabilityRecords } from "../runtime/ProviderCapabilities.ts";
 import type { RuntimeProviderCapabilities } from "../types/capabilities.ts";
 import { RuntimeEventBuffer, runtimeEventKinds } from "../runtime/RuntimeEventBuffer.ts";
+import { AgentDebugPresenter } from "../control/AgentDebugPresenter.ts";
+import { AgentHandleRegistry } from "../runtime/AgentHandleRegistry.ts";
 
 type DebugToolArgs = AnyRecord & {
   sessionId?: string;
@@ -80,6 +82,10 @@ type DebugToolArgs = AnyRecord & {
   offset?: number;
   cursor?: number;
   detail?: DetailLevel;
+  pauseId?: number;
+  handle?: string;
+  stackLimit?: number;
+  variableLimit?: number;
   enabled?: boolean;
   temporary?: boolean;
   suspendPolicy?: "ALL" | "THREAD" | "NONE";
@@ -155,6 +161,7 @@ export class DebugSessionManager {
   readonly #archivedRuntimeEvents: Map<string, ArchivedRuntimeEvents>;
   readonly #dapTerminationTimers: Map<string, ReturnType<typeof setTimeout>>;
   readonly #deferredDapLifecycleCleanups: Map<string, DeferredDapLifecycleCleanup>;
+  readonly #agentHandles: AgentHandleRegistry;
 
   constructor({ policy, ideBridge }: { policy: BreakPilotPolicy; ideBridge?: IdeBridgeServer | null }) {
     this.policy = policy;
@@ -171,6 +178,7 @@ export class DebugSessionManager {
     this.#archivedRuntimeEvents = new Map();
     this.#dapTerminationTimers = new Map();
     this.#deferredDapLifecycleCleanups = new Map();
+    this.#agentHandles = new AgentHandleRegistry();
     this.#wireIdeBridge();
   }
 
@@ -187,10 +195,12 @@ export class DebugSessionManager {
 
     if (normalized.mode === "ide" || (normalized.mode === undefined && normalized.ideSessionId)) {
       const adopted = await this.#adoptIdeSession(normalized);
-      return ok(adopted.session.sessionId, {
-        ...this.#sessionSummary(adopted.session, true),
-        startMode: "ide"
-      }, auditId, adopted.warnings);
+      return ok(
+        adopted.session.sessionId,
+        this.#agentStartView(adopted.session, "ide", normalized),
+        auditId,
+        adopted.warnings
+      );
     }
 
     const mode = normalized.mode === "attach"
@@ -207,7 +217,7 @@ export class DebugSessionManager {
           mode: "headless",
           program: normalized.program ?? normalized.filePath
         });
-    return ok(session.sessionId, { ...this.#sessionSummary(session, true), startMode: mode }, auditId);
+    return ok(session.sessionId, this.#agentStartView(session, mode, normalized), auditId);
   }
 
   async #startIdeDebug(args: DebugToolArgs, auditId: string): Promise<ToolResponse> {
@@ -273,23 +283,29 @@ export class DebugSessionManager {
       projectPath: workspaceRoot,
       mode: "ide"
     });
-    return ok(adopted.session.sessionId, {
-      ...this.#sessionSummary(adopted.session, true),
-      startMode: "ide"
-    }, auditId, adopted.warnings);
+    return ok(
+      adopted.session.sessionId,
+      this.#agentStartView(adopted.session, "ide", args),
+      auditId,
+      adopted.warnings
+    );
   }
 
   async bpDebugStatus(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const auditId = this.audit.record("bp_debug_status_requested", { projectPath: args.projectPath });
-    const sessions = this.#sessionStatusList(args);
     const active = this.#selectSessionCandidate();
     const ide = this.#ideStatusView(args);
+    const sessions = this.#agentSessionStatusList(args, active?.sessionId);
     const data: AnyRecord = {
-      activeSessionId: active && sessions.some((session) => session.sessionId === active.sessionId) ? active.sessionId : null,
+      ...(active && sessions.some((session) => session.sessionId === active.sessionId)
+        ? { activeSessionId: active.sessionId }
+        : {}),
       sessions,
-      ideConnected: Boolean(ide.connected),
-      ideSessions: ide.sessions ?? []
+      ideConnected: Boolean(ide.connected)
     };
+    if (args.detail === "diagnostic") {
+      data.diagnostics = { ide, providerSessions: this.#sessionStatusList({ ...args, detail: "diagnostic" }) };
+    }
     return ok(null, data, auditId);
   }
 
@@ -328,18 +344,47 @@ export class DebugSessionManager {
       );
     }
     const result = publicBridgeSnapshot(response.result as SafeBridgeSnapshot) as AnyRecord | undefined;
+    const presenter = new AgentDebugPresenter({
+      workspaceRoot,
+      sessionId: "run-configurations",
+      pauseId: 0,
+      handles: this.#agentHandles,
+      detail: normalized.detail ?? "compact"
+    });
     const configurations = Array.isArray(result?.configurations)
-      ? result.configurations.map((configuration: unknown) => ({
-        ...(configuration && typeof configuration === "object" ? configuration as AnyRecord : {}),
-        ide: target.client.ide,
-        projectPath: workspaceRoot
-      }))
-      : undefined;
-    return ok(null, {
-      ...(normalized.filePath ? { filePath: normalized.filePath } : {}),
-      ...(configurations === undefined ? {} : { configurations }),
-      ...(Array.isArray(result?.runPoints) ? { runPoints: result.runPoints } : {})
-    }, auditId);
+      ? result.configurations.flatMap((configuration: unknown) => {
+          if (!configuration || typeof configuration !== "object") return [];
+          const raw = configuration as AnyRecord;
+          if (typeof raw.name !== "string" || !raw.name) return [];
+          return [{
+            name: raw.name,
+            ...(typeof raw.description === "string" && raw.description ? { type: raw.description } : {}),
+            ...(raw.supportsDynamicLaunchOverrides === true ? { overrides: ["location"] } : {})
+          }];
+        })
+      : [];
+    const runPointFile = typeof result?.filePath === "string" ? result.filePath : normalized.filePath;
+    const runPoints = Array.isArray(result?.runPoints) && runPointFile
+      ? result.runPoints.flatMap((candidate: unknown) => {
+          if (!candidate || typeof candidate !== "object") return [];
+          const raw = candidate as AnyRecord;
+          const at = presenter.location({
+            filePath: runPointFile,
+            line: raw.line,
+            function: raw.elementText
+          });
+          return at ? [at] : [];
+        })
+      : [];
+    const compact: AnyRecord = {
+      ...(configurations.length ? { configurations } : {}),
+      ...(runPoints.length ? { runPoints } : {})
+    };
+    return ok(null, presenter.withDiagnostics(compact, {
+      ide: target.client.ide,
+      projectPath: workspaceRoot,
+      provider: result ?? {}
+    }), auditId);
   }
 
   async bpDebugControl(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -350,8 +395,8 @@ export class DebugSessionManager {
       const archived = this.#archivedRuntimeEvents.get(normalized.sessionId);
       if (archived) {
         return ok(normalized.sessionId, {
-          status: SessionState.TERMINATED,
-          events: this.#runtimeEventPageView(archived.events.read({
+          state: SessionState.TERMINATED,
+          events: this.#agentRuntimeEventPage(normalized.sessionId, this.security.workspaceRoot(), archived.events.read({
             cursor: normalized.cursor,
             limit: normalized.limit
           }))
@@ -368,7 +413,7 @@ export class DebugSessionManager {
         payload?.code === ErrorCodes.SESSION_NOT_FOUND
       ) {
         return ok(normalized.sessionId, {
-          status: "stopped",
+          state: "stopped",
           alreadyStopped: true
         }, auditId, ["Debug session was already absent."]);
       }
@@ -395,6 +440,8 @@ export class DebugSessionManager {
           capability: "pause"
         });
       }
+      if (normalized.pauseId !== undefined) this.#currentPauseId(session, normalized.pauseId);
+      this.#invalidatePause(session);
       await session.provider.pause(normalized.threadId ?? session.provider.threadId);
       const stopped = this.#validatedStopEvidence(
         session,
@@ -402,10 +449,14 @@ export class DebugSessionManager {
         "pause"
       );
       session.state = SessionState.PAUSED;
-      return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
+      return ok(session.sessionId, await this.#controlView(session, "paused", stopped, {
+        ...normalized,
+        pauseId: undefined
+      }), auditId);
     }
 
     if (action === "wait") {
+      if (session.state !== SessionState.PAUSED) this.#invalidatePause(session);
       const stopped = await session.provider.waitForBreakpoint(normalized.timeout ?? 30000).catch(async (error) => {
         if (error instanceof BreakPilotError && error.code === ErrorCodes.BREAKPOINT_TIMEOUT) {
           const recovered = await this.#recoverBreakpointHit(session);
@@ -419,9 +470,11 @@ export class DebugSessionManager {
 
     if (action === "resume") {
       if (session.provider.kind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, "resume");
+      if (normalized.pauseId !== undefined) this.#currentPauseId(session, normalized.pauseId);
+      this.#invalidatePause(session);
       await session.provider.continue(normalized.threadId ?? session.provider.threadId);
       session.state = SessionState.RUNNING;
-      return ok(session.sessionId, { status: "running" }, auditId);
+      return ok(session.sessionId, { state: "running" }, auditId);
     }
 
     if (action === "stepOver" || action === "stepInto" || action === "stepOut") {
@@ -434,6 +487,8 @@ export class DebugSessionManager {
       }
       if (session.provider.kind !== "ide") this.coordinator.assertCanControl(session, SessionOwner.MCP, action);
       const kind = action === "stepInto" ? "into" : action === "stepOut" ? "out" : "over";
+      if (normalized.pauseId !== undefined) this.#currentPauseId(session, normalized.pauseId);
+      this.#invalidatePause(session);
       await session.provider.step(kind, normalized.threadId ?? session.provider.threadId);
       session.state = SessionState.RUNNING;
       const stopped = this.#validatedStopEvidence(
@@ -442,15 +497,19 @@ export class DebugSessionManager {
         action
       );
       session.state = SessionState.PAUSED;
-      return ok(session.sessionId, await this.#controlView(session, "paused", stopped, normalized), auditId);
+      return ok(session.sessionId, await this.#controlView(session, "paused", stopped, {
+        ...normalized,
+        pauseId: undefined
+      }), auditId);
     }
 
     if (action === "disconnect" || action === "stop") {
+      this.#agentHandles.clear(session.sessionId);
       await this.#cleanupSession(session, {
         reason: action,
         terminateDebuggee: action === "stop" || Boolean(normalized.terminateDebuggee)
       });
-      return ok(session.sessionId, { status: "stopped" }, auditId);
+      return ok(session.sessionId, { state: "stopped" }, auditId);
     }
 
     if (action === "drainEvents") {
@@ -473,8 +532,8 @@ export class DebugSessionManager {
         });
       }
       return ok(session.sessionId, {
-        status: session.state,
-        events: this.#runtimeEventPageView(page)
+        state: session.state,
+        events: this.#agentRuntimeEventPage(session.sessionId, session.workspaceRoot, page)
       }, auditId);
     }
 
@@ -509,6 +568,8 @@ export class DebugSessionManager {
         providerKind: session.provider.kind
       });
     }
+    this.#currentPauseId(session, normalized.pauseId);
+    this.#invalidatePause(session);
     this.coordinator.beginExecution(session, "run-to-line");
     try {
       const result = await session.provider.runToLine({
@@ -530,7 +591,39 @@ export class DebugSessionManager {
         cleanedUp: result.cleanedUp,
         ...(result.temporaryBreakpointId ? { temporaryBreakpointId: result.temporaryBreakpointId } : {})
       });
-      return ok(session.sessionId, result as AnyRecord, auditId);
+      const pauseId = result.status === "paused"
+        ? this.#currentPauseId(session)
+        : session.pauseId ?? 0;
+      const presenter = this.#agentPresenter(session, normalized, pauseId);
+      const target = presenter.location({
+        filePath: result.requestedPosition.filePath,
+        line: result.requestedPosition.line,
+        column: result.requestedPosition.column
+      })!;
+      let paused: AnyRecord = {};
+      if (result.status === "paused") {
+        paused = await this.#controlView(session, "paused", {
+          reason: "runToLine",
+          threadId: normalized.threadId ?? session.provider.threadId,
+          topFrame: result.frame ?? result.position
+        }, { ...normalized, pauseId: undefined });
+        delete paused.state;
+      }
+      const compact: AnyRecord = {
+        state: result.status,
+        reached: result.targetReached,
+        target,
+        ...paused
+      };
+      if (!result.cleanedUp) {
+        compact.incomplete = [...new Set([...(compact.incomplete as string[] | undefined ?? []), "cleanup"])];
+        compact.warnings = [...(result.warnings ?? []), "Temporary run-to-line state was not fully cleaned up."];
+      } else if (result.warnings?.length) {
+        compact.warnings = result.warnings;
+      }
+      if (result.message) compact.message = result.message;
+      if (normalized.detail === "diagnostic") compact.diagnostics = { provider: result };
+      return ok(session.sessionId, compact, auditId);
     } catch (error) {
       this.#applyRunToLineFailureState(session);
       throw error;
@@ -552,15 +645,21 @@ export class DebugSessionManager {
     const offset = args.offset ?? 0;
     const limit = args.limit ?? 50;
     const threads = await session.provider.listThreads();
-    const limited = threads.slice(offset, offset + limit).map((thread) => this.#threadView(thread, session));
-    return ok(session.sessionId, { threads: limited, offset, totalCount: threads.length }, auditId);
+    const limited = threads.slice(offset, offset + limit).map((thread) => this.#agentThreadView(thread, session));
+    const nextOffset = offset + limited.length;
+    const compact: AnyRecord = {
+      threads: limited,
+      ...(nextOffset < threads.length ? { nextOffset } : {})
+    };
+    if (args.detail === "diagnostic") compact.diagnostics = { totalCount: threads.length, offset };
+    return ok(session.sessionId, compact, auditId);
   }
 
   async bpDebugCallStack(args: DebugToolArgs = {}): Promise<ToolResponse> {
     const session = this.#resolveSession(args);
     const auditId = this.audit.record("bp_debug_call_stack_requested", { sessionId: session.sessionId });
     const stack = await this.#callStack(session, args.threadId, args.limit ?? 20, args.offset ?? 0);
-    return ok(session.sessionId, stack, auditId);
+    return ok(session.sessionId, this.#agentStackView(session, stack, args), auditId);
   }
 
   async bpDebugFrame(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -569,8 +668,8 @@ export class DebugSessionManager {
     this.#assertDapFrameId(session, normalized.frameId);
     this.#assertVariableReferences(session, "frame inspection");
     const auditId = this.audit.record("bp_debug_frame_requested", { sessionId: session.sessionId });
-    const frame = await this.#frameView(session, normalized);
-    return ok(session.sessionId, frame, auditId);
+    const raw = await this.#frameView(session, normalized, false);
+    return ok(session.sessionId, this.#agentFrameView(session, raw, normalized), auditId);
   }
 
   async bpDebugValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -578,7 +677,24 @@ export class DebugSessionManager {
     const session = this.#resolveSession(normalized);
     this.#assertDapFrameId(session, normalized.frameId);
     this.#assertVariableReferences(session, "value inspection");
-    const auditId = this.audit.record("bp_debug_value_requested", { sessionId: session.sessionId, ref: normalized.ref, path: normalized.path });
+    const auditId = this.audit.record("bp_debug_value_requested", {
+      sessionId: session.sessionId,
+      handle: normalized.handle,
+      path: normalized.path
+    });
+
+    const pauseId = this.#currentPauseId(session, normalized.pauseId);
+    if (normalized.handle) {
+      const target = this.#agentHandles.resolve(session.sessionId, pauseId, normalized.handle);
+      normalized.path = target.path;
+      if (this.#isExpandableProviderRef(target.providerRef)) {
+        normalized.ref = target.providerRef;
+        normalized.variablesReference = target.providerRef;
+      } else {
+        normalized.ref = undefined;
+        normalized.variablesReference = undefined;
+      }
+    }
 
     if (normalized.ref !== undefined) {
       const limits = this.#variableLimits(normalized);
@@ -594,9 +710,9 @@ export class DebugSessionManager {
         });
         const serializer = new VariableSerializer(dap, limits, { objectFields: normalized.expand ?? "deep" });
         const items = await serializer.serializeVariableNodes(variables);
+        const node = this.#agentExpandedReferenceNode(normalized, items);
         return ok(session.sessionId, {
-          ref: normalized.ref,
-          items: items.map((item) => this.#compactNode(item))
+          value: this.#agentPresenter(session, normalized, pauseId).value(node, this.#agentValueOptions(normalized, 1))
         }, auditId);
       }
       const result = await session.provider.inspectVariable?.({
@@ -604,7 +720,15 @@ export class DebugSessionManager {
         variablesReference: normalized.ref,
         count
       }, limits);
-      return ok(session.sessionId, { ref: normalized.ref, result }, auditId);
+      const items = this.#nodesFromProviderItems(
+        (result as AnyRecord | undefined)?.items,
+        normalized.path ?? [],
+        normalized.ref!
+      );
+      const node = this.#agentExpandedReferenceNode(normalized, items);
+      return ok(session.sessionId, {
+        value: this.#agentPresenter(session, normalized, pauseId).value(node, this.#agentValueOptions(normalized, 1))
+      }, auditId);
     }
 
     if (!normalized.path || normalized.path.length === 0) {
@@ -617,7 +741,12 @@ export class DebugSessionManager {
         path: normalized.path
       });
     }
-    return ok(session.sessionId, this.#compactNode(found), auditId);
+    return ok(session.sessionId, {
+      value: this.#agentPresenter(session, normalized, pauseId).value(
+        found,
+        this.#agentValueOptions(normalized, 1)
+      )
+    }, auditId);
   }
 
   async bpDebugSetValue(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -625,7 +754,26 @@ export class DebugSessionManager {
     const session = this.#resolveSession(normalized);
     this.#assertDapFrameId(session, normalized.frameId);
     this.#assertVariableReferences(session, "set-value path resolution");
-    const auditId = this.audit.record("bp_debug_set_value_requested", { sessionId: session.sessionId, path: normalized.path, ref: normalized.ref });
+    const auditId = this.audit.record("bp_debug_set_value_requested", {
+      sessionId: session.sessionId,
+      path: normalized.path,
+      handle: normalized.handle
+    });
+    const pauseId = this.#currentPauseId(session, normalized.pauseId);
+    const requestedTarget: AnyRecord = normalized.handle
+      ? { handle: normalized.handle }
+      : { path: normalized.path };
+    if (normalized.handle) {
+      const target = this.#agentHandles.resolve(session.sessionId, pauseId, normalized.handle);
+      normalized.path = target.path;
+      if (this.#isExpandableProviderRef(target.providerRef)) {
+        normalized.ref = target.providerRef;
+        normalized.variablesReference = target.providerRef;
+      } else {
+        normalized.ref = undefined;
+        normalized.variablesReference = undefined;
+      }
+    }
     if (normalized.ref !== undefined) {
       if (
         session.provider.capabilities.variableReferences !== "native" ||
@@ -648,15 +796,15 @@ export class DebugSessionManager {
         newValue: providerNewValue,
         ...providerDiagnostics
       } = result;
-      return ok(session.sessionId, {
-        ref: normalized.ref,
+      const compact: AnyRecord = {
+        target: requestedTarget,
         oldValue: oldValue ?? null,
         newValue: providerNewValue ?? normalized.newValue,
         applied: result.applied === true,
-        verified: result.verified === true,
-        mutationMode: "native",
-        ...(Object.keys(providerDiagnostics).length > 0 ? { result: providerDiagnostics } : {})
-      }, auditId);
+        verified: result.verified === true
+      };
+      if (normalized.detail === "diagnostic") compact.diagnostics = { provider: providerDiagnostics };
+      return ok(session.sessionId, compact, auditId);
     }
     if (!normalized.path || normalized.path.length === 0) {
       throw new BreakPilotError(ErrorCodes.INVALID_ARGUMENT, "bp_debug_set_value requires path or ref plus newValue.", {});
@@ -685,29 +833,21 @@ export class DebugSessionManager {
       parentRef: node.parentRef,
       name: node.name
     });
-    const providerMode = session.provider.capabilities.setValue;
-    const reportedMode = result.mutationMode;
-    const mutationMode = reportedMode === "native" || reportedMode === "evaluateAssignment"
-      ? reportedMode
-      : providerMode;
     const {
       applied: _providerApplied,
       verified: _providerVerified,
       mutationMode: _providerMutationMode,
       ...providerDiagnostics
     } = result;
-    return ok(session.sessionId, {
-      path: normalized.path,
+    const compact: AnyRecord = {
+      target: requestedTarget,
       oldValue: node.raw ?? node.summary,
-      newValue: normalized.newValue,
+      newValue: result.newValue ?? normalized.newValue,
       applied: typeof result.applied === "boolean" ? result.applied : true,
-      // Task 2 has no provider read-back proof contract. An accepted setter
-      // response is applied but remains unverified even if a legacy payload
-      // happens to include a truthy `verified` field.
-      verified: false,
-      mutationMode,
-      result: providerDiagnostics
-    }, auditId);
+      verified: result.verified === true
+    };
+    if (normalized.detail === "diagnostic") compact.diagnostics = { provider: providerDiagnostics };
+    return ok(session.sessionId, compact, auditId);
   }
 
   async bpDebugEval(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -731,7 +871,7 @@ export class DebugSessionManager {
       context: normalized.context ?? "watch",
       timeoutMs: normalized.timeout ?? this.policy.evaluate.timeoutMs
     });
-    return ok(session.sessionId, this.#evalView(normalized.expression, result), auditId);
+    return ok(session.sessionId, this.#evalView(session, normalized, normalized.expression, result), auditId);
   }
 
   async bpDebugContext(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -762,30 +902,44 @@ export class DebugSessionManager {
       failures.push(this.#evidenceFailure("stop", error));
     }
     try {
-      stack = await this.#callStack(session, normalized.threadId, normalized.limit ?? 20);
+      stack = await this.#callStack(session, normalized.threadId, normalized.stackLimit ?? 5);
     } catch (error) {
       failures.push(this.#evidenceFailure("stack", error));
     }
     try {
-      frame = await this.#frameView(session, normalized);
+      frame = await this.#frameView(session, {
+        ...normalized,
+        limit: normalized.variableLimit ?? normalized.limit ?? 10
+      }, false);
     } catch (error) {
       failures.push(this.#evidenceFailure("frame", error));
     }
     const warnings = failures.map((failure) =>
       `${String(failure.scope)[0]?.toUpperCase()}${String(failure.scope).slice(1)} evidence is missing: ${String(failure.message)}`
     );
-    return ok(session.sessionId, {
-      status: session.state,
-      position: frame?.frame ? this.#positionFromFrame(frame.frame) : this.#positionFromStopped(stopped),
-      frames: stack?.frames ?? [],
-      variables: frame?.variables ?? [],
-      evidence: {
-        stop: failures.some((failure) => failure.scope === "stop") ? "missing" : "complete",
-        stack: failures.some((failure) => failure.scope === "stack") ? "missing" : "complete",
-        frame: failures.some((failure) => failure.scope === "frame") ? "missing" : "complete",
-        failures
-      }
-    }, auditId, warnings);
+    const pauseId = this.#currentPauseId(session, normalized.pauseId, stopped);
+    const presenter = this.#agentPresenter(session, normalized, pauseId);
+    const compact: AnyRecord = {
+      state: session.state,
+      ...(stopped?.reason ? { reason: stopped.reason } : {}),
+      ...(frame?.frame
+        ? { at: presenter.location(frame.frame) }
+        : { at: presenter.location(this.#topFrameFromStopped(stopped)) }),
+      stack: stack ? (this.#agentStackView(session, stack, normalized).frames ?? []) : [],
+      ...(frame ? presenter.scopes(frame.variables as VariableScopeView[], this.#agentValueOptions({
+        ...normalized,
+        limit: normalized.variableLimit ?? normalized.limit ?? 10
+      }, 0)) : {}),
+      pauseId,
+      ...(failures.length ? { incomplete: failures.map((failure) => String(failure.scope)) } : {})
+    };
+    if (!compact.at) delete compact.at;
+    return ok(session.sessionId, presenter.withDiagnostics(compact, {
+      failures,
+      stopped,
+      stack,
+      frame
+    }), auditId, warnings);
   }
 
   async bpDebugSetBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -795,7 +949,10 @@ export class DebugSessionManager {
     if (!session) return this.#setProjectBreakpoint(normalized);
     const auditId = this.audit.record("bp_debug_set_breakpoint_requested", { sessionId: session.sessionId });
     const response = await this.#setSessionBreakpoint(session, { ...normalized, file: normalized.filePath });
-    const lineText = response.filePath && response.line ? this.#readLine(String(response.filePath), Number(response.line)) : undefined;
+    const at = response.at as AnyRecord | undefined;
+    const lineText = at?.filePath && at.line
+      ? this.#readLine(path.resolve(session.workspaceRoot, String(at.filePath)), Number(at.line))
+      : undefined;
     return ok(session.sessionId, {
       ...response,
       ...(lineText !== undefined ? { lineText } : {})
@@ -819,7 +976,9 @@ export class DebugSessionManager {
       breakpoints = breakpoints.filter((bp) => path.resolve(bp.file) === path.resolve(file));
     }
     breakpoints = this.#filterBreakpointRecords(breakpoints, normalized);
-    return ok(session.sessionId, { breakpoints: breakpoints.map((breakpoint) => this.#breakpointView(breakpoint)), totalCount: breakpoints.length }, auditId);
+    return ok(session.sessionId, {
+      breakpoints: breakpoints.map((breakpoint) => this.#breakpointView(breakpoint, session.workspaceRoot))
+    }, auditId);
   }
 
   async bpDebugRemoveBreakpoint(args: DebugToolArgs = {}): Promise<ToolResponse> {
@@ -842,7 +1001,7 @@ export class DebugSessionManager {
       return ok(session.sessionId, this.#protectedBreakpointRemoveView(breakpoint), auditId);
     }
     const response = await this.#removeSessionBreakpoint(session, breakpointId);
-    return ok(session.sessionId, { ...response, breakpointId }, auditId);
+    return ok(session.sessionId, { ...response, id: breakpointId }, auditId);
   }
 
   async #launchDapSession(args: DebugToolArgs = {}): Promise<DebugSessionRecord> {
@@ -1031,7 +1190,7 @@ export class DebugSessionManager {
       sessionId: session.sessionId,
       breakpoint: selected
     });
-    return this.#breakpointView(selected);
+    return this.#breakpointView(selected, session.workspaceRoot);
   }
 
   async #updateSessionBreakpoint(args: DebugToolArgs): Promise<ToolResponse> {
@@ -1058,17 +1217,11 @@ export class DebugSessionManager {
 
     const patch = this.#breakpointPatchRequest(session, args);
     const result = await this.breakpointReconciler.update(session, patch);
-    const previous = this.#breakpointView(result.previous);
-    const current = this.#breakpointView(result.current);
+    const current = this.#breakpointView(result.current, session.workspaceRoot);
     const response: AnyRecord = {
       ...current,
       operation: result.operation,
-      breakpointId: result.breakpointId,
-      previous,
-      current,
-      changedFields: [...result.changedFields],
-      verified: result.verified,
-      ...(result.rollbackApplied !== undefined ? { rollbackApplied: result.rollbackApplied } : {})
+      changed: [...result.changedFields]
     };
 
     // The reconciliation is complete even when requireVerified rejects the
@@ -1089,7 +1242,7 @@ export class DebugSessionManager {
         {
           breakpoint: current,
           operation: result.operation,
-          changedFields: result.changedFields
+          changed: result.changedFields
         }
       );
     }
@@ -1371,8 +1524,7 @@ export class DebugSessionManager {
       : breakpoints;
     const filtered = this.#filterBreakpointRecords(matchingFile, args);
     return ok(null, {
-      breakpoints: filtered.map((breakpoint) => this.#projectBreakpointView(breakpoint)),
-      totalCount: filtered.length
+      breakpoints: filtered.map((breakpoint) => this.#projectBreakpointView(breakpoint))
     }, auditId);
   }
 
@@ -1396,7 +1548,7 @@ export class DebugSessionManager {
     if (!breakpoint) {
       return ok(null, {
         removed: false,
-        ...(args.breakpointId ? { breakpointId: args.breakpointId } : {})
+        ...(args.breakpointId ? { id: args.breakpointId } : {})
       }, auditId);
     }
     if (!this.#canRemoveBreakpointOwner(breakpoint, args.owner)) {
@@ -1424,7 +1576,7 @@ export class DebugSessionManager {
     if (removed) this.breakpoints.removeProject(breakpoint.id);
     return ok(null, {
       removed,
-      breakpointId: breakpoint.id
+      id: breakpoint.id
     }, auditId);
   }
 
@@ -1508,6 +1660,35 @@ export class DebugSessionManager {
       supportedKinds: [...runtimeEventKinds],
       breakpointErrors: page.items.filter((item) => item.kind === "breakpointError"),
       tracepoints: page.items.filter((item) => item.kind === "tracepoint")
+    };
+  }
+
+  #agentRuntimeEventPage(sessionId: string, workspaceRoot: string, page: RuntimeEventPage): AnyRecord {
+    const presenter = new AgentDebugPresenter({
+      workspaceRoot,
+      sessionId,
+      pauseId: 0,
+      handles: this.#agentHandles,
+      detail: "compact"
+    });
+    return {
+      items: page.items.map((event) => {
+        const at = event.position
+          ? presenter.location({ filePath: event.position.filePath, line: event.position.line })
+          : undefined;
+        return {
+          sequence: event.sequence,
+          kind: event.kind,
+          ...(at ? { at } : {}),
+          ...(event.breakpointId ? { breakpointId: event.breakpointId } : {}),
+          ...(event.threadId === undefined ? {} : { threadId: event.threadId }),
+          ...(event.message ? { message: event.message } : {}),
+          ...(event.category ? { category: event.category } : {}),
+          ...(event.data && Object.keys(event.data).length ? { data: event.data } : {})
+        };
+      }),
+      nextCursor: page.nextCursor,
+      ...(page.droppedCount > 0 ? { dropped: page.droppedCount } : {})
     };
   }
 
@@ -1776,6 +1957,34 @@ export class DebugSessionManager {
       : this.security.workspaceRoot();
   }
 
+  #agentSessionStatusList(args: DebugToolArgs, activeSessionId?: string): AnyRecord[] {
+    const seenIdeSessions = new Set<string>();
+    const sessions: AnyRecord[] = this.#sessionStatusList({ ...args, detail: "compact" }).map((session) => {
+      if (session.ideSessionId) seenIdeSessions.add(session.ideSessionId);
+      return {
+        sessionId: session.sessionId,
+        ...(session.ideSessionId ? { ideSessionId: session.ideSessionId } : {}),
+        state: session.state,
+        mode: session.mode,
+        ...(session.sessionId === activeSessionId ? { active: true } : {})
+      };
+    });
+    const ide = this.#ideStatusView(args);
+    for (const candidate of Array.isArray(ide.sessions) ? ide.sessions as AnyRecord[] : []) {
+      const ideSessionId = typeof candidate.ideSessionId === "string" ? candidate.ideSessionId : undefined;
+      if (ideSessionId && seenIdeSessions.has(ideSessionId)) continue;
+      sessions.push({
+        ...(ideSessionId ? { ideSessionId } : {}),
+        ...(typeof candidate.name === "string" && candidate.name ? { name: candidate.name } : {}),
+        state: String(candidate.state ?? "unknown"),
+        mode: "ide",
+        ...(candidate.active === true ? { active: true } : {})
+      });
+      if (ideSessionId) seenIdeSessions.add(ideSessionId);
+    }
+    return sessions;
+  }
+
   #sessionStatusList(args: DebugToolArgs = {}): SessionSummary[] {
     const workspaceRoot = this.#statusWorkspaceRoot(args);
     return [...this.sessions.sessions.values()].filter((session) => {
@@ -1916,14 +2125,22 @@ export class DebugSessionManager {
   #frameSummary(frame: AnyRecord, index: number): AnyRecord {
     const source = frame.source as AnyRecord | undefined;
     const filePath = source?.path ?? source?.sourceReference ?? null;
-    const fn = frame.name ?? "";
+    const fn = frame.function ?? frame.displayName ?? frame.name ?? "";
     return {
       index,
       id: frame.id,
       filePath,
       line: frame.line ?? null,
+      ...(frame.column === undefined ? {} : { column: frame.column }),
       function: fn
     };
+  }
+
+  #topFrameFromStopped(stopped: AnyRecord | null): AnyRecord | undefined {
+    const nested = stopped?.stopped && typeof stopped.stopped === "object"
+      ? stopped.stopped as AnyRecord
+      : undefined;
+    return (stopped?.topFrame ?? nested?.topFrame) as AnyRecord | undefined;
   }
 
   #positionFromFrame(frame: AnyRecord): AnyRecord {
@@ -1941,38 +2158,37 @@ export class DebugSessionManager {
   ): Promise<AnyRecord> {
     let frame: AnyRecord | null = null;
     let frameFailure: AnyRecord | null = null;
-    if (args.includeFrame) {
-      try {
-        frame = await this.#frameView(session, {
-          ...args,
-          threadId: stopped?.threadId ?? session.provider.threadId ?? args.threadId,
-          expand: args.expand ?? "preview",
-          depth: args.depth ?? 1,
-          limit: args.limit ?? 10
-        });
-      } catch (error) {
-        frameFailure = this.#evidenceFailure("frame", error);
-      }
+    try {
+      frame = await this.#frameView(session, {
+        ...args,
+        threadId: stopped?.threadId ?? session.provider.threadId ?? args.threadId,
+        depth: args.depth ?? 0,
+        limit: args.limit ?? 10,
+        maxString: args.maxString ?? 200
+      }, false);
+    } catch (error) {
+      frameFailure = this.#evidenceFailure("frame", error);
     }
+    const pauseId = this.#currentPauseId(session, args.pauseId, stopped);
+    const presenter = this.#agentPresenter(session, args, pauseId);
+    const at = frame?.frame
+      ? presenter.location(frame.frame as AnyRecord)
+      : presenter.location(this.#topFrameFromStopped(stopped));
     const view: AnyRecord = {
-      status,
-      reason: stopped?.reason ?? null,
-      position: frame?.frame ? this.#positionFromFrame(frame.frame) : this.#positionFromStopped(stopped),
+      state: status,
+      ...(typeof stopped?.reason === "string" ? { reason: stopped.reason } : {}),
+      ...(at ? { at } : {}),
+      ...(frame
+        ? presenter.scopes(
+            frame.variables as VariableScopeView[],
+            this.#agentValueOptions({ ...args, limit: args.limit ?? 10 }, 0)
+          )
+        : {}),
+      pauseId,
+      ...(frameFailure ? { incomplete: ["frame"] } : {})
     };
-    if (frame?.frame) {
-      view.frame = frame.frame;
-      view.variables = frame.variables;
-    }
-    if (args.includeFrame) {
-      view.evidence = {
-        frame: frameFailure ? "missing" : "complete",
-        failures: frameFailure ? [frameFailure] : []
-      };
-      if (frameFailure) {
-        view.warnings = [`Frame evidence is missing: ${String(frameFailure.message)}`];
-      }
-    }
-    return view;
+    if (frameFailure) view.warnings = [`Frame evidence is missing: ${String(frameFailure.message)}`];
+    return presenter.withDiagnostics(view, { stopped, frame, frameFailure });
   }
 
   #evidenceFailure(scope: "stop" | "stack" | "frame", error: unknown): AnyRecord {
@@ -2019,9 +2235,9 @@ export class DebugSessionManager {
 
   #protectedBreakpointRemoveView(breakpoint: BreakpointRecord | ProjectBreakpointRecord): AnyRecord {
     return {
+      id: breakpoint.id,
       removed: false,
       protected: true,
-      breakpointId: breakpoint.id,
       message: `Breakpoint ${breakpoint.id} is owned by ${breakpoint.owner ?? "agent"} and was not removed. Pass owner:"all" to remove it.`
     };
   }
@@ -2179,6 +2395,153 @@ export class DebugSessionManager {
     };
   }
 
+  #agentThreadView(thread: AnyRecord, session: DebugSessionRecord): AnyRecord {
+    const providerThreadId = session.provider.threadId;
+    const current = thread.isCurrent === undefined
+      ? providerThreadId !== null && providerThreadId !== undefined && String(thread.id) === String(providerThreadId)
+      : Boolean(thread.isCurrent);
+    return {
+      id: thread.id,
+      name: String(thread.name ?? thread.id ?? ""),
+      ...(current ? { current: true } : {})
+    };
+  }
+
+  #currentPauseId(
+    session: DebugSessionRecord,
+    requested?: number,
+    evidence?: AnyRecord | null
+  ): number {
+    const nested = evidence?.stopped && typeof evidence.stopped === "object"
+      ? evidence.stopped as AnyRecord
+      : undefined;
+    const evidencePauseId = [evidence?.pauseEpoch, nested?.pauseEpoch]
+      .find((value) => Number.isSafeInteger(value) && Number(value) >= 0) as number | undefined;
+    const idePauseId = session.provider instanceof IdeRuntimeProvider
+      ? this.ideBridge?.registry.getPauseEpoch(session.provider.ideClientId, session.provider.ideSessionId)
+      : undefined;
+    let dapPauseId: number | undefined;
+    if (session.provider.kind === "dap" && session.provider.captureStopBoundary) {
+      try {
+        const boundary = session.provider.captureStopBoundary();
+        if (Number.isSafeInteger(boundary.stopSequence) && boundary.stopSequence > 0) {
+          dapPauseId = boundary.stopSequence;
+        }
+      } catch {
+        // Minimal provider doubles and older adapters may not expose a complete
+        // DAP stop boundary. Core still owns a monotonic fallback generation.
+      }
+    }
+    const authoritative = evidencePauseId ?? idePauseId ?? dapPauseId;
+    const pauseId = authoritative ?? session.pauseId ?? 1;
+    if (requested !== undefined && requested !== pauseId) {
+      throw new BreakPilotError(
+        ErrorCodes.STALE_RUNTIME_HANDLE,
+        "Requested pauseId no longer identifies the current paused state.",
+        {
+          sessionId: session.sessionId,
+          requestedPauseId: requested,
+          currentPauseId: pauseId,
+          retrySafe: true,
+          recommendedAction: "Request fresh context and retry with its pauseId."
+        }
+      );
+    }
+    session.pauseId = pauseId;
+    this.#agentHandles.beginPause(session.sessionId, pauseId);
+    return pauseId;
+  }
+
+  #isExpandableProviderRef(value: unknown): value is number | string {
+    return typeof value === "number"
+      ? Number.isInteger(value) && value > 0
+      : typeof value === "string" && value.length > 0;
+  }
+
+  #invalidatePause(session: DebugSessionRecord): void {
+    this.#agentHandles.invalidate(session.sessionId);
+    session.pauseId = (session.pauseId ?? 0) + 1;
+  }
+
+  #agentPresenter(session: DebugSessionRecord, args: DebugToolArgs, pauseId: number): AgentDebugPresenter {
+    return new AgentDebugPresenter({
+      workspaceRoot: session.workspaceRoot,
+      sessionId: session.sessionId,
+      pauseId,
+      handles: this.#agentHandles,
+      detail: args.detail ?? "compact"
+    });
+  }
+
+  #agentValueOptions(args: DebugToolArgs, fallbackDepth: number): {
+    depth: number;
+    limit: number;
+    offset: number;
+    maxString: number;
+  } {
+    return {
+      depth: args.depth ?? fallbackDepth,
+      limit: args.limit ?? 20,
+      offset: args.offset ?? 0,
+      maxString: args.maxString ?? 200
+    };
+  }
+
+  #agentStackView(session: DebugSessionRecord, stack: AnyRecord, args: DebugToolArgs): AnyRecord {
+    const pauseId = this.#currentPauseId(session, args.pauseId);
+    const presenter = this.#agentPresenter(session, args, pauseId);
+    const frames = (Array.isArray(stack.frames) ? stack.frames as AnyRecord[] : []).map((frame) => {
+      const at = presenter.location(frame);
+      return at
+        ? { index: Number(frame.index ?? 0), at }
+        : { index: Number(frame.index ?? 0), summary: String(frame.summary ?? "Hidden runtime frame") };
+    });
+    const compact: AnyRecord = {
+      threadId: stack.threadId ?? session.provider.threadId ?? "current",
+      frames,
+      pauseId,
+      ...(stack.nextOffset === undefined ? {} : { nextOffset: stack.nextOffset })
+    };
+    if (stack.partial === true && stack.nextOffset === undefined) compact.incomplete = ["stack"];
+    return presenter.withDiagnostics(compact, { providerStack: stack });
+  }
+
+  #agentFrameView(session: DebugSessionRecord, view: AnyRecord, args: DebugToolArgs): AnyRecord {
+    const pauseId = this.#currentPauseId(session, args.pauseId);
+    const presenter = this.#agentPresenter(session, args, pauseId);
+    const frame = view.frame as AnyRecord | null | undefined;
+    const at = presenter.location(frame);
+    if (!frame || !at) {
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider did not return a readable stack frame.", {
+        sessionId: session.sessionId,
+        retrySafe: true
+      });
+    }
+    const compact: AnyRecord = {
+      frame: { index: Number(frame.index ?? args.frameIndex ?? 0), at },
+      ...presenter.scopes(
+        Array.isArray(view.variables) ? view.variables as VariableScopeView[] : [],
+        this.#agentValueOptions(args, 0)
+      ),
+      pauseId
+    };
+    return presenter.withDiagnostics(compact, { providerFrame: view });
+  }
+
+  #agentExpandedReferenceNode(args: DebugToolArgs, children: VariableNode[]): VariableNode {
+    return {
+      name: String(args.handle ?? args.path?.at(-1) ?? "value"),
+      label: String(args.handle ?? args.path?.at(-1) ?? "value"),
+      kind: "object",
+      summary: children.length ? `${children.length} values` : "empty",
+      path: args.path,
+      ref: args.ref,
+      expandable: children.length > 0,
+      truncated: false,
+      children
+    };
+  }
+
   #compactFrameView(view: { threadId: ThreadId | null; frame: AnyRecord | null; variables: AnyRecord[] }): AnyRecord {
     return {
       threadId: view.threadId,
@@ -2209,54 +2572,85 @@ export class DebugSessionManager {
     return compact;
   }
 
-  #evalView(expression: string | undefined, result: AnyRecord): AnyRecord {
-    const value = result.value as AnyRecord | undefined;
-    if (!value) return { expression, result };
-    return {
+  #evalView(
+    session: DebugSessionRecord,
+    args: DebugToolArgs,
+    expression: string,
+    result: AnyRecord
+  ): AnyRecord {
+    const rawValue = result.value;
+    const serialized = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)
+      ? rawValue as AnyRecord
+      : {
+          name: "result",
+          kind: typeof rawValue === "number"
+            ? "number"
+            : typeof rawValue === "boolean"
+              ? "boolean"
+              : rawValue === null
+                ? "null"
+                : "primitive",
+          valuePreview: String(rawValue ?? result.valuePreview ?? ""),
+          value: rawValue,
+          variablesReference: result.variablesReference,
+          type: result.type,
+          truncated: false
+        };
+    const name = typeof serialized.name === "string" && serialized.name ? serialized.name : "result";
+    const node = this.#nodesFromSerializedMap({ [name]: { ...serialized, name } })[0];
+    if (!node) {
+      throw new BreakPilotError(ErrorCodes.TOOL_FAILED, "Runtime provider returned an unreadable evaluation result.");
+    }
+    const pauseId = this.#currentPauseId(session, args.pauseId);
+    const presented = this.#agentPresenter(session, args, pauseId).value(node, {
+      depth: 0,
+      limit: 1,
+      maxString: args.maxString ?? 200
+    });
+    const compact: AnyRecord = {
       expression,
-      value: value.valuePreview ?? value.value ?? result.valuePreview ?? result.value,
-      ...(value.type ? { type: value.type } : {})
+      value: presented.value,
+      ...(presented.type ? { type: presented.type } : {}),
+      ...(presented.handle ? { handle: presented.handle } : {})
     };
+    if (args.detail === "diagnostic") compact.diagnostics = { provider: result };
+    return compact;
   }
 
-  #breakpointView(breakpoint: BreakpointRecord): AnyRecord {
+  #breakpointView(breakpoint: BreakpointRecord, workspaceRoot = this.security.workspaceRoot()): AnyRecord {
+    const presenter = new AgentDebugPresenter({
+      workspaceRoot,
+      sessionId: breakpoint.sessionId,
+      pauseId: 0,
+      handles: this.#agentHandles,
+      detail: "compact"
+    });
     return {
-      breakpointId: breakpoint.id,
-      filePath: breakpoint.file,
-      line: breakpoint.line,
-      ...(breakpoint.column !== undefined ? { column: breakpoint.column } : {}),
+      id: breakpoint.id,
+      at: presenter.location({
+        filePath: breakpoint.file,
+        line: breakpoint.line,
+        column: breakpoint.column
+      }),
       verified: breakpoint.verified,
-      ...(breakpoint.condition !== undefined ? { condition: breakpoint.condition } : {}),
-      ...(breakpoint.hitCondition !== undefined ? { hitCondition: breakpoint.hitCondition } : {}),
-      ...(breakpoint.logMessage !== undefined ? { logMessage: breakpoint.logMessage } : {}),
-      owner: breakpoint.owner,
-      enabled: breakpoint.enabled ?? true,
-      temporary: breakpoint.temporary ?? false,
-      ...(breakpoint.suspendPolicy !== undefined ? { suspendPolicy: breakpoint.suspendPolicy } : {}),
-      ...(breakpoint.isLogMessage !== undefined ? { isLogMessage: breakpoint.isLogMessage } : {}),
-      ...(breakpoint.isLogStack !== undefined ? { isLogStack: breakpoint.isLogStack } : {}),
+      owner: breakpoint.owner === "user" ? "user" : "agent",
+      ...(breakpoint.condition ? { condition: breakpoint.condition } : {}),
+      ...(breakpoint.hitCondition ? { hitCondition: breakpoint.hitCondition } : {}),
+      ...(breakpoint.logMessage ? { logMessage: breakpoint.logMessage } : {}),
+      ...(breakpoint.enabled === false ? { enabled: false } : {}),
+      ...(breakpoint.temporary === true ? { temporary: true } : {}),
+      ...(breakpoint.suspendPolicy && breakpoint.suspendPolicy !== "ALL"
+        ? { suspendPolicy: breakpoint.suspendPolicy }
+        : {}),
       ...(breakpoint.message !== undefined ? { message: breakpoint.message } : {})
     };
   }
 
   #projectBreakpointView(breakpoint: ProjectBreakpointRecord): AnyRecord {
-    return {
-      breakpointId: breakpoint.id,
-      filePath: breakpoint.file,
-      line: breakpoint.line,
-      ...(breakpoint.column !== undefined ? { column: breakpoint.column } : {}),
-      verified: breakpoint.verified,
-      ...(breakpoint.condition !== undefined ? { condition: breakpoint.condition } : {}),
-      ...(breakpoint.hitCondition !== undefined ? { hitCondition: breakpoint.hitCondition } : {}),
-      ...(breakpoint.logMessage !== undefined ? { logMessage: breakpoint.logMessage } : {}),
-      owner: breakpoint.owner,
-      enabled: breakpoint.enabled ?? true,
-      temporary: breakpoint.temporary ?? false,
-      ...(breakpoint.suspendPolicy !== undefined ? { suspendPolicy: breakpoint.suspendPolicy } : {}),
-      ...(breakpoint.isLogMessage !== undefined ? { isLogMessage: breakpoint.isLogMessage } : {}),
-      ...(breakpoint.isLogStack !== undefined ? { isLogStack: breakpoint.isLogStack } : {}),
-      ...(breakpoint.message !== undefined ? { message: breakpoint.message } : {})
-    };
+    return this.#breakpointView({
+      ...breakpoint,
+      sessionId: breakpoint.ideSessionId ?? breakpoint.clientId
+    }, breakpoint.workspaceRoot);
   }
 
   #projectBreakpointFromIde(
@@ -2360,7 +2754,7 @@ export class DebugSessionManager {
           ? variable.mutationMode
           : undefined,
         path: [...parentPath, nodeName],
-        expandable: Boolean(ref),
+        expandable: Boolean(ref || children?.length),
         truncated: Boolean(variable.truncated),
         redacted: Boolean(variable.redacted),
         cycle: Boolean(variable.cycle),
@@ -2605,6 +2999,45 @@ export class DebugSessionManager {
           }
         : {})
     };
+  }
+
+  #agentStartView(
+    session: DebugSessionRecord,
+    startMode: "launch" | "attach" | "ide",
+    args: DebugToolArgs
+  ): AnyRecord {
+    const presenter = new AgentDebugPresenter({
+      workspaceRoot: session.workspaceRoot,
+      sessionId: session.sessionId,
+      pauseId: 0,
+      handles: this.#agentHandles,
+      detail: args.detail ?? "compact"
+    });
+    const target: AnyRecord = {
+      ...(session.language ? { language: session.language } : {})
+    };
+    if (startMode === "attach") {
+      if (args.host) target.host = args.host;
+      if (args.port !== undefined) target.port = Number(args.port);
+    } else if (startMode === "launch") {
+      if (args.program) {
+        target.program = presenter.location({ filePath: args.program, line: 1 })?.filePath ?? args.program;
+      }
+    } else {
+      const ideSessionId = this.#canonicalIdeSessionId(session) ?? session.ideSessionId;
+      if (ideSessionId) target.ideSessionId = ideSessionId;
+      if (args.runConfigName) target.runConfigName = args.runConfigName;
+      if (args.filePath && args.line) {
+        target.at = presenter.location({ filePath: args.filePath, line: args.line });
+      }
+    }
+    const compact: AnyRecord = {
+      sessionId: session.sessionId,
+      state: session.state,
+      startMode,
+      ...(Object.keys(target).length ? { target } : {})
+    };
+    return presenter.withDiagnostics(compact, { session: this.#sessionSummary(session, true), arguments: args });
   }
 
   async #cleanupSession(

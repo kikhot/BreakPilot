@@ -343,7 +343,8 @@ const liveIdeRoutingCases: Array<{
     name: "frame inspection",
     run: async ({ manager, sessionId, calls }) => {
       const result = await manager.bpDebugFrame({ sessionId, frameId: "ide-frame" });
-      assert.equal((result.frame as AnyRecord).id, "ide-frame");
+      assert.equal((result.frame as AnyRecord).index, 0);
+      assert.equal(((result.frame as AnyRecord).at as AnyRecord).line, 12);
       assert.equal(calls.snapshots[0]?.frameId, "ide-frame");
     }
   },
@@ -351,7 +352,7 @@ const liveIdeRoutingCases: Array<{
     name: "direct reference inspection",
     run: async ({ manager, sessionId, calls }) => {
       const result = await manager.bpDebugValue({ sessionId, ref: "ide-variable" });
-      assert.deepEqual(result.result, { source: "ide", variablesReference: "ide-variable" });
+      assert.equal((result.value as AnyRecord).name, "value");
       assert.equal(calls.inspections[0]?.variablesReference, "ide-variable");
     }
   },
@@ -377,7 +378,7 @@ const liveIdeRoutingCases: Array<{
     name: "debug context",
     run: async ({ manager, sessionId, calls }) => {
       const result = await manager.bpDebugContext({ sessionId, frameId: "ide-frame" });
-      assert.equal(result.position && (result.position as AnyRecord).line, 12);
+      assert.equal(result.at && (result.at as AnyRecord).line, 12);
       assert.equal(calls.waits, 1);
       assert.equal(calls.stacks, 1);
       assert.equal(calls.snapshots[0]?.frameId, "ide-frame");
@@ -400,9 +401,9 @@ const liveIdeRoutingCases: Array<{
         sessionId,
         path: ["parent", "child"],
         limit: 4,
-        maxDepth: 4
+        depth: 4
       });
-      assert.equal(result.value, "ready");
+      assert.equal((result.value as AnyRecord).value, "ready");
       assert.equal(calls.snapshots.length, 1);
       assert.equal(calls.snapshots[0]?.objectFields, "shallow");
       assert.equal(calls.snapshots[0]?.maxDepth, 0);
@@ -436,16 +437,12 @@ test("control preserves an applied stop and reports missing frame evidence", asy
 
   const result = await manager.bpDebugControl({
     sessionId,
-    action: "wait",
-    includeFrame: true
+    action: "wait"
   });
 
-  assert.equal(result.status, "paused");
-  assert.deepEqual(result.position, { filePath: "/workspace/Live.java", line: 44 });
-  assert.deepEqual(result.evidence, {
-    frame: "missing",
-    failures: [{ scope: "frame", code: ErrorCodes.IDE_RESPONSE_TIMEOUT, message: "frame response timed out" }]
-  });
+  assert.equal(result.state, "paused");
+  assert.deepEqual(result.at, { filePath: "/workspace/Live.java", line: 44 });
+  assert.deepEqual(result.incomplete, ["frame"]);
   assert.deepEqual(result.warnings, ["Frame evidence is missing: frame response timed out"]);
 });
 
@@ -463,15 +460,10 @@ test("context distinguishes missing frame evidence from completed empty variable
 
   const result = await manager.bpDebugContext({ sessionId });
 
-  assert.deepEqual(result.position, { filePath: "/workspace/Live.java", line: 45 });
-  assert.equal((result.frames as AnyRecord[]).length, 1);
-  assert.deepEqual(result.variables, []);
-  assert.deepEqual(result.evidence, {
-    stop: "complete",
-    stack: "complete",
-    frame: "missing",
-    failures: [{ scope: "frame", code: ErrorCodes.IDE_RESPONSE_TIMEOUT, message: "context frame timed out" }]
-  });
+  assert.deepEqual(result.at, { filePath: "/workspace/Live.java", line: 45 });
+  assert.equal((result.stack as AnyRecord[]).length, 1);
+  assert.equal("variables" in result, false);
+  assert.deepEqual(result.incomplete, ["frame"]);
   assert.deepEqual(result.warnings, ["Frame evidence is missing: context frame timed out"]);
 });
 
@@ -503,8 +495,7 @@ test("a DapRuntimeProvider supplies its live DAP session without a record mirror
 
   const result = await manager.bpDebugValue({ sessionId: provider.sessionId, ref: 7 });
 
-  assert.deepEqual((result.items as AnyRecord[]).map((item) => item.name), ["x"]);
-  assert.equal(result.result, undefined);
+  assert.equal((result.value as AnyRecord).name, "value");
 });
 
 function mismatchedDapProviderFixture(): {
@@ -672,7 +663,7 @@ test("a custom DAP provider cannot route through an unrelated DAP mirror", async
 
   const result = await manager.bpDebugValue({ sessionId: provider.sessionId, ref: 7 });
 
-  assert.deepEqual(result.result, { source: "custom", variablesReference: 7 });
+  assert.equal((result.value as AnyRecord).name, "value");
   assert.equal(providerTraffic, 1);
   assert.equal(mirrorTraffic, 0);
 });
@@ -716,7 +707,7 @@ for (const invalidTuple of [
     }
 
     const status = await manager.bpDebugStatus();
-    assert.deepEqual(status.sessions, []);
+    assert.equal((status.sessions as AnyRecord[]).some((session) => session.sessionId === provider.sessionId), false);
     await assert.rejects(
       manager.bpDebugEval({ sessionId: provider.sessionId, expression: "x" }),
       (error: Error & { code?: string }) => error.code === ErrorCodes.TOOL_FAILED
@@ -758,7 +749,7 @@ test("a real IDE provider owned by another bridge is hidden and unroutable", asy
   const { manager, provider, providerBridge, managerBridge } = foreignIdeBridgeFixture();
 
   const status = await manager.bpDebugStatus();
-  assert.deepEqual(status.sessions, []);
+  assert.equal((status.sessions as AnyRecord[]).some((session) => session.sessionId === provider.sessionId), false);
   await assert.rejects(
     manager.bpDebugEval({ sessionId: provider.sessionId, expression: "x" }),
     (error: Error & { code?: string }) => error.code === ErrorCodes.TOOL_FAILED
@@ -858,9 +849,9 @@ test("custom provider stop evidence ignores stale record IDE mirrors", async () 
     action: "pause"
   });
 
-  assert.equal(result.status, "paused");
+  assert.equal(result.state, "paused");
   assert.equal(result.reason, "breakpoint");
-  assert.equal(fixture.traffic(), 2);
+  assert.equal(fixture.traffic(), 3, "pause now collects its default compact frame evidence");
 });
 
 test("custom provider correlation errors do not emit stale record IDE mirrors", async () => {
@@ -891,7 +882,8 @@ test("a live custom provider summary never emits stale IDE compatibility mirrors
   const summary = (status.sessions as AnyRecord[])[0];
 
   assert.equal(summary?.sessionId, fixture.record.sessionId);
-  assert.equal(summary?.providerKind, "dap");
+  const providerSummary = ((status.diagnostics as AnyRecord).providerSessions as AnyRecord[])[0];
+  assert.equal(providerSummary?.providerKind, "dap");
   assert.equal(summary?.ideSessionId, undefined);
 });
 
@@ -1163,7 +1155,7 @@ test("a revoked nested IDE command error is ignored until an ordinary correlated
   }
 
   const started = await pending;
-  assert.equal(started.ideSessionId, "deep-safe-start-session");
+  assert.equal((started.target as AnyRecord).ideSessionId, "deep-safe-start-session");
   assert.equal(manager.sessions.sessions.size, 1);
 });
 
@@ -1223,7 +1215,7 @@ test("a revoked scalar IDE session id is ignored before start-wait registry look
   }
 
   const started = await pending;
-  assert.equal(started.ideSessionId, "scalar-recovery-session");
+  assert.equal((started.target as AnyRecord).ideSessionId, "scalar-recovery-session");
   assert.notEqual(started.sessionId, record.sessionId);
   assert.equal(record.state, "paused");
 });
@@ -1356,14 +1348,8 @@ test("cyclic and bounded bridge payloads are ignored while ordinary nested JSON 
   for (const [index, response] of responses.entries()) {
     const configuration = (response.configurations as AnyRecord[])[0];
     assert.equal(configuration?.name, `Nested configuration ${index}`);
-    const options = configuration?.options as AnyRecord;
-    const runPoint = (response.runPoints as AnyRecord[])[0];
-    assert.ok(runPoint);
-    assert.equal(Object.getPrototypeOf(options), Object.prototype);
-    assert.equal((options.modes as AnyRecord[])[1]?.retry, false);
-    assert.equal(Object.getPrototypeOf(runPoint), Object.prototype);
-    assert.equal(Object.getPrototypeOf(runPoint.metadata), Object.prototype);
-    assert.equal((runPoint.metadata as AnyRecord).tags?.[1], "json");
+    assert.equal("options" in (configuration ?? {}), false, "provider metadata is diagnostic-only");
+    assert.equal("runPoints" in response, false, "a runnable point without a source path is not reusable");
   }
 });
 
@@ -1418,7 +1404,7 @@ test("plain object and array IDE start IDs are ignored before registry lookup", 
   }
 
   const started = await pending;
-  assert.equal(started.ideSessionId, "scalar-safe-start-session");
+  assert.equal((started.target as AnyRecord).ideSessionId, "scalar-safe-start-session");
 });
 
 test("IDE start errors safely fall back for nested scalars and preserve normal strings", async () => {
@@ -1608,7 +1594,7 @@ test("IDE breakpoint snapshots normalize malformed IDs, skip invalid entries, an
 
   const response = await pending;
   assert.deepEqual(
-    (response.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.breakpointId),
+    (response.breakpoints as AnyRecord[]).map((breakpoint) => breakpoint.id),
     [
       "ide-client-pending:ide_bp_0",
       "ide-client-pending:ide_bp_4",
@@ -1681,7 +1667,7 @@ test("adopted IDE session breakpoint snapshots normalize hostile entries and ret
     }
   });
   const response = await pending;
-  assert.deepEqual((response.breakpoints as AnyRecord[]).map((item) => item.breakpointId), ["ide_bp_3", "provider-valid-id"]);
+  assert.deepEqual((response.breakpoints as AnyRecord[]).map((item) => item.id), ["ide_bp_3", "provider-valid-id"]);
 });
 
 test("adopted IDE provider ignores an accessor bridge envelope before a valid breakpoint response", async () => {
@@ -1719,7 +1705,7 @@ test("adopted IDE provider ignores an accessor bridge envelope before a valid br
   });
 
   const response = await pending;
-  assert.deepEqual((response.breakpoints as AnyRecord[]).map((item) => item.breakpointId), ["later-valid-breakpoint"]);
+  assert.deepEqual((response.breakpoints as AnyRecord[]).map((item) => item.id), ["later-valid-breakpoint"]);
 });
 
 test("adopted IDE session set breakpoint never returns NaN from hostile adapter IDs", async () => {
@@ -1871,9 +1857,9 @@ test("adopted IDE breakpoint snapshots never truthify malformed boolean fields",
   const [breakpoint] = response.breakpoints as AnyRecord[];
   assert.ok(breakpoint);
   assert.equal(breakpoint.enabled, false);
-  assert.equal(breakpoint.temporary, false);
-  assert.equal(breakpoint.isLogMessage, false);
-  assert.equal(breakpoint.isLogStack, false);
+  assert.equal("temporary" in breakpoint, false);
+  assert.equal("isLogMessage" in breakpoint, false);
+  assert.equal("isLogStack" in breakpoint, false);
   assert.equal(breakpoint.verified, false);
 });
 
@@ -1984,7 +1970,7 @@ test("IDE debug start correlates session identity from the trusted bridge envelo
   });
 
   assert.equal(started.startMode, "ide");
-  assert.equal(started.ideSessionId, "trusted-envelope-session");
+  assert.equal((started.target as AnyRecord).ideSessionId, "trusted-envelope-session");
   assert.ok(manager.sessions.get(String(started.sessionId)).provider instanceof IdeRuntimeProvider);
 });
 
@@ -2194,7 +2180,7 @@ test("a custom DAP provider owns direct reference inspection even with a same-id
 
   const result = await manager.bpDebugValue({ sessionId, ref: 7 });
 
-  assert.deepEqual(result.result, { source: "custom", variablesReference: 7 });
+  assert.equal((result.value as AnyRecord).name, "value");
   assert.equal(providerInspections, 1);
   assert.equal(mirrorVariables, 0);
 });
@@ -2254,7 +2240,7 @@ test("live DAP kind overrides a stale IDE compatibility kind for policy updates 
   assert.equal(breakpointTraffic, 1);
 
   const status = await manager.bpDebugStatus({ detail: "diagnostic" });
-  assert.equal((status.sessions as AnyRecord[])[0]?.providerKind, "dap");
+  assert.equal(((status.diagnostics as AnyRecord).providerSessions as AnyRecord[])[0]?.providerKind, "dap");
 });
 
 function emitIdeLifecycle(
@@ -2385,9 +2371,9 @@ test("status hides association-invalid records and selects a valid associated se
   const status = await manager.bpDebugStatus({ detail: "diagnostic" });
   const sessions = status.sessions as AnyRecord[];
 
-  assert.deepEqual(sessions.map((session) => session.sessionId), [validProvider.sessionId]);
+  assert.deepEqual(sessions.map((session) => session.sessionId).filter(Boolean), [validProvider.sessionId]);
   assert.equal(status.activeSessionId, validProvider.sessionId);
-  assert.equal(sessions[0]?.providerKind, "dap");
+  assert.equal(((status.diagnostics as AnyRecord).providerSessions as AnyRecord[])[0]?.providerKind, "dap");
 });
 
 test("a correctly associated IDE provider tracks matching resumed and terminated lifecycle events", async () => {

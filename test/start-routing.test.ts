@@ -262,7 +262,7 @@ test("remote IDE launch ignores anonymous and wrong-origin lifecycle events", as
 
   const response = await manager.bpDebugStart({ filePath: "src/serve.ts", line: 1, timeout: 100 });
 
-  assert.equal(response.ideSessionId, "trusted-session");
+  assert.equal((response.target as AnyRecord).ideSessionId, "trusted-session");
 });
 
 test("failed remote IDE launch dispatch removes every start waiter", async () => {
@@ -343,6 +343,6 @@ test("omitted mode with ideSessionId still adopts the matching IDE session", asy
 
   assert.equal(response.error, undefined);
   assert.equal(response.startMode, "ide");
-  assert.equal(response.ideSessionId, "idea_existing_session");
+  assert.equal((response.target as AnyRecord).ideSessionId, "idea_existing_session");
   assert.equal(bridge.sent.some((message) => message.type === IdeMessageTypes.AGENT_START_DEBUG), false);
 });
