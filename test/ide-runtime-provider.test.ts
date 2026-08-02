@@ -125,7 +125,8 @@ class FakeIdeBridge extends EventEmitter {
               path: message.path,
               oldValue: "\"Alan Turing\"",
               newValue: message.newValue,
-              applied: true
+              applied: true,
+              result: { value: { valuePreview: "Katherine Johnson" } }
             }
           }
         });
@@ -249,9 +250,10 @@ const setValue = await provider.setVariable?.({ path: ["name"], newValue: "\"Kat
 assert.deepEqual(setValue, {
   path: ["name"],
   oldValue: "\"Alan Turing\"",
-  newValue: "\"Katherine Johnson\"",
+  newValue: "Katherine Johnson",
   applied: true,
-  verified: false,
+  verified: true,
+  result: { value: { valuePreview: "Katherine Johnson" } },
   mutationMode: "evaluateAssignment"
 });
 

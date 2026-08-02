@@ -40,6 +40,58 @@ export interface AgentValueProjectionOptions {
 }
 
 const providerFrameNames = new Set(["JavaStackFrame", "HiddenStackFramesItem", "XStackFrame"]);
+const diagnosticLimits = Object.freeze({
+  depth: 8,
+  items: 20,
+  keys: 20,
+  nodes: 200,
+  string: 200
+});
+
+function boundedDiagnostic(
+  value: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+  budget = { remaining: diagnosticLimits.nodes }
+): unknown {
+  if (budget.remaining <= 0) return "[truncated]";
+  budget.remaining -= 1;
+  if (value === undefined || typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+    return undefined;
+  }
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "string") return value.slice(0, diagnosticLimits.string);
+  if (depth >= diagnosticLimits.depth) return "[truncated]";
+  if (typeof value !== "object" || seen.has(value)) return "[circular]";
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const result: unknown[] = [];
+      for (const item of value.slice(0, diagnosticLimits.items)) {
+        const child = boundedDiagnostic(item, depth + 1, seen, budget);
+        if (child !== undefined) result.push(child);
+      }
+      return result;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return `[${value.constructor?.name ?? "object"}]`;
+    const result: AnyRecord = {};
+    for (const key of Object.keys(value).slice(0, diagnosticLimits.keys)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) continue;
+      const child = boundedDiagnostic(descriptor.value, depth + 1, seen, budget);
+      if (child !== undefined) result[key] = child;
+    }
+    return result;
+  } catch {
+    return "[unavailable]";
+  } finally {
+    seen.delete(value);
+  }
+}
 
 export class AgentDebugPresenter {
   readonly #workspaceRoot: string;
@@ -137,7 +189,7 @@ export class AgentDebugPresenter {
 
   withDiagnostics<T extends AnyRecord>(compact: T, diagnostics: AnyRecord): T {
     if (this.#detail !== "diagnostic") return compact;
-    return { ...compact, diagnostics: structuredClone(diagnostics) };
+    return { ...compact, diagnostics: boundedDiagnostic(diagnostics) as AnyRecord };
   }
 
   #publicPath(rawPath: string): string {

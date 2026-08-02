@@ -684,8 +684,10 @@ export class DebugSessionManager {
     });
 
     const pauseId = this.#currentPauseId(session, normalized.pauseId);
+    let semanticName: string | undefined;
     if (normalized.handle) {
       const target = this.#agentHandles.resolve(session.sessionId, pauseId, normalized.handle);
+      semanticName = target.name;
       normalized.path = target.path;
       if (this.#isExpandableProviderRef(target.providerRef)) {
         normalized.ref = target.providerRef;
@@ -710,7 +712,7 @@ export class DebugSessionManager {
         });
         const serializer = new VariableSerializer(dap, limits, { objectFields: normalized.expand ?? "deep" });
         const items = await serializer.serializeVariableNodes(variables);
-        const node = this.#agentExpandedReferenceNode(normalized, items);
+        const node = this.#agentExpandedReferenceNode(normalized, items, semanticName);
         return ok(session.sessionId, {
           value: this.#agentPresenter(session, normalized, pauseId).value(node, this.#agentValueOptions(normalized, 1))
         }, auditId);
@@ -725,7 +727,7 @@ export class DebugSessionManager {
         normalized.path ?? [],
         normalized.ref!
       );
-      const node = this.#agentExpandedReferenceNode(normalized, items);
+      const node = this.#agentExpandedReferenceNode(normalized, items, semanticName);
       return ok(session.sessionId, {
         value: this.#agentPresenter(session, normalized, pauseId).value(node, this.#agentValueOptions(normalized, 1))
       }, auditId);
@@ -766,7 +768,7 @@ export class DebugSessionManager {
     if (normalized.handle) {
       const target = this.#agentHandles.resolve(session.sessionId, pauseId, normalized.handle);
       normalized.path = target.path;
-      if (this.#isExpandableProviderRef(target.providerRef)) {
+      if ((!target.path || target.path.length === 0) && this.#isExpandableProviderRef(target.providerRef)) {
         normalized.ref = target.providerRef;
         normalized.variablesReference = target.providerRef;
       } else {
@@ -2528,10 +2530,15 @@ export class DebugSessionManager {
     return presenter.withDiagnostics(compact, { providerFrame: view });
   }
 
-  #agentExpandedReferenceNode(args: DebugToolArgs, children: VariableNode[]): VariableNode {
+  #agentExpandedReferenceNode(
+    args: DebugToolArgs,
+    children: VariableNode[],
+    semanticName?: string
+  ): VariableNode {
+    const name = semanticName ?? args.path?.at(-1) ?? args.handle ?? "value";
     return {
-      name: String(args.handle ?? args.path?.at(-1) ?? "value"),
-      label: String(args.handle ?? args.path?.at(-1) ?? "value"),
+      name: String(name),
+      label: String(name),
       kind: "object",
       summary: children.length ? `${children.length} values` : "empty",
       path: args.path,
@@ -2663,9 +2670,10 @@ export class DebugSessionManager {
     const raw = this.#safeOwnDataRecord(value);
     if (!raw) return null;
     const type = typeof raw.type === "string" ? raw.type : "line";
+    if (type !== "line") return null;
     const file = raw.file ?? raw.filePath;
     const line = raw.line;
-    if (type === "line" && (typeof file !== "string" || typeof line !== "number")) return null;
+    if (typeof file !== "string" || typeof line !== "number") return null;
     const id = this.#decodedBridgeOpaqueId(raw.id)
       ?? this.#decodedBridgeOpaqueId(raw.breakpointId)
       ?? this.#decodedBridgeOpaqueId(raw.ideBreakpointId)
@@ -3037,7 +3045,7 @@ export class DebugSessionManager {
       startMode,
       ...(Object.keys(target).length ? { target } : {})
     };
-    return presenter.withDiagnostics(compact, { session: this.#sessionSummary(session, true), arguments: args });
+    return presenter.withDiagnostics(compact, { session: this.#sessionSummary(session, true) });
   }
 
   async #cleanupSession(

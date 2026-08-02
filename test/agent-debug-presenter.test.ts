@@ -133,3 +133,26 @@ test("semantic presenter removes provider metadata and groups scopes", () => {
     }]
   });
 });
+
+test("diagnostic projection omits undefined values and applies fixed bounds", () => {
+  const presenter = new AgentDebugPresenter({
+    workspaceRoot: "/workspace/demo",
+    sessionId: "session-a",
+    pauseId: 3,
+    handles: new AgentHandleRegistry(),
+    detail: "diagnostic"
+  });
+
+  const projected = presenter.withDiagnostics({ state: "running" }, {
+    provider: {
+      absent: undefined,
+      text: "x".repeat(500),
+      items: Array.from({ length: 30 }, (_, index) => index)
+    }
+  });
+
+  assert.equal(JSON.stringify(projected).includes("undefined"), false);
+  assert.equal(((projected.diagnostics as any).provider.text as string).length, 200);
+  assert.equal(((projected.diagnostics as any).provider.items as unknown[]).length, 20);
+  assert.equal("absent" in (projected.diagnostics as any).provider, false);
+});

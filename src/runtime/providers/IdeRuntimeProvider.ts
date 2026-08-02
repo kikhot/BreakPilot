@@ -472,10 +472,12 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       frameIndex: args.frameIndex,
       threadId: args.threadId
     }, IdeMessageTypes.AGENT_SET_VARIABLE);
+    const observedValue = this.#assignmentResultValue(result.result);
     return {
       ...result,
+      ...(observedValue !== undefined ? { newValue: observedValue } : {}),
       applied: result.applied !== false,
-      verified: false,
+      verified: observedValue !== undefined,
       mutationMode: "evaluateAssignment"
     };
   }
@@ -954,6 +956,17 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
     return normalized === "collecting data..." || normalized === "collecting data";
   }
 
+  #assignmentResultValue(value: unknown): string | number | boolean | null | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const result = value as AnyRecord;
+    const node = result.value;
+    if (!node || typeof node !== "object" || Array.isArray(node)) return undefined;
+    const raw = (node as AnyRecord).valuePreview ?? (node as AnyRecord).value;
+    return raw === null || typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean"
+      ? raw
+      : undefined;
+  }
+
   #breakpointFromIde(value: unknown, index: number): BreakpointRecord | null {
     try {
       if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -961,7 +974,8 @@ export class IdeRuntimeProvider implements RuntimeDebugProvider {
       const file = raw.file ?? raw.filePath;
       const line = raw.line;
       const type = typeof raw.type === "string" ? raw.type : "line";
-      if (type === "line" && (typeof file !== "string" || typeof line !== "number")) return null;
+      if (type !== "line") return null;
+      if (typeof file !== "string" || typeof line !== "number") return null;
       const id = this.#opaqueId(raw.id) ?? this.#opaqueId(raw.breakpointId) ?? this.#opaqueId(raw.ideBreakpointId) ?? `ide_bp_${index}`;
       return {
       id,

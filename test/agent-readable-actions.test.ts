@@ -184,6 +184,8 @@ test("mutation, evaluation, stepping, run-to-line, events, and breakpoints use c
     applied: true,
     verified: true
   });
+  const expanded = await manager.bpDebugValue({ sessionId: "actions", handle });
+  assert.equal((expanded.value as { name: string }).name, "count");
   assert.deepEqual(await manager.bpDebugEval({ sessionId: "actions", expression: "6 * 7" }), {
     expression: "6 * 7",
     value: 42

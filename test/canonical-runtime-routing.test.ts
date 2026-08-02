@@ -1586,6 +1586,11 @@ test("IDE breakpoint snapshots normalize malformed IDs, skip invalid entries, an
             ideBreakpointId: "ide-only-breakpoint-id",
             file: `${policy.workspace.root}/ide-only-id.ts`,
             line: 22
+          },
+          {
+            id: "exception-breakpoint",
+            type: "exception",
+            enabled: false
           }
         ]
       }
@@ -1662,7 +1667,8 @@ test("adopted IDE session breakpoint snapshots normalize hostile entries and ret
       breakpoints: [
         null, [], "bad",
         { id: {}, breakpointId: [], ideBreakpointId: {}, file: "/workspace/Fallback.java", line: 8 },
-        { id: "provider-valid-id", ideBreakpointId: "provider-valid-ide-id", file: "/workspace/Valid.java", line: 9 }
+        { id: "provider-valid-id", ideBreakpointId: "provider-valid-ide-id", file: "/workspace/Valid.java", line: 9 },
+        { id: "provider-exception", type: "exception", enabled: false }
       ]
     }
   });
