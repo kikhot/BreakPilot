@@ -3,7 +3,11 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { URL } from "node:url";
 
-import { createMcpHandler, type McpHttpHandler } from "@modelcontextprotocol/server";
+import {
+  classifyInboundRequest,
+  createMcpHandler,
+  type McpHttpHandler
+} from "@modelcontextprotocol/server";
 import { toNodeHandler, type NodeMcpRequestHandler } from "@modelcontextprotocol/node";
 
 import { createBreakPilotMcpServer } from "../mcp/serverFactory.ts";
@@ -279,12 +283,22 @@ async function missingModernProtocolVersionResponse(
       return undefined;
     }
   }
-  if (!hasModernEnvelopeClaim(body)) return undefined;
+  const classification = classifyInboundRequest({
+    httpMethod: request.method,
+    mcpMethodHeader: request.headers.get("mcp-method") ?? undefined,
+    mcpNameHeader: request.headers.get("mcp-name") ?? undefined,
+    body
+  });
+  if (
+    classification.kind !== "modern" ||
+    classification.messageKind !== "request" ||
+    classification.classification.revision !== "2026-07-28"
+  ) {
+    return undefined;
+  }
 
-  const message = body as { id?: unknown; params?: { _meta?: Record<string, unknown> } };
-  const claimedVersion = message.params?._meta?.["io.modelcontextprotocol/protocolVersion"];
-  const id = typeof message.id === "string" || typeof message.id === "number" ? message.id : null;
-  const bodyDescription = `the body envelope names protocol version ${String(claimedVersion)} but the required MCP-Protocol-Version header is absent`;
+  const id = classification.message.id;
+  const bodyDescription = "the body envelope names protocol version 2026-07-28 but the required MCP-Protocol-Version header is absent";
   return Response.json({
     jsonrpc: "2.0",
     error: {
@@ -294,13 +308,4 @@ async function missingModernProtocolVersionResponse(
     },
     id
   }, { status: 400 });
-}
-
-function hasModernEnvelopeClaim(body: unknown): boolean {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
-  const params = (body as { params?: unknown }).params;
-  if (!params || typeof params !== "object" || Array.isArray(params)) return false;
-  const meta = (params as { _meta?: unknown })._meta;
-  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
-  return Object.hasOwn(meta, "io.modelcontextprotocol/protocolVersion");
 }

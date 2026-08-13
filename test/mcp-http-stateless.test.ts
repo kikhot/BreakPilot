@@ -206,6 +206,63 @@ test("modern raw requests preserve SDK protocol boundary validation", async () =
   });
 });
 
+test("missing-version guard preserves the SDK malformed-envelope error", async () => {
+  await withHub(async (_hub, handle) => {
+    const malformedEnvelope = modernRequest("tools/list");
+    const malformedEnvelopeHeaders = new Headers(malformedEnvelope.headers);
+    malformedEnvelopeHeaders.delete("mcp-protocol-version");
+    const malformedEnvelopeBody = JSON.parse(String(malformedEnvelope.body)) as {
+      params: { _meta: Record<string, unknown> };
+    };
+    malformedEnvelopeBody.params._meta["io.modelcontextprotocol/protocolVersion"] = null;
+    await assertJsonRpcError(await fetch(`${handle.url}/mcp`, {
+      ...malformedEnvelope,
+      headers: malformedEnvelopeHeaders,
+      body: JSON.stringify(malformedEnvelopeBody)
+    }), 400, -32602);
+  });
+});
+
+test("missing-version guard preserves the SDK invalid JSON-RPC shape error", async () => {
+  await withHub(async (_hub, handle) => {
+    await assertJsonRpcError(await fetch(`${handle.url}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "mcp-method": "tools/list"
+      },
+      body: JSON.stringify({
+        id: 2,
+        method: "tools/list",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { name: "invalid-shape-test", version: "1.0.0" },
+            "io.modelcontextprotocol/clientCapabilities": {}
+          }
+        }
+      })
+    }), 400, -32600);
+  });
+});
+
+test("missing-version guard preserves the SDK unsupported-revision error", async () => {
+  await withHub(async (_hub, handle) => {
+    const unsupported = modernRequest("tools/list");
+    const unsupportedHeaders = new Headers(unsupported.headers);
+    unsupportedHeaders.delete("mcp-protocol-version");
+    const unsupportedBody = JSON.parse(String(unsupported.body)) as {
+      params: { _meta: Record<string, unknown> };
+    };
+    unsupportedBody.params._meta["io.modelcontextprotocol/protocolVersion"] = "2026-08-01";
+    await assertJsonRpcError(await fetch(`${handle.url}/mcp`, {
+      ...unsupported,
+      headers: unsupportedHeaders,
+      body: JSON.stringify(unsupportedBody)
+    }), 400, -32022);
+  });
+});
+
 test("Hub status advertises stateless MCP endpoints and protocol eras", async () => {
   await withHub(async (hub, handle) => {
     assert.deepEqual(hub.status(), {
