@@ -284,14 +284,33 @@ breakpilot mcp serve
 
 MCP stdio proxies to the local BreakPilot hub. If the hub is not already
 running, the stdio process starts one in-process and exits it when stdin closes
-or the client sends SIGTERM.
+or the client sends SIGTERM. The recommended `breakpilot mcp serve` integration
+negotiates modern `2026-07-28` and compatible 2025-era clients through the same
+control plane.
 
-For manual CLI, scripts, Streamable HTTP, SSE, or IDE Bridge work, start the
+For manual CLI, scripts, Streamable HTTP, or IDE Bridge work, start the
 hub explicitly:
 
 ```bash
 breakpilot serve
 ```
 
-The hub listens on `127.0.0.1:57987` by default and exposes `/stream`, `/sse`,
-`/message`, `/bridge`, and `/status`.
+The hub listens on loopback at `127.0.0.1:57987` by default:
+
+```text
+MCP HTTP: http://127.0.0.1:57987/mcp
+Compatibility alias: http://127.0.0.1:57987/stream
+Transport mode: stateless for modern 2026-07-28 and compatible 2025-era clients
+```
+
+`/mcp` is canonical. `/stream` reaches the same stateless handler as a URL
+compatibility alias; it does not preserve the old sessionful HTTP+SSE wire
+semantics. 2025-era compatibility is enabled by default, and clients neither
+receive nor need `Mcp-Session-Id`. The former `/sse` and `/message` routes were
+removed.
+
+A `sessionId` supplied to a `bp_debug_*` tool is durable BreakPilot debugger
+workflow state, deliberately separate from MCP transport state. It remains
+usable across independent HTTP requests. The hub also exposes `/bridge` and
+`/status`, stays loopback-only by default, and validates local Host and Origin
+values.

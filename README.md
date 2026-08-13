@@ -3,7 +3,7 @@
 BreakPilot is an Agent Runtime Debugger for AI-callable collaborative runtime debugging. It combines:
 
 - a shared control plane used by MCP stdio, HTTP, and CLI flows;
-- a minimal MCP stdio adapter;
+- a shared SDK-backed MCP server for stdio and stateless HTTP;
 - an optional local HTTP control API for daemon-backed CLI usage;
 - a Debug Adapter Protocol client;
 - session, breakpoint, snapshot, evaluate, audit, and policy modules;
@@ -32,17 +32,34 @@ breakpilot ide adopt --ide-session idea_ab12 --pretty
 breakpilot ide context --ide-session idea_ab12 --pretty
 ```
 
-For MCP stdio integration:
+For MCP integration, prefer stdio:
 
 ```bash
 breakpilot mcp serve
 ```
 
-`breakpilot serve` starts the single-port local hub on `127.0.0.1:57987`.
-The same port serves MCP Streamable HTTP at `/stream`, legacy SSE at `/sse`,
-and the IDE bridge WebSocket at `/bridge`. `breakpilot mcp serve` is a stdio
-MCP proxy that connects to the hub and starts an in-process hub if one is not
-already available.
+`breakpilot mcp serve` negotiates modern `2026-07-28` and compatible 2025-era
+clients through the same control plane. It connects to the local hub and starts
+an in-process hub if one is not already available.
+
+`breakpilot serve` starts the loopback-only local hub on `127.0.0.1:57987`:
+
+```text
+MCP HTTP: http://127.0.0.1:57987/mcp
+Compatibility alias: http://127.0.0.1:57987/stream
+Transport mode: stateless for modern 2026-07-28 and compatible 2025-era clients
+```
+
+`/mcp` is canonical. `/stream` is a URL compatibility alias for the same
+stateless handler, not the former sessionful HTTP+SSE transport. 2025-era
+compatibility is enabled by default, and clients neither receive nor need
+`Mcp-Session-Id`. The old `/sse` and `/message` routes were removed.
+
+An explicit `sessionId` passed to `bp_debug_*` tools is durable BreakPilot
+debugger workflow state, separate from MCP transport state, and remains usable
+across independent HTTP requests. The hub also serves the IDE bridge WebSocket
+at `/bridge`; it binds to loopback by default and validates local Host and
+Origin values.
 
 After `npm run build`, the compiled entrypoints are also available:
 

@@ -13,7 +13,13 @@ agents:
       default_control_url: "http://127.0.0.1:57987"
     instructions: |
       Use BreakPilot when runtime facts are needed to resolve a coding task.
-      Prefer MCP tools over CLI. MCP stdio proxies to the local hub; the hub also exposes Streamable HTTP at /stream, legacy SSE at /sse, and the IDE bridge at /bridge.
+      Prefer MCP tools over CLI, and use the recommended stdio integration: breakpilot mcp serve. Stdio negotiates modern 2026-07-28 and compatible 2025-era clients through the same control plane.
+      MCP HTTP: http://127.0.0.1:57987/mcp
+      Compatibility alias: http://127.0.0.1:57987/stream
+      Transport mode: stateless for modern 2026-07-28 and compatible 2025-era clients
+      /mcp is canonical. /stream is the same stateless handler exposed as a URL compatibility alias, not the former sessionful HTTP+SSE wire transport. 2025-era compatibility is enabled by default; clients neither receive nor need Mcp-Session-Id. The removed /sse and /message routes are not supported.
+      A bp_debug_* sessionId is durable BreakPilot debugger workflow state, not MCP transport state, and remains usable across independent HTTP requests.
+      The hub is loopback-only by default, validates local Host and Origin values, and also exposes the IDE bridge at /bridge.
       First use bp_debug_start to attach, launch, or adopt an IDE session, set minimal breakpoints with bp_debug_set_breakpoint, wait with bp_debug_control(action="wait"), then inspect bp_debug_frame.
       Prefer bp_debug_value for targeted expansion. Use bp_debug_eval with mode readonly by default.
       Record observed file, line, frame, variables, and eval results before bp_debug_control(action="resume") or bp_debug_control(action="disconnect").
