@@ -54,12 +54,10 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
         const policy = loadPolicy(policyPath);
         const hub = await ensureHub(policy.workspace.root);
         const gateway = new DaemonControlGateway(hub.url);
+        const stdio = startStdio(gateway);
         attachMcpCleanup({
-          cleanup: async (reason) => {
-            if (hub.owned) await hub.handle?.close().catch(() => undefined);
-          }
+          cleanup: () => closeMcpResources(stdio, hub)
         });
-        startStdio(gateway);
       }
     );
     sub.demandCommand(1);
@@ -67,6 +65,14 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
   });
 
   return y;
+}
+
+export async function closeMcpResources(
+  stdio: Pick<ReturnType<typeof startStdio>, "close">,
+  hub: { owned: boolean; handle?: Pick<HubServerHandle, "close"> }
+): Promise<void> {
+  await stdio.close().catch(() => undefined);
+  if (hub.owned) await hub.handle?.close().catch(() => undefined);
 }
 
 async function ensureHub(defaultProjectPath: string): Promise<{ url: string; owned: boolean; handle?: HubServerHandle }> {
@@ -94,11 +100,10 @@ async function isHealthyHub(url: string): Promise<boolean> {
 }
 
 function attachMcpCleanup(options: { cleanup(reason: string): Promise<void> }): void {
-  let cleaned = false;
-  const cleanupOnce = async (reason: string): Promise<void> => {
-    if (cleaned) return;
-    cleaned = true;
-    await options.cleanup(reason).catch(() => undefined);
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanupOnce = (reason: string): Promise<void> => {
+    cleanupPromise ??= options.cleanup(reason).catch(() => undefined);
+    return cleanupPromise;
   };
   const cleanupAndExit = (code: number, reason: string): void => {
     void cleanupOnce(reason).finally(() => process.exit(code));
