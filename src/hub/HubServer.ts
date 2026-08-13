@@ -6,6 +6,10 @@ import { URL } from "node:url";
 import {
   classifyInboundRequest,
   createMcpHandler,
+  localhostAllowedHostnames,
+  localhostAllowedOrigins,
+  validateHostHeader,
+  validateOriginHeader,
   type McpHttpHandler
 } from "@modelcontextprotocol/server";
 import {
@@ -28,6 +32,9 @@ import { ProjectRuntimeRegistry } from "./ProjectRuntimeRegistry.ts";
 export const DEFAULT_HUB_HOST = "127.0.0.1";
 export const DEFAULT_HUB_PORT = 57987;
 export const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+const LOCALHOST_HOSTNAMES = localhostAllowedHostnames();
+const LOCALHOST_ORIGINS = localhostAllowedOrigins();
 
 export interface HubServerOptions {
   host?: string;
@@ -107,6 +114,12 @@ export class BreakPilotHub {
       void this.#handleRequest(req, res);
     });
     this.server.on("upgrade", (req: IncomingMessage, socket: Socket) => {
+      const hostValidation = validateHostHeader(req.headers.host, LOCALHOST_HOSTNAMES);
+      const originValidation = validateOriginHeader(req.headers.origin, LOCALHOST_ORIGINS);
+      if (!hostValidation.ok || !originValidation.ok) {
+        rejectUpgrade(socket);
+        return;
+      }
       const pathname = this.#pathname(req);
       if (pathname === "/bridge") {
         this.ideBridge.handleUpgrade(req, socket);
@@ -333,6 +346,13 @@ function closeNodeServer(server: Server | null): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
+}
+
+function rejectUpgrade(socket: Socket): void {
+  socket.end(
+    "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    () => socket.destroy()
+  );
 }
 
 function loopbackBindHost(host: string): string {

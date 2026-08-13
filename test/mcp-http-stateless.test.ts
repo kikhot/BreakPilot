@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
+import { createConnection } from "node:net";
 import test from "node:test";
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -111,6 +112,53 @@ function rawHttpPost(
     });
     request.on("error", reject);
     request.end(body);
+  });
+}
+
+function rawWebSocketUpgrade(
+  url: string,
+  headers: Record<string, string> = {}
+): Promise<number> {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: target.hostname, port: Number(target.port) });
+    let settled = false;
+    const finish = (error?: Error, status?: number): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(status ?? 0);
+    };
+    const timer = setTimeout(() => finish(new Error("Timed out waiting for WebSocket upgrade response.")), 2_000);
+    socket.once("error", (error) => finish(error));
+    socket.once("connect", () => {
+      const requestHeaders = {
+        Host: `${target.hostname}:${target.port}`,
+        Upgrade: "websocket",
+        Connection: "Upgrade",
+        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version": "13",
+        ...headers
+      };
+      socket.write([
+        `GET ${target.pathname} HTTP/1.1`,
+        ...Object.entries(requestHeaders).map(([name, value]) => `${name}: ${value}`),
+        "",
+        ""
+      ].join("\r\n"));
+    });
+    socket.once("data", (chunk) => {
+      const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(chunk.toString("utf8"))?.[1]);
+      if (status === 101) {
+        socket.once("close", () => finish(undefined, status));
+        socket.end(Buffer.from([0x88, 0x80, 0, 0, 0, 0]));
+        return;
+      }
+      socket.once("close", () => finish(undefined, status));
+      socket.end();
+    });
   });
 }
 
@@ -322,6 +370,26 @@ test("MCP routes reject non-local Host and Origin values before dispatch", async
     }
 
     assert.equal(hub.status().activeMcpRequests, 0);
+  });
+});
+
+test("Hub WebSocket upgrades enforce local Host and Origin", async (t) => {
+  await withHub(async (_hub, handle) => {
+    await t.test("accepts a local handshake without Origin", async () => {
+      assert.equal(await rawWebSocketUpgrade(`${handle.url}/bridge`), 101);
+    });
+
+    await t.test("rejects an attacker Host", async () => {
+      assert.equal(await rawWebSocketUpgrade(`${handle.url}/bridge`, {
+        Host: "attacker.example"
+      }), 403);
+    });
+
+    for (const origin of ["https://attacker.example", "null", "not an origin"]) {
+      await t.test(`rejects Origin ${origin}`, async () => {
+        assert.equal(await rawWebSocketUpgrade(`${handle.url}/bridge`, { Origin: origin }), 403);
+      });
+    }
   });
 });
 
