@@ -4,12 +4,6 @@ import type { AnyRecord } from "../types/json.ts";
 import { fail } from "../utils/errors.ts";
 import type { ProjectRuntimeRegistry } from "./ProjectRuntimeRegistry.ts";
 
-function firstNonblank(...values: unknown[]): string | undefined {
-  return values.find(
-    (value): value is string => typeof value === "string" && Boolean(value.trim())
-  );
-}
-
 export class HubControlGateway implements ControlGateway {
   private readonly projects: ProjectRuntimeRegistry;
   private readonly requestProjectPath?: string;
@@ -26,11 +20,13 @@ export class HubControlGateway implements ControlGateway {
   async callTool(name: string, args: AnyRecord = {}): Promise<ToolResponse> {
     try {
       const runtime = this.projects.resolveRuntime(args, this.requestProjectPath);
-      const explicit = firstNonblank(args.projectPath, args.workspace);
-      const routedArgs = {
-        ...args,
-        projectPath: explicit ?? runtime.policy.workspace.root
-      };
+      const hasProjectPath = Object.hasOwn(args, "projectPath");
+      const shouldInjectProjectPath =
+        !hasProjectPath ||
+        (typeof args.projectPath === "string" && !args.projectPath.trim());
+      const routedArgs = shouldInjectProjectPath
+        ? { ...args, projectPath: runtime.policy.workspace.root }
+        : args;
       return await runtime.router.callTool(name, routedArgs);
     } catch (error) {
       return fail(error, "hub");

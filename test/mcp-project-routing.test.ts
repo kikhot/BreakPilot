@@ -162,6 +162,22 @@ test("blank argument projectPath falls through to workspace and dispatches its c
   });
 });
 
+test("an invalid argument projectPath reaches schema validation instead of being replaced", async () => {
+  await withProjectFixture(async ({ handle, projectB, statusArgsB }) => {
+    const result = await withModernClient(`${handle.url}/mcp`, {}, async (client) => {
+      return await client.callTool({
+        name: "bp_debug_status",
+        arguments: { projectPath: 42, workspace: projectB }
+      });
+    });
+    const structured = result.structuredContent as ToolResponse;
+
+    assert.equal(result.isError, true);
+    assert.equal(structured.error?.code, "INVALID_ARGUMENT");
+    assert.equal(statusArgsB.length, 0);
+  });
+});
+
 test("a unique explicit debug session selects its project without a path selector", async () => {
   await withProjectFixture(async ({ handle, projectB, runtimeB }) => {
     const provider: RuntimeDebugProvider = {
