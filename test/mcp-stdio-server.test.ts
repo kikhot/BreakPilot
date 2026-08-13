@@ -3,7 +3,10 @@ import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
-import { closeMcpResources } from "../src/cli/commands/mcp.ts";
+import {
+  closeMcpResources,
+  createMcpCleanupCoordinator
+} from "../src/cli/commands/mcp.ts";
 import type { ControlGateway } from "../src/control/ControlGateway.ts";
 import { startStdio } from "../src/mcp/stdioServer.ts";
 import type { ToolDefinition, ToolResponse } from "../src/types/control.ts";
@@ -99,4 +102,45 @@ test("CLI resource cleanup closes stdio before an owned Hub", async () => {
     { owned: true, handle: { close: async () => { closed.push("hub"); } } }
   );
   assert.deepEqual(closed, ["stdio", "hub"]);
+});
+
+test("CLI resource cleanup continues to an owned Hub after stdio close rejects", async () => {
+  const closed: string[] = [];
+  await closeMcpResources(
+    {
+      close: async () => {
+        closed.push("stdio");
+        throw new Error("stdio close failed");
+      }
+    },
+    { owned: true, handle: { close: async () => { closed.push("hub"); } } }
+  );
+  assert.deepEqual(closed, ["stdio", "hub"]);
+});
+
+test("CLI cleanup races reuse one drain and exit only after it settles", async () => {
+  let releaseCleanup: (() => void) | undefined;
+  const cleanupGate = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  const cleanupReasons: string[] = [];
+  const exitCodes: number[] = [];
+  const coordinator = createMcpCleanupCoordinator(
+    async (reason) => {
+      cleanupReasons.push(reason);
+      await cleanupGate;
+    },
+    (code) => { exitCodes.push(code); }
+  );
+
+  const first = coordinator.cleanupAndExit(130, "sigint");
+  const second = coordinator.cleanupAndExit(0, "stdio_end");
+  assert.strictEqual(second, first);
+  assert.deepEqual(cleanupReasons, ["sigint"]);
+  assert.deepEqual(exitCodes, []);
+
+  releaseCleanup?.();
+  await Promise.all([first, second]);
+  assert.deepEqual(cleanupReasons, ["sigint"]);
+  assert.deepEqual(exitCodes, [130]);
 });

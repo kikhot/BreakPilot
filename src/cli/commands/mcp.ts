@@ -52,7 +52,8 @@ export function registerMcpCommands(y: Argv, ctx: CommandContext): Argv {
       async (argv) => {
         const policyPath = argv.policy as string | undefined;
         const policy = loadPolicy(policyPath);
-        const hub = await ensureHub(policy.workspace.root);
+        const hubPort = (argv["ide-bridge-port"] as number | undefined) ?? DEFAULT_HUB_PORT;
+        const hub = await ensureHub(policy.workspace.root, hubPort);
         const gateway = new DaemonControlGateway(hub.url);
         const stdio = startStdio(gateway);
         attachMcpCleanup({
@@ -75,12 +76,35 @@ export async function closeMcpResources(
   if (hub.owned) await hub.handle?.close().catch(() => undefined);
 }
 
-async function ensureHub(defaultProjectPath: string): Promise<{ url: string; owned: boolean; handle?: HubServerHandle }> {
-  const url = `http://${DEFAULT_HUB_HOST}:${DEFAULT_HUB_PORT}`;
+export function createMcpCleanupCoordinator(
+  cleanup: (reason: string) => Promise<void>,
+  exit: (code: number) => void
+): {
+  cleanupOnce(reason: string): Promise<void>;
+  cleanupAndExit(code: number, reason: string): Promise<void>;
+} {
+  let cleanupPromise: Promise<void> | undefined;
+  let exitPromise: Promise<void> | undefined;
+  const cleanupOnce = (reason: string): Promise<void> => {
+    cleanupPromise ??= cleanup(reason).catch(() => undefined);
+    return cleanupPromise;
+  };
+  const cleanupAndExit = (code: number, reason: string): Promise<void> => {
+    exitPromise ??= cleanupOnce(reason).finally(() => exit(code));
+    return exitPromise;
+  };
+  return { cleanupOnce, cleanupAndExit };
+}
+
+async function ensureHub(
+  defaultProjectPath: string,
+  port: number
+): Promise<{ url: string; owned: boolean; handle?: HubServerHandle }> {
+  const url = `http://${DEFAULT_HUB_HOST}:${port}`;
   if (await isHealthyHub(url)) return { url, owned: false };
   const handle = await startHub({
     host: DEFAULT_HUB_HOST,
-    port: DEFAULT_HUB_PORT,
+    port,
     defaultProjectPath,
     idleTimeoutMs: 0
   });
@@ -100,20 +124,13 @@ async function isHealthyHub(url: string): Promise<boolean> {
 }
 
 function attachMcpCleanup(options: { cleanup(reason: string): Promise<void> }): void {
-  let cleanupPromise: Promise<void> | undefined;
-  const cleanupOnce = (reason: string): Promise<void> => {
-    cleanupPromise ??= options.cleanup(reason).catch(() => undefined);
-    return cleanupPromise;
-  };
-  const cleanupAndExit = (code: number, reason: string): void => {
-    void cleanupOnce(reason).finally(() => process.exit(code));
-  };
+  const coordinator = createMcpCleanupCoordinator(options.cleanup, (code) => process.exit(code));
 
-  process.stdin.once("end", () => cleanupAndExit(0, "stdio_end"));
-  process.stdin.once("close", () => cleanupAndExit(0, "stdio_close"));
-  process.once("SIGINT", () => cleanupAndExit(130, "sigint"));
-  process.once("SIGTERM", () => cleanupAndExit(143, "sigterm"));
+  process.stdin.once("end", () => { void coordinator.cleanupAndExit(0, "stdio_end"); });
+  process.stdin.once("close", () => { void coordinator.cleanupAndExit(0, "stdio_close"); });
+  process.once("SIGINT", () => { void coordinator.cleanupAndExit(130, "sigint"); });
+  process.once("SIGTERM", () => { void coordinator.cleanupAndExit(143, "sigterm"); });
   process.once("beforeExit", () => {
-    void cleanupOnce("before_exit");
+    void coordinator.cleanupOnce("before_exit");
   });
 }

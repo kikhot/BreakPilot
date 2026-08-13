@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
+import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
-import { DEFAULT_HUB_HOST, DEFAULT_HUB_PORT } from "../src/hub/HubServer.ts";
+import { DEFAULT_HUB_HOST } from "../src/hub/HubServer.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
@@ -30,8 +31,17 @@ function makeWorkspace(): { root: string; policyPath: string } {
   return { root, policyPath };
 }
 
-function spawnMcp(policyPath: string): ChildProcessWithoutNullStreams {
-  return spawn(process.execPath, ["--experimental-strip-types", cliEntry, "mcp", "serve", "--policy", policyPath], {
+function spawnMcp(policyPath: string, hubPort: number): ChildProcessWithoutNullStreams {
+  return spawn(process.execPath, [
+    "--experimental-strip-types",
+    cliEntry,
+    "mcp",
+    "serve",
+    "--policy",
+    policyPath,
+    "--ide-bridge-port",
+    String(hubPort)
+  ], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"]
   });
@@ -39,6 +49,7 @@ function spawnMcp(policyPath: string): ChildProcessWithoutNullStreams {
 
 interface StdoutCollector {
   lines: string[];
+  flush(): string;
   waitForResponse(id: number, timeoutMs?: number): Promise<Record<string, unknown>>;
 }
 
@@ -58,6 +69,11 @@ function collectStdout(child: ChildProcessWithoutNullStreams): StdoutCollector {
 
   return {
     lines,
+    flush() {
+      const residual = buffer;
+      buffer = "";
+      return residual;
+    },
     waitForResponse(id, timeoutMs = 10000) {
       return new Promise((resolve, reject) => {
         const inspect = (): void => {
@@ -103,9 +119,24 @@ async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs = 10
   });
 }
 
-async function isHubRunning(): Promise<boolean> {
+async function reserveLoopbackPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, DEFAULT_HUB_HOST, () => resolve());
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+  assert.ok(port > 0);
+  return port;
+}
+
+async function isHubRunning(port: number): Promise<boolean> {
   try {
-    const response = await fetch(`http://${DEFAULT_HUB_HOST}:${DEFAULT_HUB_PORT}/status`, {
+    const response = await fetch(`http://${DEFAULT_HUB_HOST}:${port}/status`, {
       signal: AbortSignal.timeout(1_000)
     });
     await response.body?.cancel();
@@ -115,14 +146,11 @@ async function isHubRunning(): Promise<boolean> {
   }
 }
 
-async function assertOwnedHubClosed(wasRunning: boolean): Promise<void> {
-  if (!wasRunning) assert.equal(await isHubRunning(), false);
-}
-
 async function runRawLegacyLifecycle(): Promise<void> {
-  const hubWasRunning = await isHubRunning();
+  const hubPort = await reserveLoopbackPort();
+  assert.equal(await isHubRunning(hubPort), false);
   const { root, policyPath } = makeWorkspace();
-  const child = spawnMcp(policyPath);
+  const child = spawnMcp(policyPath, hubPort);
   const stdout = collectStdout(child);
   try {
     child.stdin.write(`${JSON.stringify({
@@ -144,6 +172,7 @@ async function runRawLegacyLifecycle(): Promise<void> {
     const tools = await stdout.waitForResponse(2) as { result?: { tools?: { name: string }[] } };
     assert.ok(tools.result?.tools?.some((tool) => tool.name === "bp_debug_start"));
     assert.equal(tools.result?.tools?.some((tool) => tool.name === "debug_launch"), false);
+    assert.equal(await isHubRunning(hubPort), true);
 
     child.stdin.write(`${JSON.stringify({
       jsonrpc: "2.0",
@@ -185,7 +214,7 @@ async function runRawLegacyLifecycle(): Promise<void> {
 
     child.stdin.end();
     assert.equal(await waitForExit(child), 0);
-    await assertOwnedHubClosed(hubWasRunning);
+    assert.equal(await isHubRunning(hubPort), false);
 
     const frames = stdout.lines.filter((line) => line.trim()).map((line) => JSON.parse(line) as {
       jsonrpc?: string;
@@ -193,6 +222,7 @@ async function runRawLegacyLifecycle(): Promise<void> {
     });
     assert.deepEqual(frames.map(({ id }) => id), [1, 2, 3, 4]);
     assert.ok(frames.every(({ jsonrpc }) => jsonrpc === "2.0"));
+    assert.equal(stdout.flush(), "");
   } finally {
     child.kill("SIGKILL");
     fs.rmSync(root, { recursive: true, force: true });
@@ -200,11 +230,21 @@ async function runRawLegacyLifecycle(): Promise<void> {
 }
 
 async function runModernSdkLifecycle(): Promise<void> {
-  const hubWasRunning = await isHubRunning();
+  const hubPort = await reserveLoopbackPort();
+  assert.equal(await isHubRunning(hubPort), false);
   const { root, policyPath } = makeWorkspace();
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["--experimental-strip-types", cliEntry, "mcp", "serve", "--policy", policyPath],
+    args: [
+      "--experimental-strip-types",
+      cliEntry,
+      "mcp",
+      "serve",
+      "--policy",
+      policyPath,
+      "--ide-bridge-port",
+      String(hubPort)
+    ],
     cwd: repoRoot,
     stderr: "pipe"
   });
@@ -221,6 +261,7 @@ async function runModernSdkLifecycle(): Promise<void> {
     assert.ok(transport.pid, `SDK did not retain the formal CLI process.${stderr ? ` stderr: ${stderr}` : ""}`);
     assert.equal(client.getProtocolEra(), "modern");
     assert.ok((await client.listTools()).tools.some(({ name }) => name === "bp_debug_start"));
+    assert.equal(await isHubRunning(hubPort), true);
     const result = await client.callTool({
       name: "bp_debug_status",
       arguments: { projectPath: root }
@@ -228,9 +269,12 @@ async function runModernSdkLifecycle(): Promise<void> {
     assert.equal(result.isError, false);
     assert.deepEqual((result.structuredContent as { sessions?: unknown[] }).sessions, []);
   } finally {
-    await client.close().catch(() => undefined);
-    await assertOwnedHubClosed(hubWasRunning);
-    fs.rmSync(root, { recursive: true, force: true });
+    try {
+      await client.close().catch(() => undefined);
+      assert.equal(await isHubRunning(hubPort), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   }
 }
 
