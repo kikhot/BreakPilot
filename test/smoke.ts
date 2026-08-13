@@ -39,9 +39,11 @@ assert.ok(runtime.router.listTools().some((tool) => tool.name === "bp_debug_cont
 assert.equal(runtime.router.listTools().some((tool) => tool.name === "debug_launch"), false);
 
 const frameTool = toolDefinitions.find((tool) => tool.name === "bp_debug_frame");
-assert.equal(frameTool?.inputSchema.properties?.expand?.default, "preview");
-assert.ok(frameTool?.inputSchema.properties?.depth);
-assert.ok(frameTool?.inputSchema.properties?.limit);
+assert.equal(frameTool?.inputSchema.properties?.expand, undefined);
+assert.equal(frameTool?.inputSchema.properties?.depth?.default, 0);
+assert.equal(frameTool?.inputSchema.properties?.limit?.default, 20);
+assert.equal(frameTool?.inputSchema.properties?.maxString?.default, 200);
+assert.equal(frameTool?.inputSchema.properties?.detail?.default, "compact");
 assert.ok(frameTool?.outputSchema);
 assert.ok(toolDefinitions.find((tool) => tool.name === "bp_debug_status")?.outputSchema);
 assert.equal(toolDefinitions.some((tool) => tool.name === "bp_debug_diagnostics"), false);
