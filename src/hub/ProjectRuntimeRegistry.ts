@@ -28,6 +28,12 @@ interface RegisteredProject {
   updatedAt: string;
 }
 
+function firstNonblank(...values: unknown[]): string | undefined {
+  return values.find(
+    (value): value is string => typeof value === "string" && Boolean(value.trim())
+  );
+}
+
 export class ProjectRuntimeRegistry {
   defaultProjectPath: string;
   ideBridge: IdeBridgeServer | null;
@@ -73,8 +79,8 @@ export class ProjectRuntimeRegistry {
   }
 
   resolveRuntime(args: AnyRecord = {}, mcpProjectPath?: string): RuntimeContext {
-    const explicit = args.projectPath ?? args.workspace ?? mcpProjectPath;
-    if (typeof explicit === "string" && explicit.trim()) return this.getOrCreate(explicit);
+    const explicit = firstNonblank(args.projectPath, args.workspace, mcpProjectPath);
+    if (explicit) return this.getOrCreate(explicit);
 
     if (typeof args.sessionId === "string" && args.sessionId) {
       const matches = [...this.runtimes.values()].filter((runtime) =>

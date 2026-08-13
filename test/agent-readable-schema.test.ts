@@ -7,7 +7,6 @@ import type { JsonSchema } from "../src/types/control.ts";
 import type { AnyRecord } from "../src/types/json.ts";
 
 const legacyAliases = new Set([
-  "workspace",
   "file",
   "timeoutMs",
   "maxDepth",

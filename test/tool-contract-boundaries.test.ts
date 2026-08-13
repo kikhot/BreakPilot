@@ -68,6 +68,24 @@ function assertNullableIntegerBoundary(
   }
 }
 
+const minimalValidArguments: Record<string, AnyRecord> = {
+  bp_debug_start: {},
+  bp_debug_run_configurations: {},
+  bp_debug_status: {},
+  bp_debug_control: { action: "pause" },
+  bp_debug_run_to_line: { filePath: "src/example.ts", line: 1 },
+  bp_debug_threads: {},
+  bp_debug_call_stack: {},
+  bp_debug_frame: {},
+  bp_debug_value: { path: ["answer"] },
+  bp_debug_set_value: { path: ["answer"], newValue: "43" },
+  bp_debug_eval: { expression: "answer" },
+  bp_debug_context: {},
+  bp_debug_set_breakpoint: { filePath: "src/example.ts", line: 1 },
+  bp_debug_list_breakpoints: {},
+  bp_debug_remove_breakpoint: { breakpointId: "bp_1" }
+};
+
 const fullCapabilities: RuntimeProviderCapabilities = {
   pause: "native",
   stepping: "native",
@@ -115,6 +133,53 @@ test("live language enums apply to the canonical language field without mutating
   const staticProperties = definition("bp_debug_start").inputSchema.properties as Record<string, JsonSchema>;
   assert.equal(staticProperties.language?.enum, undefined);
   assert.equal(staticProperties.lang, undefined);
+});
+
+test("all public tool schemas accept workspace wherever projectPath is accepted", () => {
+  assert.equal(toolDefinitions.length, 15);
+  assert.deepEqual(
+    [...toolDefinitions].map(({ name }) => name).sort(),
+    Object.keys(minimalValidArguments).sort()
+  );
+
+  for (const tool of toolDefinitions) {
+    const baseline = minimalValidArguments[tool.name];
+    assert.ok(baseline, `missing minimal valid arguments for ${tool.name}`);
+    const projectPathResult = validateToolInput(tool.inputSchema, {
+      ...baseline,
+      projectPath: "/tmp/project"
+    });
+    const workspaceResult = validateToolInput(tool.inputSchema, {
+      ...baseline,
+      workspace: "/tmp/project"
+    });
+    const unknownResult = validateToolInput(tool.inputSchema, {
+      ...baseline,
+      workspace: "/tmp/project",
+      unknownProjectSelector: true
+    });
+
+    assert.deepEqual(projectPathResult.errors, [], `${tool.name} must accept projectPath`);
+    assert.deepEqual(workspaceResult.errors, [], `${tool.name} must accept workspace`);
+    assert.ok(unknownResult.errors.length > 0, `${tool.name} must remain closed to unknown selectors`);
+  }
+});
+
+test("bp_debug_status dispatches when workspace selects the project", async () => {
+  const manager = new DebugSessionManager({ policy: loadPolicy("breakpilot.yaml") });
+  const calls: AnyRecord[] = [];
+  manager.bpDebugStatus = async (args) => {
+    calls.push(structuredClone(args ?? {}));
+    return { sessions: [], ideConnected: false, warnings: ["workspace-dispatched"] };
+  };
+  const router = new ToolRouter(manager);
+
+  const response = await router.callTool("bp_debug_status", { workspace: "/tmp/project" });
+
+  assert.equal(response.error, undefined);
+  assert.deepEqual(response.warnings, ["workspace-dispatched"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.workspace, "/tmp/project");
 });
 
 test("value, set-value, and remove selectors reject missing, empty, and mixed targets before dispatch", async () => {

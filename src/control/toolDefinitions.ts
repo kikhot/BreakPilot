@@ -13,6 +13,7 @@ const detail: JsonSchema = {
   default: "compact"
 };
 const projectPath: JsonSchema = { type: "string" };
+const workspace: JsonSchema = { type: "string" };
 const sessionId: JsonSchema = { type: "string" };
 const clientId: JsonSchema = { type: "string" };
 const ide: JsonSchema = { type: "string", enum: ["vscode", "idea"] };
@@ -40,7 +41,7 @@ function object(properties: Record<string, JsonSchema>, required: string[] = [],
   };
 }
 
-const routed = { projectPath, sessionId, detail };
+const routed = { projectPath, workspace, sessionId, detail };
 const selectedFrame = { ...routed, threadId, frameIndex, pauseId };
 const variableRead = {
   ...selectedFrame,
@@ -52,6 +53,7 @@ const variableRead = {
 
 const breakpointFields = {
   projectPath,
+  workspace,
   sessionId,
   clientId,
   ide,
@@ -78,6 +80,7 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Start, attach to, or adopt a debug session.",
     inputSchema: object({
       projectPath,
+      workspace,
       mode: { type: "string", enum: ["launch", "attach", "ide"] },
       language: { type: "string" },
       runConfigName: { type: "string" },
@@ -107,13 +110,13 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: "bp_debug_run_configurations",
     description: "List IDE run configurations or runnable source locations.",
-    inputSchema: object({ projectPath, clientId, ide, filePath, detail }),
+    inputSchema: object({ projectPath, workspace, clientId, ide, filePath, detail }),
     outputSchema: toolOutputSchemas.bp_debug_run_configurations
   },
   {
     name: "bp_debug_status",
     description: "Return de-duplicated debugger and IDE session status.",
-    inputSchema: object({ projectPath, clientId, detail }),
+    inputSchema: object({ projectPath, workspace, clientId, detail }),
     outputSchema: toolOutputSchemas.bp_debug_status
   },
   {
@@ -236,7 +239,7 @@ export const toolDefinitions: ToolDefinition[] = [
     name: "bp_debug_list_breakpoints",
     description: "List normalized source breakpoints.",
     inputSchema: object({
-      projectPath, sessionId, clientId, ide, filePath,
+      projectPath, workspace, sessionId, clientId, ide, filePath,
       owner: { type: "string", enum: ["agent", "user", "all"] },
       includeDisabled: { type: "boolean", default: true },
       detail
@@ -247,7 +250,7 @@ export const toolDefinitions: ToolDefinition[] = [
     name: "bp_debug_remove_breakpoint",
     description: "Remove a breakpoint by id or source location.",
     inputSchema: object({
-      projectPath, sessionId, clientId, ide,
+      projectPath, workspace, sessionId, clientId, ide,
       breakpointId: { type: "string" }, filePath, line,
       owner: { type: "string", enum: ["agent", "user", "all"] },
       detail
