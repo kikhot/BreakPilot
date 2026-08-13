@@ -8,8 +8,14 @@ import {
   createMcpHandler,
   type McpHttpHandler
 } from "@modelcontextprotocol/server";
-import { toNodeHandler, type NodeMcpRequestHandler } from "@modelcontextprotocol/node";
+import {
+  localhostHostValidation,
+  localhostOriginValidation,
+  toNodeHandler,
+  type NodeMcpRequestHandler
+} from "@modelcontextprotocol/node";
 
+import type { ControlGateway } from "../control/ControlGateway.ts";
 import { createBreakPilotMcpServer } from "../mcp/serverFactory.ts";
 import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
 import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
@@ -52,6 +58,12 @@ export class BreakPilotHub {
   idleTimer: NodeJS.Timeout | null;
   private readonly mcpHandler: McpHttpHandler;
   private readonly mcpNodeHandler: NodeMcpRequestHandler;
+  private readonly validateHost = localhostHostValidation();
+  private readonly validateOrigin = localhostOriginValidation();
+  private readonly mcpDispatches = new Set<Promise<void>>();
+  private readonly mcpToolCalls = new Set<Promise<ToolResponse>>();
+  private closing = false;
+  private closePromise: Promise<void> | null = null;
 
   constructor(options: HubServerOptions = {}) {
     this.host = options.host ?? DEFAULT_HUB_HOST;
@@ -71,7 +83,7 @@ export class BreakPilotHub {
     this.activeMcpRequests = 0;
     this.mcpHandler = requireModernProtocolVersionHeader(createMcpHandler(
       ({ requestInfo }) => createBreakPilotMcpServer(
-        new HubControlGateway(this.projects, projectHintFromRequest(requestInfo))
+        this.#mcpGateway(projectHintFromRequest(requestInfo))
       ),
       { legacy: "stateless", responseMode: "auto" }
     ));
@@ -88,7 +100,10 @@ export class BreakPilotHub {
   }
 
   async start(): Promise<HubServerHandle> {
+    this.host = loopbackBindHost(this.host);
+    this.ideBridge.host = this.host;
     this.server = http.createServer((req, res) => {
+      if (!this.validateHost(req, res) || !this.validateOrigin(req, res)) return;
       void this.#handleRequest(req, res);
     });
     this.server.on("upgrade", (req: IncomingMessage, socket: Socket) => {
@@ -105,24 +120,19 @@ export class BreakPilotHub {
       server: this.server,
       host: this.host,
       port: this.port,
-      url: `http://${this.host}:${this.port}`,
-      bridgeUrl: `ws://${this.host}:${this.port}/bridge`,
+      url: this.#url("http"),
+      bridgeUrl: `${this.#url("ws")}/bridge`,
       close: () => this.close()
     };
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
-    await this.mcpHandler.close().catch(() => undefined);
-    this.ideBridge.stop();
-    await this.projects.cleanupAll("hub_shutdown").catch(() => undefined);
-    const server = this.server;
-    this.server = null;
-    if (!server) return;
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
-    }).catch(() => undefined);
+    this.closePromise = this.#close();
+    return this.closePromise;
   }
 
   listTools(): ToolDefinition[] {
@@ -142,15 +152,15 @@ export class BreakPilotHub {
       server: "breakpilot-hub",
       host: this.host,
       port: this.port,
-      mcpUrl: `http://${this.host}:${this.port}/mcp`,
-      streamUrl: `http://${this.host}:${this.port}/stream`,
+      mcpUrl: `${this.#url("http")}/mcp`,
+      streamUrl: `${this.#url("http")}/stream`,
       mcpTransport: "stateless",
       mcpProtocolVersions: {
         modern: "2026-07-28",
         legacy: { min: "2024-10-07", max: "2025-11-25", mode: "stateless" }
       },
       activeMcpRequests: this.activeMcpRequests,
-      bridgeUrl: `ws://${this.host}:${this.port}/bridge`,
+      bridgeUrl: `${this.#url("ws")}/bridge`,
       projects: this.projects.listProjects(),
       ideBridge: this.ideBridge.status()
     };
@@ -181,7 +191,18 @@ export class BreakPilotHub {
         return;
       }
       if (pathname === "/mcp" || pathname === "/stream") {
-        await this.mcpNodeHandler(req, res);
+        if (this.closing) {
+          sendJson(res, 503, { error: { message: "BreakPilot Hub is shutting down." } });
+          return;
+        }
+        this.#beginMcpResponse(res);
+        const dispatch = this.mcpNodeHandler(req, res);
+        this.mcpDispatches.add(dispatch);
+        void dispatch.then(
+          () => this.#finishMcpDispatch(dispatch),
+          () => this.#finishMcpDispatch(dispatch)
+        );
+        await dispatch;
         return;
       }
       sendJson(res, 404, { error: { message: "Not found" } });
@@ -192,18 +213,84 @@ export class BreakPilotHub {
   }
 
   #pathname(req: IncomingMessage): string {
-    return new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`).pathname;
+    return new URL(req.url ?? "/", "http://localhost").pathname;
   }
 
   #scheduleIdleCheck(): void {
-    if (!this.onIdle || this.idleTimeoutMs <= 0) return;
+    if (this.closing || !this.onIdle || this.idleTimeoutMs <= 0) return;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       const hasIde = this.ideBridge.registry.list().length > 0;
       const hasDebug = this.projects.hasActiveDebugSessions();
-      if (!hasIde && !hasDebug) void Promise.resolve(this.onIdle?.());
+      const hasMcpWork =
+        this.activeMcpRequests > 0 ||
+        this.mcpDispatches.size > 0 ||
+        this.mcpToolCalls.size > 0;
+      if (!hasMcpWork && !hasIde && !hasDebug) void Promise.resolve(this.onIdle?.());
       else this.#scheduleIdleCheck();
     }, this.idleTimeoutMs);
+  }
+
+  #mcpGateway(requestProjectPath?: string): ControlGateway {
+    const gateway = new HubControlGateway(this.projects, requestProjectPath);
+    return {
+      listTools: () => gateway.listTools(),
+      callTool: (name, args) => {
+        const call = gateway.callTool(name, args);
+        this.mcpToolCalls.add(call);
+        void call.then(
+          () => this.#finishMcpToolCall(call),
+          () => this.#finishMcpToolCall(call)
+        );
+        return call;
+      }
+    };
+  }
+
+  #beginMcpResponse(res: ServerResponse): void {
+    this.activeMcpRequests += 1;
+    this.#scheduleIdleCheck();
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      this.activeMcpRequests = Math.max(0, this.activeMcpRequests - 1);
+      this.#scheduleIdleCheck();
+    };
+    res.once("finish", finish);
+    res.once("close", finish);
+  }
+
+  #finishMcpDispatch(dispatch: Promise<void>): void {
+    this.mcpDispatches.delete(dispatch);
+    this.#scheduleIdleCheck();
+  }
+
+  #finishMcpToolCall(call: Promise<ToolResponse>): void {
+    this.mcpToolCalls.delete(call);
+    this.#scheduleIdleCheck();
+  }
+
+  async #close(): Promise<void> {
+    await this.mcpHandler.close().catch(() => undefined);
+    do {
+      await Promise.allSettled([...this.mcpDispatches]);
+      await Promise.allSettled([...this.mcpToolCalls]);
+    } while (this.mcpDispatches.size > 0 || this.mcpToolCalls.size > 0);
+
+    const server = this.server;
+    this.server = null;
+    await closeNodeServer(server).catch(() => undefined);
+    try {
+      this.ideBridge.stop();
+    } catch {
+      // Continue through project cleanup even if the bridge fails to stop.
+    }
+    await this.projects.cleanupAll("hub_shutdown").catch(() => undefined);
+  }
+
+  #url(protocol: "http" | "ws"): string {
+    return `${protocol}://${urlHost(this.host)}:${this.port}`;
   }
 }
 
@@ -239,6 +326,26 @@ function listen(server: Server, port: number, host: string): Promise<number> {
     server.once("listening", onListening);
     server.listen(port, host);
   });
+}
+
+function closeNodeServer(server: Server | null): Promise<void> {
+  if (!server) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function loopbackBindHost(host: string): string {
+  if (host === "[::1]") return "::1";
+  if (host === "127.0.0.1" || host === "localhost" || host === "::1") return host;
+  throw new Error(
+    `BreakPilot Hub requires an exact loopback binding (127.0.0.1, localhost, or ::1); received ${host}.`
+  );
+}
+
+function urlHost(host: string): string {
+  const unwrapped = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return unwrapped.includes(":") ? `[${unwrapped}]` : unwrapped;
 }
 
 export async function startHub(options: HubServerOptions = {}): Promise<HubServerHandle> {

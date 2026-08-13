@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -8,6 +9,11 @@ import { BreakPilotHub, type HubServerHandle } from "../src/hub/HubServer.ts";
 interface JsonRpcResponse {
   error?: { code?: number };
   result?: { tools?: { name?: string }[] };
+}
+
+interface RawHttpResponse {
+  status: number;
+  body: string;
 }
 
 async function connectClient(url: string, modern: boolean): Promise<Client> {
@@ -77,6 +83,35 @@ async function assertJsonRpcError(response: Response, status: number, code: numb
   assert.equal(response.status, status);
   const payload = await response.json() as JsonRpcResponse;
   assert.equal(payload.error?.code, code);
+}
+
+function rawHttpPost(
+  url: string,
+  headers: Record<string, string>,
+  body: string
+): Promise<RawHttpResponse> {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: "POST",
+      headers: {
+        ...headers,
+        "content-length": Buffer.byteLength(body)
+      }
+    }, (response) => {
+      response.setEncoding("utf8");
+      let responseBody = "";
+      response.on("data", (chunk) => {
+        responseBody += chunk;
+      });
+      response.on("end", () => resolve({ status: response.statusCode ?? 0, body: responseBody }));
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
 }
 
 test("/mcp serves modern 2026-07-28 requests without an MCP session", async () => {
@@ -261,6 +296,55 @@ test("missing-version guard preserves the SDK unsupported-revision error", async
       body: JSON.stringify(unsupportedBody)
     }), 400, -32022);
   });
+});
+
+test("MCP routes reject non-local Host and Origin values before dispatch", async () => {
+  await withHub(async (hub, handle) => {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const commonHeaders = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream"
+    };
+
+    const maliciousHost = await rawHttpPost(`${handle.url}/mcp`, {
+      ...commonHeaders,
+      host: "attacker.example"
+    }, body);
+    assert.equal(maliciousHost.status, 403);
+
+    for (const origin of ["https://attacker.example", "null", "not an origin"]) {
+      const response = await rawHttpPost(`${handle.url}/stream`, {
+        ...commonHeaders,
+        host: `127.0.0.1:${handle.port}`,
+        origin
+      }, body);
+      assert.equal(response.status, 403, `expected Origin ${origin} to be rejected`);
+    }
+
+    assert.equal(hub.status().activeMcpRequests, 0);
+  });
+});
+
+test("Hub startup rejects non-loopback binding before listening", async () => {
+  const hub = new BreakPilotHub({ host: "0.0.0.0", port: 0, idleTimeoutMs: 0 });
+  try {
+    await assert.rejects(hub.start(), /loopback/i);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("bracketed IPv6 loopback binds without producing malformed URLs", async () => {
+  const hub = new BreakPilotHub({ host: "[::1]", port: 0, idleTimeoutMs: 0 });
+  const handle = await hub.start();
+  try {
+    assert.equal(handle.host, "::1");
+    assert.match(handle.url, /^http:\/\/\[::1\]:\d+$/);
+    assert.equal(hub.status().mcpUrl, `${handle.url}/mcp`);
+    assert.equal(hub.status().bridgeUrl, `ws://[::1]:${handle.port}/bridge`);
+  } finally {
+    await handle.close();
+  }
 });
 
 test("Hub status advertises stateless MCP endpoints and protocol eras", async () => {
