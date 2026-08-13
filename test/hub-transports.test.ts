@@ -1,63 +1,28 @@
 import assert from "node:assert/strict";
 
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+
 import { BreakPilotHub } from "../src/hub/HubServer.ts";
 import { RuntimeEventBuffer } from "../src/runtime/RuntimeEventBuffer.ts";
 
 const hub = new BreakPilotHub({ port: 0, idleTimeoutMs: 0 });
 const handle = await hub.start();
+const client = new Client({ name: "hub-transports-test", version: "1.0.0" });
 
 try {
-  const init = await fetch(`${handle.url}/stream`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })
-  });
-  assert.equal(init.status, 200);
-  const sessionId = init.headers.get("mcp-session-id");
-  assert.ok(sessionId, "stream initialize should return mcp-session-id");
-  const initBody = await init.json() as { result?: { protocolVersion?: string; serverInfo?: { name?: string } } };
-  assert.equal(initBody.result?.protocolVersion, "2025-11-25");
-  assert.equal(initBody.result?.serverInfo?.name, "breakpilot-debugger");
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${handle.url}/stream`)));
 
-  const list = await fetch(`${handle.url}/stream`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "mcp-session-id": sessionId
-    },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
-  });
-  assert.equal(list.status, 200);
-  const listBody = await list.json() as { result?: { tools?: { name: string }[] } };
-  assert.ok(listBody.result?.tools?.some((tool) => tool.name === "bp_debug_start"));
-  assert.equal(listBody.result?.tools?.some((tool) => tool.name === "debug_launch"), false);
+  const list = await client.listTools();
+  assert.ok(list.tools.some((tool) => tool.name === "bp_debug_start"));
+  assert.equal(list.tools.some((tool) => tool.name === "debug_launch"), false);
 
-  const call = await fetch(`${handle.url}/stream`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "mcp-session-id": sessionId
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 3,
-      method: "tools/call",
-      params: { name: "bp_debug_status", arguments: {} }
-    })
-  });
-  assert.equal(call.status, 200);
-  const callBody = await call.json() as {
-    result?: {
-      content?: { type: string; text: string }[];
-      structuredContent?: { sessions?: unknown[] };
-      isError?: boolean;
-    };
-  };
-  assert.deepEqual(callBody.result?.structuredContent?.sessions, []);
-  assert.equal("ok" in (callBody.result?.structuredContent ?? {}), false);
-  assert.equal("data" in (callBody.result?.structuredContent ?? {}), false);
-  assert.equal(callBody.result?.content?.[0]?.text, "No active debug sessions; IDE disconnected.");
-  assert.equal(callBody.result?.isError, false);
+  const call = await client.callTool({ name: "bp_debug_status", arguments: {} });
+  assert.deepEqual((call.structuredContent as { sessions?: unknown[] }).sessions, []);
+  assert.equal("ok" in (call.structuredContent as Record<string, unknown>), false);
+  assert.equal("data" in (call.structuredContent as Record<string, unknown>), false);
+  assert.equal(call.content[0]?.type, "text");
+  assert.equal(call.content[0]?.type === "text" ? call.content[0].text : undefined, "No active debug sessions; IDE disconnected.");
+  assert.equal(call.isError, false);
 
   const expectedInvalidLineError = {
     code: "INVALID_ARGUMENT",
@@ -75,30 +40,19 @@ try {
   const httpErrorBody = await httpErrorCall.json() as { error?: unknown };
   assert.deepEqual(httpErrorBody.error, expectedInvalidLineError);
 
-  const streamErrorCall = await fetch(`${handle.url}/stream`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "mcp-session-id": sessionId
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 4,
-      method: "tools/call",
-      params: { name: "bp_debug_run_to_line", arguments: { filePath: "src/Hello.java", line: 0 } }
-    })
+  const streamErrorCall = await client.callTool({
+    name: "bp_debug_run_to_line",
+    arguments: { filePath: "src/Hello.java", line: 0 }
   });
-  assert.equal(streamErrorCall.status, 200);
-  const streamErrorBody = await streamErrorCall.json() as {
-    result?: {
-      content?: { type: string; text: string }[];
-      structuredContent?: { error?: unknown };
-      isError?: boolean;
-    };
-  };
-  assert.equal(streamErrorBody.result?.isError, true);
-  assert.equal(streamErrorBody.result?.content?.[0]?.text, expectedInvalidLineError.message);
-  assert.deepEqual(streamErrorBody.result?.structuredContent?.error, expectedInvalidLineError);
+  assert.equal(streamErrorCall.isError, true);
+  assert.equal(
+    streamErrorCall.content[0]?.type === "text" ? streamErrorCall.content[0].text : undefined,
+    expectedInvalidLineError.message
+  );
+  assert.deepEqual(
+    (streamErrorCall.structuredContent as { error?: unknown }).error,
+    expectedInvalidLineError
+  );
 
   const expectedUnknownPropertyError = {
     code: "INVALID_ARGUMENT",
@@ -115,30 +69,21 @@ try {
   const httpUnknownPropertyBody = await httpUnknownPropertyCall.json() as { error?: unknown };
   assert.deepEqual(httpUnknownPropertyBody.error, expectedUnknownPropertyError);
 
-  const streamUnknownPropertyCall = await fetch(`${handle.url}/stream`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "mcp-session-id": sessionId
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 5,
-      method: "tools/call",
-      params: { name: "bp_debug_status", arguments: { typo: true } }
-    })
+  const streamUnknownPropertyCall = await client.callTool({
+    name: "bp_debug_status",
+    arguments: { typo: true }
   });
-  assert.equal(streamUnknownPropertyCall.status, 200);
-  const streamUnknownPropertyBody = await streamUnknownPropertyCall.json() as {
-    result?: {
-      content?: { type: string; text: string }[];
-      structuredContent?: { error?: unknown };
-      isError?: boolean;
-    };
-  };
-  assert.equal(streamUnknownPropertyBody.result?.isError, true);
-  assert.equal(streamUnknownPropertyBody.result?.content?.[0]?.text, expectedUnknownPropertyError.message);
-  assert.deepEqual(streamUnknownPropertyBody.result?.structuredContent?.error, expectedUnknownPropertyError);
+  assert.equal(streamUnknownPropertyCall.isError, true);
+  assert.equal(
+    streamUnknownPropertyCall.content[0]?.type === "text"
+      ? streamUnknownPropertyCall.content[0].text
+      : undefined,
+    expectedUnknownPropertyError.message
+  );
+  assert.deepEqual(
+    (streamUnknownPropertyCall.structuredContent as { error?: unknown }).error,
+    expectedUnknownPropertyError
+  );
 
   hub.projects.getOrCreate().manager.bpDebugStatus = async () => ({
     sessions: "invalid",
@@ -160,31 +105,16 @@ try {
   const httpMalformedOutputBody = await httpMalformedOutputCall.json() as { error?: unknown };
   assert.deepEqual(httpMalformedOutputBody.error, expectedOutputContractError);
 
-  const streamMalformedOutputCall = await fetch(`${handle.url}/stream`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "mcp-session-id": sessionId
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 6,
-      method: "tools/call",
-      params: { name: "bp_debug_status", arguments: {} }
-    })
-  });
-  assert.equal(streamMalformedOutputCall.status, 200);
-  const streamMalformedOutputBody = await streamMalformedOutputCall.json() as {
-    result?: {
-      content?: { type: string; text: string }[];
-      structuredContent?: { error?: unknown };
-      isError?: boolean;
-    };
-  };
-  assert.equal(streamMalformedOutputBody.result?.isError, true);
-  assert.equal(streamMalformedOutputBody.result?.content?.[0]?.text, expectedOutputContractError.message);
+  const streamMalformedOutputCall = await client.callTool({ name: "bp_debug_status", arguments: {} });
+  assert.equal(streamMalformedOutputCall.isError, true);
+  assert.equal(
+    streamMalformedOutputCall.content[0]?.type === "text"
+      ? streamMalformedOutputCall.content[0].text
+      : undefined,
+    expectedOutputContractError.message
+  );
   assert.deepEqual(
-    streamMalformedOutputBody.result?.structuredContent?.error,
+    (streamMalformedOutputCall.structuredContent as { error?: unknown }).error,
     expectedOutputContractError
   );
 
@@ -222,14 +152,8 @@ try {
   }]);
 
   const sse = await fetch(`${handle.url}/sse`);
-  assert.equal(sse.status, 200);
-  const reader = sse.body?.getReader();
-  assert.ok(reader, "SSE response should expose a body reader");
-  const first = await reader.read();
-  const text = new TextDecoder().decode(first.value);
-  assert.match(text, /event: endpoint/);
-  assert.match(text, /\/message\?sessionId=/);
-  await reader.cancel();
+  assert.equal(sse.status, 404);
+  assert.equal((await fetch(`${handle.url}/message`, { method: "POST" })).status, 404);
 
   hub.projects.registerProject("/tmp/breakpilot-project-a");
   hub.projects.registerProject("/tmp/breakpilot-project-b");
@@ -299,6 +223,7 @@ try {
   });
   assert.equal(ambiguousArchivedDrain.error?.code, "SESSION_AMBIGUOUS");
 } finally {
+  await client.close();
   await handle.close();
 }
 

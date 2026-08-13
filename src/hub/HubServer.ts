@@ -3,35 +3,21 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { URL } from "node:url";
 
+import { createMcpHandler, type McpHttpHandler } from "@modelcontextprotocol/server";
+import { toNodeHandler, type NodeMcpRequestHandler } from "@modelcontextprotocol/node";
+
+import { createBreakPilotMcpServer } from "../mcp/serverFactory.ts";
 import { IdeBridgeServer } from "../ide/IdeBridgeServer.ts";
 import { IdeMessageTypes } from "../ide/IdeProtocol.ts";
 import type { ToolDefinition, ToolResponse } from "../types/control.ts";
 import type { AnyRecord } from "../types/json.ts";
-import { fail, ok, toolResponseHttpStatus } from "../utils/errors.ts";
-import { summarizeToolResult } from "../control/ToolTextSummary.ts";
-import { McpSessionRegistry, type McpSessionRecord } from "./McpSessionRegistry.ts";
+import { ok, toolResponseHttpStatus } from "../utils/errors.ts";
+import { HubControlGateway } from "./HubControlGateway.ts";
 import { ProjectRuntimeRegistry } from "./ProjectRuntimeRegistry.ts";
 
 export const DEFAULT_HUB_HOST = "127.0.0.1";
 export const DEFAULT_HUB_PORT = 57987;
 export const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
-export const MCP_PROTOCOL_VERSION = "2025-11-25";
-
-interface JsonRpcMessage {
-  jsonrpc?: "2.0";
-  id?: string | number | null;
-  method?: string;
-  params?: AnyRecord;
-}
-
-function toolCallResult(name: string, result: ToolResponse): AnyRecord {
-  const isError = Boolean(result.error);
-  return {
-    content: [{ type: "text", text: summarizeToolResult(name, result as AnyRecord) }],
-    structuredContent: result,
-    isError
-  };
-}
 
 export interface HubServerOptions {
   host?: string;
@@ -57,9 +43,11 @@ export class BreakPilotHub {
   onIdle?: () => void | Promise<void>;
   ideBridge: IdeBridgeServer;
   projects: ProjectRuntimeRegistry;
-  mcpSessions: McpSessionRegistry;
+  activeMcpRequests: number;
   server: Server | null;
   idleTimer: NodeJS.Timeout | null;
+  private readonly mcpHandler: McpHttpHandler;
+  private readonly mcpNodeHandler: NodeMcpRequestHandler;
 
   constructor(options: HubServerOptions = {}) {
     this.host = options.host ?? DEFAULT_HUB_HOST;
@@ -76,7 +64,14 @@ export class BreakPilotHub {
       defaultProjectPath: options.defaultProjectPath,
       ideBridge: this.ideBridge
     });
-    this.mcpSessions = new McpSessionRegistry();
+    this.activeMcpRequests = 0;
+    this.mcpHandler = requireModernProtocolVersionHeader(createMcpHandler(
+      ({ requestInfo }) => createBreakPilotMcpServer(
+        new HubControlGateway(this.projects, projectHintFromRequest(requestInfo))
+      ),
+      { legacy: "stateless", responseMode: "auto" }
+    ));
+    this.mcpNodeHandler = toNodeHandler(this.mcpHandler);
     this.server = null;
     this.idleTimer = null;
     this.ideBridge.on(IdeMessageTypes.IDE_REGISTER, ({ message }: { message: AnyRecord }) => {
@@ -115,7 +110,7 @@ export class BreakPilotHub {
   async close(): Promise<void> {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
-    for (const session of this.mcpSessions.list()) this.mcpSessions.remove(session.sessionId);
+    await this.mcpHandler.close().catch(() => undefined);
     this.ideBridge.stop();
     await this.projects.cleanupAll("hub_shutdown").catch(() => undefined);
     const server = this.server;
@@ -127,16 +122,12 @@ export class BreakPilotHub {
   }
 
   listTools(): ToolDefinition[] {
-    return this.projects.getOrCreate().router.listTools();
+    return new HubControlGateway(this.projects).listTools();
   }
 
-  async callTool(name: string, args: AnyRecord = {}, mcpSession?: McpSessionRecord): Promise<ToolResponse> {
+  async callTool(name: string, args: AnyRecord = {}): Promise<ToolResponse> {
     try {
-      const runtime = this.projects.resolveRuntime(args, mcpSession?.projectPath);
-      const routedArgs = args.projectPath ? args : { ...args, projectPath: runtime.policy.workspace.root };
-      return await runtime.router.callTool(name, routedArgs);
-    } catch (error) {
-      return fail(error, "hub");
+      return await new HubControlGateway(this.projects).callTool(name, args);
     } finally {
       this.#scheduleIdleCheck();
     }
@@ -147,11 +138,16 @@ export class BreakPilotHub {
       server: "breakpilot-hub",
       host: this.host,
       port: this.port,
+      mcpUrl: `http://${this.host}:${this.port}/mcp`,
       streamUrl: `http://${this.host}:${this.port}/stream`,
-      sseUrl: `http://${this.host}:${this.port}/sse`,
+      mcpTransport: "stateless",
+      mcpProtocolVersions: {
+        modern: "2026-07-28",
+        legacy: { min: "2024-10-07", max: "2025-11-25", mode: "stateless" }
+      },
+      activeMcpRequests: this.activeMcpRequests,
       bridgeUrl: `ws://${this.host}:${this.port}/bridge`,
       projects: this.projects.listProjects(),
-      mcpSessions: this.mcpSessions.list(),
       ideBridge: this.ideBridge.status()
     };
   }
@@ -180,16 +176,8 @@ export class BreakPilotHub {
         sendJson(res, toolResponseHttpStatus(result), result);
         return;
       }
-      if (pathname === "/stream") {
-        await this.#handleStream(req, res);
-        return;
-      }
-      if (pathname === "/sse" && req.method === "GET") {
-        this.#openLegacySse(req, res);
-        return;
-      }
-      if (pathname === "/message" && req.method === "POST") {
-        await this.#handleLegacyMessage(req, res);
+      if (pathname === "/mcp" || pathname === "/stream") {
+        await this.mcpNodeHandler(req, res);
         return;
       }
       sendJson(res, 404, { error: { message: "Not found" } });
@@ -197,121 +185,6 @@ export class BreakPilotHub {
       const typedError = error as Error;
       sendJson(res, 500, { error: { message: typedError.message } });
     }
-  }
-
-  async #handleStream(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const sessionId = header(req, "mcp-session-id");
-    if (req.method === "GET") {
-      const session = this.mcpSessions.require(sessionId);
-      this.#openSseResponse(res, session);
-      return;
-    }
-    if (req.method === "DELETE") {
-      this.mcpSessions.remove(sessionId);
-      sendJson(res, 200, { closed: true });
-      this.#scheduleIdleCheck();
-      return;
-    }
-    if (req.method !== "POST") {
-      sendJson(res, 405, { error: { message: "Method not allowed" } });
-      return;
-    }
-    const message = JSON.parse((await readRequestBody(req)) || "{}") as JsonRpcMessage;
-    let session = this.mcpSessions.get(sessionId);
-    if (!session) {
-      if (message.method !== "initialize") {
-        sendJson(res, 400, { error: "Missing mcp-session-id." });
-        return;
-      }
-      session = this.mcpSessions.create("stream", this.#projectPathFromRequest(req));
-    }
-    const response = await this.#handleJsonRpc(message, session);
-    res.writeHead(response ? 200 : 202, {
-      "content-type": "application/json",
-      "mcp-session-id": session.sessionId,
-      "mcp-protocol-version": MCP_PROTOCOL_VERSION
-    });
-    res.end(response ? JSON.stringify(response) : "{}");
-  }
-
-  #openLegacySse(req: IncomingMessage, res: ServerResponse): void {
-    const session = this.mcpSessions.create("sse", this.#projectPathFromRequest(req));
-    this.#openSseResponse(res, session);
-    writeSse(res, "endpoint", `/message?sessionId=${encodeURIComponent(session.sessionId)}`);
-  }
-
-  async #handleLegacyMessage(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
-    const session = this.mcpSessions.require(url.searchParams.get("sessionId") ?? undefined);
-    const message = JSON.parse((await readRequestBody(req)) || "{}") as JsonRpcMessage;
-    const response = await this.#handleJsonRpc(message, session);
-    if (response && session.response && !session.response.destroyed) {
-      writeSse(session.response, "message", JSON.stringify(response));
-    }
-    sendJson(res, 202, { accepted: true });
-  }
-
-  #openSseResponse(res: ServerResponse, session: McpSessionRecord): void {
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-      "mcp-session-id": session.sessionId,
-      "mcp-protocol-version": MCP_PROTOCOL_VERSION
-    });
-    this.mcpSessions.setResponse(session.sessionId, res);
-    const heartbeat = setInterval(() => {
-      if (res.destroyed) {
-        clearInterval(heartbeat);
-        return;
-      }
-      res.write(": keepalive\n\n");
-    }, 15000);
-    res.on("close", () => {
-      clearInterval(heartbeat);
-      this.mcpSessions.remove(session.sessionId);
-      this.#scheduleIdleCheck();
-    });
-  }
-
-  async #handleJsonRpc(message: JsonRpcMessage, session: McpSessionRecord): Promise<AnyRecord | null> {
-    if (!message.id && message.method?.startsWith("notifications/")) return null;
-    try {
-      const result = await this.#jsonRpcResult(message, session);
-      return { jsonrpc: "2.0", id: message.id ?? null, result };
-    } catch (error) {
-      const typedError = error as Error;
-      return {
-        jsonrpc: "2.0",
-        id: message.id ?? null,
-        error: { code: -32603, message: typedError.message }
-      };
-    }
-  }
-
-  async #jsonRpcResult(message: JsonRpcMessage, session: McpSessionRecord): Promise<AnyRecord> {
-    if (message.method === "initialize") {
-      return {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: { tools: {} },
-        serverInfo: { name: "breakpilot-debugger", version: "0.1.0" }
-      };
-    }
-    if (message.method === "tools/list") return { tools: this.listTools() };
-    if (message.method === "tools/call") {
-      const { name, arguments: args } = message.params ?? {};
-      const result = await this.callTool(String(name), (args as AnyRecord | undefined) ?? {}, session);
-      return toolCallResult(String(name), result);
-    }
-    if (message.method === "ping") return {};
-    throw new Error(`Unsupported JSON-RPC method: ${String(message.method)}`);
-  }
-
-  #projectPathFromRequest(req: IncomingMessage): string | undefined {
-    const headerValue = header(req, "x-breakpilot-project");
-    if (headerValue) return headerValue;
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
-    return url.searchParams.get("projectPath") ?? undefined;
   }
 
   #pathname(req: IncomingMessage): string {
@@ -322,11 +195,9 @@ export class BreakPilotHub {
     if (!this.onIdle || this.idleTimeoutMs <= 0) return;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      this.mcpSessions.pruneIdle(Date.now(), this.idleTimeoutMs);
-      const hasMcp = this.mcpSessions.activeCount() > 0;
       const hasIde = this.ideBridge.registry.list().length > 0;
       const hasDebug = this.projects.hasActiveDebugSessions();
-      if (!hasMcp && !hasIde && !hasDebug) void Promise.resolve(this.onIdle?.());
+      if (!hasIde && !hasDebug) void Promise.resolve(this.onIdle?.());
       else this.#scheduleIdleCheck();
     }, this.idleTimeoutMs);
   }
@@ -349,16 +220,6 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload));
 }
 
-function writeSse(res: ServerResponse, event: string, data: string): void {
-  res.write(`event: ${event}\n`);
-  res.write(`data: ${data}\n\n`);
-}
-
-function header(req: IncomingMessage, name: string): string | undefined {
-  const value = req.headers[name.toLowerCase()];
-  return Array.isArray(value) ? value[0] : value;
-}
-
 function listen(server: Server, port: number, host: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const onError = (error: Error): void => {
@@ -379,4 +240,67 @@ function listen(server: Server, port: number, host: string): Promise<number> {
 export async function startHub(options: HubServerOptions = {}): Promise<HubServerHandle> {
   const hub = new BreakPilotHub(options);
   return hub.start();
+}
+
+function projectHintFromRequest(request?: Request): string | undefined {
+  const fromHeader = request?.headers.get("x-breakpilot-project")?.trim();
+  if (fromHeader) return fromHeader;
+  const fromQuery = request ? new URL(request.url).searchParams.get("projectPath")?.trim() : undefined;
+  return fromQuery || undefined;
+}
+
+function requireModernProtocolVersionHeader(handler: McpHttpHandler): McpHttpHandler {
+  return {
+    ...handler,
+    fetch: async (request, options) => {
+      const rejection = await missingModernProtocolVersionResponse(request, options?.parsedBody);
+      return rejection ?? handler.fetch(request, options);
+    }
+  };
+}
+
+async function missingModernProtocolVersionResponse(
+  request: Request,
+  parsedBody?: unknown
+): Promise<Response | undefined> {
+  if (
+    request.method.toUpperCase() !== "POST" ||
+    request.headers.has("mcp-protocol-version") ||
+    request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+  ) {
+    return undefined;
+  }
+
+  let body = parsedBody;
+  if (body === undefined) {
+    try {
+      body = await request.clone().json();
+    } catch {
+      return undefined;
+    }
+  }
+  if (!hasModernEnvelopeClaim(body)) return undefined;
+
+  const message = body as { id?: unknown; params?: { _meta?: Record<string, unknown> } };
+  const claimedVersion = message.params?._meta?.["io.modelcontextprotocol/protocolVersion"];
+  const id = typeof message.id === "string" || typeof message.id === "number" ? message.id : null;
+  const bodyDescription = `the body envelope names protocol version ${String(claimedVersion)} but the required MCP-Protocol-Version header is absent`;
+  return Response.json({
+    jsonrpc: "2.0",
+    error: {
+      code: -32020,
+      message: `Bad Request: the request headers and body disagree: ${bodyDescription}`,
+      data: { mismatch: { header: "(missing)", body: bodyDescription } }
+    },
+    id
+  }, { status: 400 });
+}
+
+function hasModernEnvelopeClaim(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const params = (body as { params?: unknown }).params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return false;
+  const meta = (params as { _meta?: unknown })._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
+  return Object.hasOwn(meta, "io.modelcontextprotocol/protocolVersion");
 }
